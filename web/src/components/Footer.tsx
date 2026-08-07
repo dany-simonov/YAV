@@ -1,87 +1,13 @@
 import { Link } from 'react-router-dom';
-
 const CONTACT_EMAIL = 'istochnik-media@yandex.com';
-
-export function Footer() {
-  return (
-    <footer className="mt-20 py-12 bg-mv-surface border-t border-mv-border">
-      <div className="container">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
-          {/* Logo & Description */}
-          <div className="md:col-span-1">
-            <Link to="/" className="flex items-center gap-3 mb-4">
-              <img src="/assets/img/logo.png" alt="" className="w-8 h-8" />
-              <span className="font-semibold text-mv-text">Источник</span>
-            </Link>
-            <p className="text-sm text-mv-text-secondary leading-relaxed">
-              Система верификации медиа на основе ИИ
-            </p>
-            <a
-              href={`mailto:${CONTACT_EMAIL}`}
-              className="mt-4 inline-block text-sm text-mv-accent hover:underline"
-            >
-              {CONTACT_EMAIL}
-            </a>
-          </div>
-
-          {/* Navigation */}
-          <div>
-            <h4 className="font-semibold text-mv-text mb-4">Навигация</h4>
-            <nav className="flex flex-col gap-2">
-              <Link to="/#features" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                Возможности
-              </Link>
-              <Link to="/#pricing" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                Тарифы
-              </Link>
-              <Link to="/faq" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                FAQ
-              </Link>
-              <Link to="/history" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                История продукта
-              </Link>
-            </nav>
-          </div>
-
-          {/* Documentation */}
-          <div>
-            <h4 className="font-semibold text-mv-text mb-4">Документы</h4>
-            <nav className="flex flex-col gap-2">
-              <Link to="/about" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                О проекте
-              </Link>
-              <Link to="/docs" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                API Docs
-              </Link>
-              <Link to="/privacy" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                Политика конфиденциальности
-              </Link>
-              <Link to="/terms" className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors">
-                Условия использования
-              </Link>
-            </nav>
-          </div>
-
-          {/* Contact */}
-          <div>
-            <h4 className="font-semibold text-mv-text mb-4">Связаться</h4>
-            <nav className="flex flex-col gap-2">
-              <a
-                href={`mailto:${CONTACT_EMAIL}`}
-                className="text-sm text-mv-text-secondary hover:text-mv-accent transition-colors"
-              >
-                Написать на почту
-              </a>
-            </nav>
-          </div>
-        </div>
-
-        <hr className="border-mv-border mb-6" />
-
-        <div className="text-center text-sm text-mv-text-muted">
-          © 2026 Источник. Все права защищены.
-        </div>
-      </div>
-    </footer>
-  );
-}
+const columns = [
+  { title:'Продукт', links:[['Возможности','/#features'],['Как это работает','/#process'],['Новая проверка','/dashboard/check']] },
+  { title:'Ресурсы', links:[['Документация','/docs'],['Вопросы и ответы','/faq'],['История продукта','/history']] },
+  { title:'Правовая информация', links:[['Конфиденциальность','/privacy'],['Условия использования','/terms'],['О проекте','/about']] },
+];
+export function Footer(){return <footer className="border-t border-black/[.07] pt-16 pb-8 bg-[#f7f7f6]">
+  <div className="container"><div className="grid md:grid-cols-[1.5fr_2.5fr] gap-14 pb-16">
+    <div><Link to="/" className="flex items-center gap-2.5 mb-5"><span className="w-8 h-8 rounded-[9px] bg-black flex items-center justify-center"><img src="/assets/img/logo.png" alt="" className="w-6 h-6 brightness-0 invert"/></span><b>Источник</b></Link><p className="text-sm text-mv-text-secondary max-w-[270px] leading-6">Проверка происхождения цифрового контента с понятными выводами и честными ограничениями.</p></div>
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-8">{columns.map(c=><div key={c.title}><h4 className="text-xs font-semibold mb-4">{c.title}</h4><nav className="flex flex-col gap-3">{c.links.map(([l,t])=><Link key={l} to={t} className="text-sm text-mv-text-secondary hover:text-black">{l}</Link>)}</nav></div>)}</div>
+  </div><div className="border-t border-black/[.06] pt-6 flex flex-col sm:flex-row justify-between gap-3 text-xs text-mv-text-muted"><span>© 2026 Источник. Все права защищены.</span><a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></div></div>
+  </footer>}

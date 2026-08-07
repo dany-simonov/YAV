@@ -14,8 +14,8 @@ export interface CardProps extends HTMLAttributes<HTMLDivElement> {
 
 const variantClasses = {
   default: 'bg-mv-surface border border-mv-border',
-  elevated: 'bg-mv-surface border border-mv-border shadow-lg shadow-black/20',
-  outlined: 'bg-transparent border-2 border-mv-border',
+  elevated: 'bg-mv-surface border border-mv-border shadow-[0_1px_2px_rgba(0,0,0,.05),0_16px_40px_rgba(0,0,0,.07)]',
+  outlined: 'bg-transparent border border-mv-border',
 };
 
 const paddingClasses = {

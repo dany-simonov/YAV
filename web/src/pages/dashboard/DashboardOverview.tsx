@@ -117,19 +117,19 @@ export function DashboardOverview() {
         </Card>
 
         {/* Plan */}
-        <Card className="bg-gradient-to-br from-mv-accent/10 to-teal-500/10 border-mv-accent/20">
+        <Card className="bg-[#111] border-black text-white">
           <div className="flex items-start justify-between">
             <div>
-              <p className="text-sm text-mv-text-secondary">Ваш план</p>
-              <p className="text-xl font-bold text-mv-accent mt-1">Free</p>
+              <p className="text-sm text-white/55">Ваш план</p>
+              <p className="text-xl font-bold text-white mt-1">Free</p>
             </div>
-            <div className="w-10 h-10 rounded-lg bg-mv-accent/20 flex items-center justify-center">
-              <Clock className="w-5 h-5 text-mv-accent" />
+            <div className="w-10 h-10 rounded-lg bg-white/10 flex items-center justify-center">
+              <Clock className="w-5 h-5 text-white" />
             </div>
           </div>
           <Link
             to="/dashboard/api"
-            className="mt-4 text-sm text-mv-accent font-medium flex items-center gap-1 hover:underline"
+            className="mt-4 text-sm text-white/70 font-medium flex items-center gap-1 hover:text-white"
           >
             Увеличить лимит
             <ArrowRight className="w-4 h-4" />
@@ -187,7 +187,7 @@ export function DashboardOverview() {
       </Card>
 
       {/* Big Text Check Callout */}
-      <Card className="border-mv-accent/30 bg-gradient-to-br from-mv-accent/10 to-teal-500/10">
+      <Card className="border-mv-border bg-white">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div className="flex items-start gap-4">
             <div className="w-12 h-12 rounded-xl bg-mv-accent/20 flex items-center justify-center">

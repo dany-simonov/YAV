@@ -65,7 +65,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
     <Card variant="elevated" padding="lg" className="w-full max-w-md mx-auto">
       {/* Header */}
       <div className="text-center mb-8">
-        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-mv-accent to-teal-400 flex items-center justify-center">
+        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-black flex items-center justify-center">
           <LogIn className="w-8 h-8 text-white" />
         </div>
         <h1 className="text-2xl font-bold text-mv-text">Вход в Источник</h1>

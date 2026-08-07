@@ -1,153 +1,49 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { FeatureCard, PricingCard, BigCheck } from '../components';
-import { Image, AudioWaveform, FileText, Layers } from 'lucide-react';
+import { ArrowRight, ChevronDown, FileUp, ScanSearch, ShieldCheck } from 'lucide-react';
 
-const CONTACT_EMAIL = 'istochnik-media@yandex.com';
+const StatusDot=({tone='amber'}:{tone?:'amber'|'green'|'red'})=><span className={`w-2 h-2 rounded-full ${tone==='green'?'bg-mv-real':tone==='red'?'bg-mv-fake':'bg-mv-uncertain'}`}/>;
 
-const features = [
-  {
-    icon: <Image />,
-    title: 'Фото',
-    description: 'Детекция AI-генерации\nSightengine genai, точность 94.4%',
-  },
-  {
-    icon: <AudioWaveform />,
-    title: 'Аудио',
-    description: 'Синтетическая речь и voice cloning\nResemble Detect, точность 99.5%',
-  },
-  {
-    icon: <FileText />,
-    title: 'Текст',
-    description: 'Написан ли ChatGPT?\nSapling AI, точность 98%',
-  },
-  {
-    icon: <Layers />,
-    title: 'Большая проверка',
-    description: 'Двойная проверка текста: детекция ИИ + фактчек/заимствования с пословной подсветкой',
-  },
-];
-
-const pricingPlans = [
-  {
-    name: 'FREE',
-    price: '0 ₽',
-    features: ['3 проверки/день', 'Все форматы', 'Базовый вердикт'],
-    buttonText: 'Начать бесплатно',
-    buttonLink: '/register',
-    highlighted: true,
-  },
-  {
-    name: 'PREMIUM',
-    price: '199 ₽/мес',
-    features: [
-      '100 проверок/мес',
-      'Приоритетная обработка',
-      'История 30 дней',
-      'Экспорт отчётов PDF',
-      'Поделиться результатом',
-    ],
-    buttonText: '🔔 Встать в лист ожидания',
-    buttonLink: `mailto:${CONTACT_EMAIL}?subject=%D0%92%D1%81%D1%82%D0%B0%D1%82%D1%8C%20%D0%B2%20%D0%BB%D0%B8%D1%81%D1%82%20%D0%BE%D0%B6%D0%B8%D0%B4%D0%B0%D0%BD%D0%B8%D1%8F`,
-    badge: 'СКОРО',
-  },
-  {
-    name: 'ENTERPRISE',
-    price: 'По запросу',
-    features: [
-      'REST API доступ',
-      'Безлимитные проверки',
-      'SLA и поддержка',
-      'Для СМИ, пабликов и форумов',
-      'Кастомные модели',
-    ],
-    buttonText: '💼 Связаться',
-    buttonLink: `mailto:${CONTACT_EMAIL}?subject=Enterprise%20inquiry`,
-    badge: 'B2B',
-  },
-];
-
-export function Home() {
-  return (
-    <div className="pt-16">
-      {/* Hero */}
-      <section className="py-20 md:py-32">
-        <div className="container text-center">
-          <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold text-mv-text leading-tight mb-6">
-            Проверяй подлинность медиа<br />за секунды
-          </h1>
-          <p className="text-lg md:text-xl text-mv-text-secondary max-w-2xl mx-auto mb-8">
-            Система верификации фото, видео, аудио и текста<br />
-            на основе специализированных моделей ИИ
-          </p>
-          <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-            <Link
-              to="/register"
-              className="px-8 py-3 bg-mv-accent text-white rounded-lg font-semibold hover:bg-mv-accent-hover transition-colors"
-            >
-              Попробовать бесплатно
-            </Link>
-            <a
-              href="#bigcheck"
-              className="px-8 py-3 bg-mv-surface border border-mv-border text-mv-text rounded-lg font-semibold hover:border-mv-accent transition-colors"
-            >
-              Смотреть демо
-            </a>
-          </div>
-          
-          {/* Stats */}
-          <div className="grid grid-cols-3 gap-6 max-w-lg mx-auto">
-            <div>
-              <div className="text-3xl font-bold text-mv-accent">94.4%</div>
-              <div className="text-sm text-mv-text-secondary">Точность фото</div>
-            </div>
-            <div>
-              <div className="text-3xl font-bold text-mv-accent">99.5%</div>
-              <div className="text-sm text-mv-text-secondary">Точность аудио</div>
-            </div>
-            <div>
-              <div className="text-3xl font-bold text-mv-accent">81%</div>
-              <div className="text-sm text-mv-text-secondary">Точность видео</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Features */}
-      <section id="features" className="py-16 bg-mv-surface/50">
-        <div className="mx-auto max-w-[1400px] px-6 md:px-8">
-          <h2 className="text-3xl font-bold text-mv-text text-center mb-12">Возможности</h2>
-          <div className="flex gap-5 overflow-x-auto px-2 pt-2 pb-3 md:px-3 snap-x snap-mandatory scroll-smooth [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
-            {features.map((feature, index) => (
-              <div key={index} className="w-[290px] md:w-[300px] lg:w-[320px] snap-start flex-shrink-0">
-                <FeatureCard {...feature} />
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Big Check */}
-      <section id="bigcheck" className="py-16">
-        <div className="container">
-          <h2 className="text-3xl font-bold text-mv-text text-center mb-12">Попробуй прямо сейчас</h2>
-          <div className="max-w-3xl mx-auto">
-            <BigCheck />
-          </div>
-        </div>
-      </section>
-
-      {/* Pricing */}
-      <section id="pricing" className="py-16 bg-mv-surface/50">
-        <div className="container">
-          <h2 className="text-3xl font-bold text-mv-text text-center mb-12">Тарифы</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto">
-            {pricingPlans.map((plan, index) => (
-              <PricingCard key={index} {...plan} />
-            ))}
-          </div>
-        </div>
-      </section>
-
+function ProductPreview(){return <div className="soft-card rounded-[22px] p-3 sm:p-5 relative">
+  <div className="h-8 flex items-center gap-1.5 border-b border-black/[.06] mb-4"><i className="w-1.5 h-1.5 rounded-full bg-black/20"/><i className="w-1.5 h-1.5 rounded-full bg-black/10"/><span className="ml-auto text-[10px] text-mv-text-muted uppercase tracking-wider">Отчёт / 2026</span></div>
+  <div className="grid sm:grid-cols-[1.08fr_.92fr] gap-4">
+    <div className="min-h-[295px] rounded-[14px] bg-[#11151a] relative overflow-hidden p-5">
+      <div className="absolute inset-0 opacity-20" style={{backgroundImage:'linear-gradient(rgba(90,150,220,.3) 1px,transparent 1px),linear-gradient(90deg,rgba(90,150,220,.3) 1px,transparent 1px)',backgroundSize:'36px 36px'}}/>
+      <div className="absolute left-[18%] top-[20%] w-[52%] h-[48%] border border-blue-400/50"><span className="absolute -top-4 left-0 text-[8px] text-blue-300">AREA 01</span></div>
+      <div className="absolute right-[12%] bottom-[16%] w-[22%] h-[24%] border border-blue-300/30"/>
+      <div className="relative mt-auto h-full flex items-end"><span className="text-[10px] text-white/45 uppercase tracking-wider">Обнаружено 2 области</span></div>
     </div>
-  );
-}
+    <div className="p-2 sm:p-3 flex flex-col"><p className="eyebrow mb-4">Общий вывод</p><div className="flex items-center gap-2 text-sm text-mv-uncertain"><StatusDot/>Требуется проверка</div><div className="text-[52px] leading-none tracking-[-.06em] font-semibold mt-3 mb-7">76<span className="text-2xl text-mv-text-muted">%</span></div>
+      <div className="space-y-4 text-xs"><div><div className="flex justify-between mb-2"><span>AI-генерация</span><span>24%</span></div><div className="h-1 bg-black/[.06] rounded-full"><div className="h-full w-[24%] bg-mv-uncertain rounded-full"/></div></div>
+      <div className="flex justify-between border-t border-black/[.06] pt-3"><span className="text-mv-text-secondary">Метаданные</span><span className="flex items-center gap-2"><StatusDot tone="green"/>Сохранены</span></div><div className="flex justify-between border-t border-black/[.06] pt-3"><span className="text-mv-text-secondary">Редактирование</span><span className="flex items-center gap-2"><StatusDot/>Есть следы</span></div></div>
+      <button className="btn-light !min-h-[40px] mt-auto">Открыть отчёт</button></div>
+  </div></div>}
+
+const process=[['01','Загрузите материал','Выберите изображение, аудио, видео или вставьте текст.'],['02','Система проверит признаки','Модели сопоставят структуру, метаданные и следы генерации.'],['03','Получите понятный отчёт','Вывод, доказательства и ограничения — в одном документе.']];
+const faqs=[['Какие форматы поддерживаются?','Изображения, аудио, видео и текст. Точный список форматов и лимиты показываются перед загрузкой.'],['Как долго выполняется проверка?','Обычно несколько секунд. Для больших видео и сложного анализа может потребоваться больше времени.'],['Сохраняются ли загруженные файлы?','Файл удаляется из временного хранилища после анализа. В истории сохраняется только результат проверки.'],['Может ли система ошибаться?','Да. Анализ вероятностный, поэтому отчёт показывает уверенность модели и ограничения результата.'],['Что означает уровень уверенности?','Это оценка надёжности вывода модели, а не абсолютное доказательство происхождения файла.'],['Можно ли использовать отчёт в работе?','Да, как вспомогательный материал для редакционной, образовательной и аналитической работы.']];
+
+export function Home(){const [open,setOpen]=useState(0);return <div className="pt-[90px] overflow-hidden">
+  <section className="grid-texture border-b border-black/[.055]"><div className="container py-20 lg:py-28 grid lg:grid-cols-[.88fr_1.12fr] items-center gap-14 lg:gap-20">
+    <div><p className="eyebrow mb-7">Проверка подлинности цифрового контента</p><h1 className="display-title">Проверяйте<br/>подлинность<br/>медиа за<br/>секунды</h1><p className="mt-7 text-[17px] leading-7 text-mv-text-secondary max-w-[470px]">Поймите, был ли материал создан или изменён с помощью ИИ. Получите ясный вывод, признаки и степень уверенности.</p><div className="flex flex-col sm:flex-row gap-3 mt-9"><Link to="/dashboard/check" className="btn-black">Проверить медиа <ArrowRight size={16}/></Link><a href="#report" className="btn-light">Посмотреть пример отчёта</a></div><p className="mt-6 text-[11px] text-mv-text-muted tracking-wide">Изображения · Видео · Аудио · Текст · AI-анализ</p></div>
+    <ProductPreview/>
+  </div></section>
+
+  <section id="audience" className="container py-9 border-b border-black/[.07] flex flex-col lg:flex-row justify-between gap-6 text-xs text-mv-text-secondary"><p className="max-w-[340px]">Создано для команд, которым важно подтверждать происхождение контента</p><div className="grid grid-cols-2 sm:flex gap-x-8 gap-y-3 text-black"><span>Журналистика</span><span>Фактчекинг</span><span>Образование</span><span>Информационная безопасность</span></div></section>
+
+  <section id="process" className="container section-space"><div className="grid md:grid-cols-2 gap-8 mb-14"><h2 className="section-title">От файла до<br/>понятного вывода</h2><p className="text-mv-text-secondary leading-7 max-w-md md:ml-auto">Не нужно разбираться в моделях и метриках. Система проводит анализ и переводит технические сигналы на понятный язык.</p></div><div className="grid md:grid-cols-3 gap-5">{process.map((p,i)=><article key={p[0]} className="bg-white border border-black/[.08] rounded-2xl p-6 min-h-[300px] flex flex-col"><span className="eyebrow">{p[0]}</span><div className="my-auto h-24 flex items-center">{i===0?<FileUp size={34} strokeWidth={1.3}/>:i===1?<ScanSearch size={36} strokeWidth={1.3}/>:<ShieldCheck size={36} strokeWidth={1.3}/>}</div><h3 className="font-semibold text-lg mb-2">{p[1]}</h3><p className="text-sm leading-6 text-mv-text-secondary">{p[2]}</p></article>)}</div></section>
+
+  <section id="features" className="container pb-20 lg:pb-32"><div className="grid md:grid-cols-2 gap-8 mb-14"><h2 className="section-title">Каждый вывод<br/>можно объяснить</h2><p className="text-mv-text-secondary leading-7 max-w-md md:ml-auto">Результат опирается на наблюдаемые признаки. Вы видите, что именно повлияло на оценку и где остаётся неопределённость.</p></div><div className="soft-card p-4 lg:p-6 grid lg:grid-cols-[1.1fr_.9fr] gap-7">
+    <div className="min-h-[420px] rounded-[15px] bg-[#11151a] relative overflow-hidden grid-texture"><div className="absolute left-[20%] top-[18%] w-[48%] h-[58%] border border-blue-400/50"/><div className="absolute right-[12%] bottom-[14%] w-[18%] h-[28%] border border-blue-400/30"/></div>
+    <div className="p-3 lg:p-8 flex flex-col"><p className="eyebrow mb-6">Результат анализа</p><h3 className="text-2xl lg:text-3xl font-semibold tracking-[-.035em] leading-tight">Есть признаки локального изменения</h3><p className="text-sm text-mv-text-secondary leading-6 mt-4 mb-8">Две области отличаются по структуре от остального изображения. Полная AI-генерация не выражена.</p>{[['Вероятность AI-генерации','Низкая','green'],['Целостность метаданных','Неполная','amber'],['Области вмешательства','2 области','red']].map(x=><div key={x[0]} className="flex justify-between gap-5 py-4 border-t border-black/[.07] text-sm"><span className="text-mv-text-secondary">{x[0]}</span><span className="flex items-center gap-2"><StatusDot tone={x[2] as any}/>{x[1]}</span></div>)}<Link to="/dashboard/check" className="btn-black mt-auto self-start">Изучить результат</Link></div>
+  </div></section>
+
+  <section className="container pb-20 lg:pb-32"><h2 className="section-title max-w-2xl mb-14">Инструменты проверки<br/>в одной системе</h2><div className="grid md:grid-cols-12 gap-5">{[['Карта найденных признаков','Видимые области вмешательства и уровень каждого сигнала','md:col-span-7'],['Поля без загадок','Структурированные метаданные без технического шума','md:col-span-5'],['Подходящая шкала','Уверенность показана в контексте','md:col-span-4'],['Двойная проверка','Несколько моделей для сложных случаев','md:col-span-4'],['Контекст решений','Ограничения всегда рядом с выводом','md:col-span-4']].map((x,i)=><article key={x[0]} className={`${x[2]} bg-white border border-black/[.08] rounded-2xl p-7 min-h-[220px] flex flex-col`}><span className="eyebrow">0{i+1}</span><div className="my-auto space-y-2">{[70,42,85].map(n=><div key={n} className="h-1 bg-black/[.05] rounded"><div className="h-full bg-black/25 rounded" style={{width:n+'%'}}/></div>)}</div><h3 className="text-lg font-semibold mb-2">{x[0]}</h3><p className="text-sm text-mv-text-secondary leading-6">{x[1]}</p></article>)}</div></section>
+
+  <section id="security" className="container pb-20 lg:pb-32"><div className="bg-[#0b0b0b] text-white rounded-[22px] p-8 md:p-12 lg:p-16 grid lg:grid-cols-[.9fr_1.1fr] gap-16"><div><p className="eyebrow !text-white/45 mb-8">Приватность и контроль</p><h2 className="section-title">Серьёзный<br/>инструмент не<br/>скрывает<br/>ограничения</h2><p className="mt-7 text-white/55 leading-7 max-w-sm">Мы показываем метод анализа, степень уверенности и границы применимости каждого результата.</p></div><div className="grid sm:grid-cols-2 gap-x-10">{[['Передача файлов','Шифрование'],['Хранение материалов','Временно'],['Понятные результаты','Всегда'],['Удаление истории','Под контролем'],['Точность','Вероятностная'],['Юридический статус','Вспомогательный']].map((x,i)=><div key={x[0]} className="py-6 border-t border-white/15"><p className="text-xs text-white/45 mb-3">{x[0]}</p><p className={`text-sm ${i>3?'text-[#d3a444]':'text-white'}`}>{x[1]}</p></div>)}</div></div></section>
+
+  <section id="report" className="container section-space border-t border-black/[.06]"><div className="grid md:grid-cols-2 gap-8 mb-14"><h2 className="section-title">Отчёт, который<br/>читается без<br/>расшифровки</h2><p className="text-mv-text-secondary leading-7 max-w-md md:ml-auto">Общий вывод, доказательства, ограничения и технические детали собраны в спокойный документ.</p></div><ProductPreview/></section>
+
+  <section className="container pb-20 lg:pb-32"><div className="grid lg:grid-cols-[.7fr_1.3fr] gap-12"><h2 className="section-title">Вопросы<br/>о проверке</h2><div>{faqs.map((q,i)=><div key={q[0]} className="border-t border-black/[.09]"><button className="w-full py-6 flex items-center justify-between text-left font-medium" onClick={()=>setOpen(open===i?-1:i)} aria-expanded={open===i}>{q[0]}<ChevronDown size={18} className={`transition-transform ${open===i?'rotate-180':''}`}/></button>{open===i&&<p className="text-sm text-mv-text-secondary leading-6 pb-6 pr-12">{q[1]}</p>}</div>)}</div></div></section>
+
+  <section className="container pb-20 lg:pb-32"><div className="soft-card py-20 px-6 text-center"><h2 className="section-title">Проверьте материал до<br/>того, как ему поверят<br/>другие</h2><p className="text-mv-text-secondary mt-6 mb-9">Загрузите файл и получите понятный результат за несколько минут.</p><Link to="/dashboard/check" className="btn-black">Начать проверку <ArrowRight size={16}/></Link></div></section>
+  </div>}

@@ -26,7 +26,7 @@ const DEFAULT_ACCEPT = {
   'video/*': ['.mp4', '.webm', '.mov', '.avi'],
 };
 
-const DEFAULT_MAX_SIZE = 50 * 1024 * 1024; // 50MB
+const DEFAULT_MAX_SIZE = 20 * 1024 * 1024; // 20MB
 
 export function FileDropzone({
   onFilesSelected,
@@ -112,11 +112,11 @@ export function FileDropzone({
       <div
         {...getRootProps()}
         className={cn(
-          'relative border-2 border-dashed rounded-xl p-8 lg:p-12 transition-all duration-200 cursor-pointer',
+          'relative border border-dashed rounded-[14px] p-10 lg:p-16 min-h-[330px] transition-all duration-200 cursor-pointer',
           'flex flex-col items-center justify-center text-center',
-          isDragActive && !isDragReject && 'border-mv-accent bg-mv-accent/5 scale-[1.02]',
+          isDragActive && !isDragReject && 'border-mv-accent bg-black/[.025]',
           isDragReject && 'border-mv-fake bg-mv-fake/5',
-          !isDragActive && !disabled && 'border-mv-border hover:border-mv-text-muted hover:bg-mv-surface-2/50',
+          !isDragActive && !disabled && 'border-black/15 hover:border-black/35 hover:bg-mv-surface-2/30',
           disabled && 'opacity-50 cursor-not-allowed',
           files.length >= maxFiles && 'opacity-50 cursor-not-allowed'
         )}
@@ -126,14 +126,14 @@ export function FileDropzone({
         {/* Cloud Icon */}
         <div
           className={cn(
-            'w-16 h-16 rounded-2xl flex items-center justify-center mb-4 transition-colors',
-            isDragActive && !isDragReject ? 'bg-mv-accent/20' : 'bg-mv-surface-2',
+            'w-12 h-12 rounded-xl flex items-center justify-center mb-5 transition-colors',
+            isDragActive && !isDragReject ? 'bg-black text-white' : 'bg-mv-surface-2',
             isDragReject && 'bg-mv-fake/20'
           )}
         >
           <Upload
             className={cn(
-              'w-8 h-8 transition-colors',
+              'w-5 h-5 transition-colors',
               isDragActive && !isDragReject ? 'text-mv-accent' : 'text-mv-text-muted',
               isDragReject && 'text-mv-fake'
             )}
@@ -151,18 +151,17 @@ export function FileDropzone({
           ) : (
             <>
               <p className="text-mv-text font-medium">
-                Перетащите файлы сюда или{' '}
-                <span className="text-mv-accent">выберите</span>
+                Перетащите файл или выберите на устройстве
               </p>
               <p className="text-sm text-mv-text-muted">
-                Фото, аудио или видео • Макс. {formatFileSize(maxSize)} • До {maxFiles} файлов
+                Изображения и аудио · до {formatFileSize(maxSize)}
               </p>
             </>
           )}
         </div>
 
         {/* Supported formats */}
-        <div className="mt-6 flex flex-wrap gap-2 justify-center">
+        <div className="mt-3 text-xs text-mv-uncertain">Поддержка видео требует подтверждения</div><div className="mt-6 flex flex-wrap gap-2 justify-center">
           {['JPG', 'PNG', 'MP3', 'WAV', 'MP4'].map((format) => (
             <span
               key={format}

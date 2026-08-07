@@ -8,10 +8,10 @@ import { useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { AppwriteException } from 'appwrite';
 import {
-  FileImage, FileText, Send, Loader2, Lightbulb, UploadCloud, Cpu, ClipboardCheck
+  FileImage, FileText, Send, Loader2
 } from 'lucide-react';
 
-import { Card, CardHeader, Button, Alert } from '../../components/ui';
+import { Card, Button, Alert } from '../../components/ui';
 import { FileDropzone, TextInput } from '../../components/upload';
 import { CheckResultCard } from '../../components/CheckResultCard';
 import { cn } from '../../lib/utils';
@@ -27,8 +27,8 @@ interface Tab {
 }
 
 const tabs: Tab[] = [
-  { id: 'media', label: 'Медиафайлы', icon: <FileImage className="w-4 h-4" /> },
-  { id: 'text', label: 'Вставить текст', icon: <FileText className="w-4 h-4" /> },
+  { id: 'media', label: 'Файл', icon: <FileImage className="w-4 h-4" /> },
+  { id: 'text', label: 'Текст', icon: <FileText className="w-4 h-4" /> },
 ];
 
 export function NewCheckPage() {
@@ -232,32 +232,33 @@ export function NewCheckPage() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-4xl space-y-7 pt-4 lg:pt-8">
       <div>
-        <h1 className="text-2xl font-bold text-mv-text">Новая проверка</h1>
-        <p className="mt-1 text-mv-text-secondary">Загрузите медиафайлы или вставьте текст для анализа</p>
+        <p className="eyebrow mb-4">Рабочая область</p>
+        <h1 className="text-4xl lg:text-[42px] leading-none tracking-[-.045em] font-semibold text-mv-text">Новая проверка</h1>
+        <p className="mt-4 text-mv-text-secondary">Выберите материал. Максимальный размер файла в текущем продукте — 20 МБ.</p>
       </div>
 
-      <Card padding="none" className="overflow-hidden">
-        <div className="flex border-b border-mv-border">
+      <Card padding="none" variant="elevated" className="overflow-hidden !rounded-[20px]">
+        <div className="flex px-4 pt-3 border-b border-mv-border">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => handleTabChange(tab.id)}
               className={cn(
-                'flex items-center gap-2 px-6 py-4 text-sm font-medium transition-colors relative',
-                activeTab === tab.id ? 'text-mv-accent' : 'text-mv-text-secondary hover:text-mv-text',
+                'flex items-center gap-2 px-5 py-3 text-sm font-medium transition-colors relative',
+                activeTab === tab.id ? 'text-black' : 'text-mv-text-secondary hover:text-mv-text',
                 isAnalyzing && 'pointer-events-none opacity-50'
               )}
             >
               {tab.icon}
               {tab.label}
-              {activeTab === tab.id && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-mv-accent" />}
+              {activeTab === tab.id && <div className="absolute bottom-0 left-3 right-3 h-px bg-black" />}
             </button>
           ))}
         </div>
 
-        <div className="p-6">
+        <div className="p-4 sm:p-6">
           {activeTab === 'media' ? (
             <FileDropzone
               files={files}
@@ -271,7 +272,7 @@ export function NewCheckPage() {
           )}
         </div>
 
-        <div className="px-6 py-4 bg-mv-surface-2 border-t border-mv-border flex items-center justify-between">
+        <div className="px-6 py-4 bg-[#fafaf9] border-t border-mv-border flex items-center justify-between">
           <p className="text-sm text-mv-text-muted">
             {activeTab === 'media' ? `${files.length} файл(ов) выбрано` : `${text.length} символов`}
           </p>
@@ -280,7 +281,7 @@ export function NewCheckPage() {
             disabled={!canSubmit || isAnalyzing}
             leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           >
-            {isAnalyzing ? 'Анализ...' : 'Проверить'}
+            {isAnalyzing ? 'Анализ...' : 'Запустить проверку'}
           </Button>
         </div>
       </Card>
@@ -288,36 +289,7 @@ export function NewCheckPage() {
       {error && <Alert variant="error" title="Ошибка анализа">{error}</Alert>}
       {result && <CheckResultCard result={result} />}
 
-      <Card variant="outlined" className="bg-mv-surface-2/30">
-        <CardHeader
-          title="Как работает проверка"
-          icon={<Lightbulb className="w-5 h-5" />}
-          description="Наши ИИ-модели анализируют контент и определяют вероятность его создания нейросетью"
-        />
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-6 pt-0">
-          <div className="p-4 rounded-lg bg-mv-surface border border-mv-border">
-            <div className="w-10 h-10 mb-3 rounded-lg bg-mv-accent/10 flex items-center justify-center text-mv-accent">
-              <UploadCloud className="w-5 h-5" />
-            </div>
-            <h4 className="font-medium text-mv-text mb-1">Загрузка</h4>
-            <p className="text-sm text-mv-text-muted">Перетащите файлы или вставьте текст</p>
-          </div>
-          <div className="p-4 rounded-lg bg-mv-surface border border-mv-border">
-            <div className="w-10 h-10 mb-3 rounded-lg bg-mv-accent/10 flex items-center justify-center text-mv-accent">
-              <Cpu className="w-5 h-5" />
-            </div>
-            <h4 className="font-medium text-mv-text mb-1">Анализ</h4>
-            <p className="text-sm text-mv-text-muted">ИИ определяет признаки генерации</p>
-          </div>
-          <div className="p-4 rounded-lg bg-mv-surface border border-mv-border">
-            <div className="w-10 h-10 mb-3 rounded-lg bg-mv-accent/10 flex items-center justify-center text-mv-accent">
-              <ClipboardCheck className="w-5 h-5" />
-            </div>
-            <h4 className="font-medium text-mv-text mb-1">Результат</h4>
-            <p className="text-sm text-mv-text-muted">Получите вердикт и индекс подлинности</p>
-          </div>
-        </div>
-      </Card>
+      <p className="text-xs text-mv-text-muted max-w-xl leading-5">Материалы передаются по защищённому соединению и удаляются из временного хранилища после завершения анализа.</p>
     </div>
   );
 }

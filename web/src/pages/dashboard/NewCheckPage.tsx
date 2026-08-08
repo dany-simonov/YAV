@@ -16,7 +16,6 @@ import { FileDropzone, TextInput } from '../../components/upload';
 import { CheckResultCard } from '../../components/CheckResultCard';
 import { cn } from '../../lib/utils';
 import { functions, storage, ID, APPWRITE_CONFIG } from '../../lib/appwrite';
-import { saveCheckToHistory } from '../../lib/checkHistory';
 import { useAuthStore } from '../../store';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 
@@ -171,6 +170,7 @@ export function NewCheckPage() {
           username: user.name,
           firstName: user.name.split(' ')[0] || '',
           mediaType,
+          sourceLabel: fileToUpload.name,
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else if (activeTab === 'text') {
@@ -181,6 +181,7 @@ export function NewCheckPage() {
           username: user.name,
           firstName: user.name.split(' ')[0] || '',
           mediaType,
+          sourceLabel: text.slice(0, 120),
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else {
@@ -198,14 +199,6 @@ export function NewCheckPage() {
 
       const normalizedResult = normalizeFunctionResult(resultData, mediaType);
       setResult(normalizedResult);
-
-      if (user?.$id) {
-        const sourceLabel =
-          activeTab === 'media' && files[0]?.file?.name
-            ? files[0].file.name
-            : text.slice(0, 120);
-        saveCheckToHistory(user.$id, normalizedResult, mediaType, sourceLabel);
-      }
 
       if (activeTab === 'media' && files.length > 0) {
         setFileStatus(files[0].id, 'complete', 100);

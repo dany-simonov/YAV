@@ -1,9 +1,24 @@
-import type { Check, CheckResult, MediaType } from '../types';
+import { AppwriteException, Query, type Models } from 'appwrite';
 
-const HISTORY_PREFIX = 'mv_checks';
+import { APPWRITE_CONFIG, tablesDB } from './appwrite';
+import type { Check, MediaType, Verdict } from '../types';
+
 const MAX_ITEMS = 200;
+const PAGE_SIZE = 100;
 
-const getStorageKey = (userId: string) => `${HISTORY_PREFIX}:${userId}`;
+interface CheckRow extends Models.Row {
+  user_id: string;
+  media_type: string;
+  status: string;
+  verdict: string;
+  authenticity_index: number;
+  provider?: string | null;
+  model?: string | null;
+  explanation?: string | null;
+  source_label?: string | null;
+  processing_ms?: number | null;
+  details?: string | null;
+}
 
 export interface HistoryStats {
   checksToday: number;
@@ -12,114 +27,149 @@ export interface HistoryStats {
   checksThisWeek: number;
 }
 
-const clampConfidence = (value: number): number => {
+const asMediaType = (value: string): MediaType =>
+  ['image', 'audio', 'video', 'text'].includes(value) ? (value as MediaType) : 'text';
+
+const asVerdict = (value: string): Verdict =>
+  ['REAL', 'FAKE', 'UNCERTAIN'].includes(value) ? (value as Verdict) : 'UNCERTAIN';
+
+const clampIndex = (value: number): number => {
   if (!Number.isFinite(value)) return 0;
-  if (value <= 1) return Math.round(value * 100);
-  return Math.round(value);
+  return Math.max(0, Math.min(100, Math.round(value)));
 };
 
-export function loadChecksHistory(userId: string): Check[] {
+export function mapHistoryRow(row: CheckRow): Check {
+  return {
+    id: row.$id,
+    media_type: asMediaType(row.media_type),
+    verdict: asVerdict(row.verdict),
+    confidence: clampIndex(row.authenticity_index),
+    model_used: row.model || row.provider || 'Unknown model',
+    explanation: row.source_label || row.explanation || 'Проверка',
+    processing_ms: Number(row.processing_ms || 0),
+    created_at: row.$createdAt,
+  };
+}
+
+function historyError(error: unknown): Error {
+  if (error instanceof AppwriteException) {
+    if (error.code === 401 || error.code === 403) {
+      return new Error('Нет доступа к истории проверок');
+    }
+    if (error.code === 404) {
+      return new Error('Таблица истории проверок не найдена');
+    }
+  }
+  return new Error('Не удалось загрузить историю проверок');
+}
+
+export async function loadChecksHistory(userId: string): Promise<Check[]> {
   if (!userId) return [];
 
   try {
-    const raw = localStorage.getItem(getStorageKey(userId));
-    if (!raw) return [];
+    const rows: CheckRow[] = [];
+    let offset = 0;
 
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
+    while (rows.length < MAX_ITEMS) {
+      const limit = Math.min(PAGE_SIZE, MAX_ITEMS - rows.length);
+      const response = await tablesDB.listRows<CheckRow>({
+        databaseId: APPWRITE_CONFIG.databaseId,
+        tableId: APPWRITE_CONFIG.tables.checks,
+        queries: [
+          Query.equal('user_id', [userId]),
+          Query.orderDesc('$createdAt'),
+          Query.limit(limit),
+          Query.offset(offset),
+        ],
+        total: false,
+        ttl: 0,
+      });
+      rows.push(...response.rows.filter((row) => row.user_id === userId));
+      offset += response.rows.length;
+      if (response.rows.length < limit) break;
+    }
 
-    return parsed
-      .filter((item): item is Check & { index_type?: string } => {
-        return !!item && typeof item === 'object' && typeof item.id === 'string';
-      })
-      .map((item) => {
-        const confidence = clampConfidence(item.confidence);
-        // Legacy entries stored AI probability; new ones store authenticity index.
-        const normalizedConfidence = item.index_type === 'authenticity'
-          ? confidence
-          : Math.max(0, Math.min(100, 100 - confidence));
-
-        return {
-          ...item,
-          confidence: normalizedConfidence,
-        };
-      })
-      .slice(0, MAX_ITEMS);
-  } catch {
-    return [];
+    return rows.slice(0, MAX_ITEMS).map(mapHistoryRow);
+  } catch (error) {
+    throw historyError(error);
   }
 }
 
-export function saveCheckToHistory(
-  userId: string,
-  result: CheckResult,
-  mediaType: MediaType,
-  sourceLabel: string
-): Check {
-  const item: Check & { index_type: 'authenticity' } = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    media_type: mediaType,
-    verdict: result.verdict,
-    confidence: clampConfidence(result.confidence),
-    model_used: result.model_used,
-    explanation: sourceLabel || result.explanation,
-    processing_ms: result.processing_ms,
-    created_at: new Date().toISOString(),
-    index_type: 'authenticity',
-  };
-
-  const current = loadChecksHistory(userId);
-  const next = [item, ...current].slice(0, MAX_ITEMS);
-  localStorage.setItem(getStorageKey(userId), JSON.stringify(next));
-  return item;
+export async function deleteCheckFromHistory(userId: string, checkId: string): Promise<void> {
+  if (!userId || !checkId) return;
+  try {
+    const row = await tablesDB.getRow<CheckRow>({
+      databaseId: APPWRITE_CONFIG.databaseId,
+      tableId: APPWRITE_CONFIG.tables.checks,
+      rowId: checkId,
+    });
+    if (row.user_id !== userId) {
+      throw new Error('Нельзя удалить чужую проверку');
+    }
+    await tablesDB.deleteRow({
+      databaseId: APPWRITE_CONFIG.databaseId,
+      tableId: APPWRITE_CONFIG.tables.checks,
+      rowId: checkId,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Нельзя удалить чужую проверку') throw error;
+    throw historyError(error);
+  }
 }
 
-const isSameLocalDay = (a: Date, b: Date): boolean => {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
-};
+export async function clearChecksHistory(userId: string): Promise<void> {
+  if (!userId) return;
+  try {
+    while (true) {
+      const response = await tablesDB.listRows<CheckRow>({
+        databaseId: APPWRITE_CONFIG.databaseId,
+        tableId: APPWRITE_CONFIG.tables.checks,
+        queries: [Query.equal('user_id', [userId]), Query.limit(PAGE_SIZE)],
+        total: false,
+        ttl: 0,
+      });
+      const ownRows = response.rows.filter((row) => row.user_id === userId);
+      if (ownRows.length === 0) return;
+      await Promise.all(
+        ownRows.map((row) =>
+          tablesDB.deleteRow({
+            databaseId: APPWRITE_CONFIG.databaseId,
+            tableId: APPWRITE_CONFIG.tables.checks,
+            rowId: row.$id,
+          })
+        )
+      );
+      if (ownRows.length < PAGE_SIZE) return;
+    }
+  } catch (error) {
+    throw historyError(error);
+  }
+}
 
-const getWeekStart = (d: Date): Date => {
-  const date = new Date(d);
+const isSameLocalDay = (a: Date, b: Date): boolean =>
+  a.getFullYear() === b.getFullYear() &&
+  a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate();
+
+const getWeekStart = (dateValue: Date): Date => {
+  const date = new Date(dateValue);
   const day = date.getDay();
-  const shift = day === 0 ? 6 : day - 1;
-  date.setDate(date.getDate() - shift);
+  date.setDate(date.getDate() - (day === 0 ? 6 : day - 1));
   date.setHours(0, 0, 0, 0);
   return date;
 };
 
-export function getHistoryStats(userId: string): HistoryStats {
-  const checks = loadChecksHistory(userId);
+export function calculateHistoryStats(checks: Check[]): HistoryStats {
   const now = new Date();
   const weekStart = getWeekStart(now);
+  const checksToday = checks.filter((item) => isSameLocalDay(new Date(item.created_at), now)).length;
+  const checksThisWeek = checks.filter((item) => new Date(item.created_at) >= weekStart).length;
+  const averageIndex = checks.length
+    ? Math.round(checks.reduce((sum, item) => sum + item.confidence, 0) / checks.length)
+    : null;
+  return { checksToday, totalChecks: checks.length, averageIndex, checksThisWeek };
+}
 
-  let checksToday = 0;
-  let checksThisWeek = 0;
-
-  checks.forEach((item) => {
-    const created = new Date(item.created_at);
-    if (Number.isNaN(created.getTime())) return;
-
-    if (isSameLocalDay(created, now)) {
-      checksToday += 1;
-    }
-    if (created >= weekStart) {
-      checksThisWeek += 1;
-    }
-  });
-
-  const averageIndex =
-    checks.length > 0
-      ? Math.round(checks.reduce((acc, item) => acc + item.confidence, 0) / checks.length)
-      : null;
-
-  return {
-    checksToday,
-    totalChecks: checks.length,
-    averageIndex,
-    checksThisWeek,
-  };
+export async function getHistoryStats(userId: string): Promise<HistoryStats> {
+  return calculateHistoryStats(await loadChecksHistory(userId));
 }

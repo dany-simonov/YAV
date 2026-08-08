@@ -5,7 +5,7 @@
  */
 
 import { Link } from 'react-router-dom';
-import { useMemo } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, ArrowRight, ArrowUp, Shield, Clock, CheckCircle, FileText, Image, AudioWaveform, Video, Hand } from 'lucide-react';
 import { Card, CardHeader, Button } from '../../components/ui';
 import { getHistoryStats } from '../../lib/checkHistory';
@@ -14,25 +14,28 @@ import { useAuthStore } from '../../store';
 export function DashboardOverview() {
   const { user } = useAuthStore();
   const dailyLimit = 3;
+  const [stats, setStats] = useState({
+    checksToday: 0,
+    dailyLimit,
+    totalChecks: 0,
+    averageIndex: null as number | null,
+    checksThisWeek: 0,
+  });
 
-  const stats = useMemo(() => {
-    if (!user?.$id) {
-      return {
-        checksToday: 0,
-        dailyLimit,
-        totalChecks: 0,
-        averageIndex: null as number | null,
-        checksThisWeek: 0,
-      };
-    }
-
-    const historyStats = getHistoryStats(user.$id);
-    return {
-      checksToday: historyStats.checksToday,
-      dailyLimit,
-      totalChecks: historyStats.totalChecks,
-      averageIndex: historyStats.averageIndex,
-      checksThisWeek: historyStats.checksThisWeek,
+  useEffect(() => {
+    let cancelled = false;
+    if (!user?.$id) return undefined;
+    getHistoryStats(user.$id)
+      .then((historyStats) => {
+        if (!cancelled) setStats({ ...historyStats, dailyLimit });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setStats((current) => ({ ...current, checksToday: 0, totalChecks: 0 }));
+        }
+      });
+    return () => {
+      cancelled = true;
     };
   }, [user?.$id]);
 

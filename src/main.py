@@ -27,6 +27,11 @@ if str(ROOT) not in sys.path:
 from core.enums import MediaType  # noqa: E402
 from core.analyzer import HybridTextAnalyzer  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
+from src.appwrite_store import (  # noqa: E402
+    ensure_user_profile,
+    get_authenticated_account,
+    persist_check_result,
+)
 
 
 def _extract_payload(req: Any) -> dict[str, Any]:
@@ -57,8 +62,8 @@ def _extract_payload(req: Any) -> dict[str, Any]:
     return {}
 
 
-def _extract_dynamic_api_key(req: Any) -> str:
-    """Extract the per-execution Appwrite API key from request headers."""
+def _extract_request_header(req: Any, header_name: str) -> str:
+    """Extract a request header without assuming a concrete mapping type."""
     headers = getattr(req, "headers", None)
     if callable(headers):
         headers = headers()
@@ -67,16 +72,21 @@ def _extract_dynamic_api_key(req: Any) -> str:
 
     try:
         for name, value in headers.items():
-            if str(name).lower() == "x-appwrite-key":
+            if str(name).lower() == header_name.lower():
                 return str(value).strip()
     except (AttributeError, TypeError):
         pass
 
     try:
-        value = headers["x-appwrite-key"]
+        value = headers[header_name]
     except (KeyError, TypeError):
         return ""
     return str(value).strip()
+
+
+def _extract_dynamic_api_key(req: Any) -> str:
+    """Extract the per-execution Appwrite API key from request headers."""
+    return _extract_request_header(req, "x-appwrite-key")
 
 
 def _response_json(context: Any, payload: dict[str, Any], status: int = 200):
@@ -179,7 +189,7 @@ async def _analyze(payload: dict[str, Any], api_key: str = "") -> dict[str, Any]
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
             or os.getenv("UPLOADS_BUCKET_ID")
-            or "69af36f900139c5afe5b"
+            or "uploads"
         )
         file_bytes = await _download_file_bytes(file_id, bucket_id, api_key)
 
@@ -197,6 +207,36 @@ async def _analyze(payload: dict[str, Any], api_key: str = "") -> dict[str, Any]
     body = result.model_dump()
     body["processing_ms"] = processing_ms
     return body
+
+
+async def _execute_request(
+    payload: dict[str, Any], api_key: str, user_id: str, user_jwt: str
+) -> dict[str, Any]:
+    """Authorize the execution, ensure its profile, and persist trusted results."""
+    if not api_key:
+        raise RuntimeError("Missing Appwrite Function API key")
+    if not user_id or not user_jwt:
+        raise PermissionError("Authenticated Appwrite user context is required")
+
+    action = str(payload.get("action") or "analyze").strip().lower()
+    if action not in {"analyze", "ensure_profile"}:
+        raise ValueError("Unsupported action")
+
+    account = await get_authenticated_account(user_id, user_jwt)
+    profile = await ensure_user_profile(account, api_key)
+
+    if action == "ensure_profile":
+        return {"profile_id": str(profile.get("$id") or user_id)}
+
+    result = await _analyze(payload, api_key)
+    check_id = await persist_check_result(
+        result,
+        user_id,
+        str(payload.get("sourceLabel") or ""),
+        api_key,
+    )
+    result["check_id"] = check_id
+    return result
 
 
 def _run_coro_sync(coro: Any) -> Any:
@@ -228,10 +268,17 @@ def main(context: Any):
     """Appwrite function handler."""
     try:
         payload = _extract_payload(context.req)
-        api_key = _extract_dynamic_api_key(context.req)
-        result = _run_coro_sync(_analyze(payload, api_key))
-        media_type = MediaType.TEXT if payload.get("text") else _detect_media_type_from_payload(payload)
-        _log_analysis_result(context, result, media_type)
+        api_key = _extract_dynamic_api_key(context.req) or os.getenv(
+            "APPWRITE_FUNCTION_API_KEY", ""
+        )
+        user_id = _extract_request_header(context.req, "x-appwrite-user-id")
+        user_jwt = _extract_request_header(context.req, "x-appwrite-user-jwt")
+        result = _run_coro_sync(_execute_request(payload, api_key, user_id, user_jwt))
+        if str(payload.get("action") or "").strip().lower() != "ensure_profile":
+            media_type = (
+                MediaType.TEXT if payload.get("text") else _detect_media_type_from_payload(payload)
+            )
+            _log_analysis_result(context, result, media_type)
         return _response_json(context, result, 200)
     except Exception as exc:
         return _response_json(context, {"detail": str(exc)}, 400)

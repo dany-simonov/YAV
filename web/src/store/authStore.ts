@@ -14,6 +14,7 @@
 import { create } from 'zustand';
 import { AppwriteException } from 'appwrite';
 import { account, ID, type Models } from '../lib/appwrite';
+import { ensureUserProfile } from '../lib/serverProfile';
 
 // ============================================================================
 // Types
@@ -176,6 +177,14 @@ const getErrorMessage = (error: unknown): string => {
   return 'Произошла неизвестная ошибка';
 };
 
+const discardCurrentSession = async (): Promise<void> => {
+  try {
+    await account.deleteSession('current');
+  } catch {
+    // Preserve the original bootstrap error; local auth state is still cleared below.
+  }
+};
+
 // ============================================================================
 // Store Implementation
 // ============================================================================
@@ -191,10 +200,13 @@ export const useAuthStore = create<AuthStore>((set) => ({
 
   // Actions
   initialize: async () => {
+    let authenticatedAccountFound = false;
     try {
       set({ isLoading: true, error: null });
       
       const appwriteUser = await account.get();
+      authenticatedAccountFound = true;
+      await ensureUserProfile();
       const user = transformUser(appwriteUser);
       
       set({ 
@@ -203,6 +215,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
         isInitialized: true 
       });
     } catch {
+      if (authenticatedAccountFound) await discardCurrentSession();
       // No active session - this is expected for logged out users
       set({ 
         user: null, 
@@ -214,6 +227,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   login: async (email: string, password: string) => {
+    let sessionCreated = false;
     try {
       set({ isActionLoading: true, error: null });
       
@@ -223,6 +237,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       
       // Create email/password session
       const session = await account.createEmailPasswordSession(email, password);
+      sessionCreated = true;
       
       if (import.meta.env.DEV) {
         console.log('[Auth] Session created:', session.$id);
@@ -230,6 +245,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       
       // Fetch user data
       const appwriteUser = await account.get();
+      await ensureUserProfile();
       const user = transformUser(appwriteUser);
       
       if (import.meta.env.DEV) {
@@ -244,6 +260,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       
       return { success: true };
     } catch (error) {
+      if (sessionCreated) await discardCurrentSession();
       const errorMessage = getErrorMessage(error);
       set({ 
         isActionLoading: false, 
@@ -254,6 +271,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   register: async (name: string, email: string, password: string) => {
+    let sessionCreated = false;
     try {
       set({ isActionLoading: true, error: null });
       
@@ -270,6 +288,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       
       // Step 2: Automatically log in after registration
       const session = await account.createEmailPasswordSession(email, password);
+      sessionCreated = true;
       
       if (import.meta.env.DEV) {
         console.log('[Auth] Auto-login session created:', session.$id);
@@ -277,6 +296,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       
       // Step 3: Fetch full user data
       const appwriteUser = await account.get();
+      await ensureUserProfile();
       const user = transformUser(appwriteUser);
       
       if (import.meta.env.DEV) {
@@ -291,6 +311,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       
       return { success: true };
     } catch (error) {
+      if (sessionCreated) await discardCurrentSession();
       const errorMessage = getErrorMessage(error);
       set({ 
         isActionLoading: false, 

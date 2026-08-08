@@ -98,6 +98,7 @@ export function BigTextCheckPage() {
         firstName: user.name.split(' ')[0] || '',
         mediaType: 'text',
         mode: 'hybrid_text',
+        sourceLabel: text.slice(0, 120),
       };
 
       const execution = await functions.createExecution(

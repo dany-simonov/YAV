@@ -1,199 +1,87 @@
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Check, Code2, Server } from 'lucide-react';
 
-const CONTACT_EMAIL = 'istochnik-media@yandex.com';
+const CONTACT_EMAIL = 'yav.app@yandex.ru';
 
 const endpoints = [
   {
-    method: 'POST',
-    path: '/analyze',
-    description: 'Анализ одного файла',
-    params: [
-      { name: 'file', type: 'File', description: 'Файл для анализа (image/audio)' },
-      { name: 'mediaType', type: 'string', description: '"image" | "audio" | "text"' },
-    ],
+    method: 'POST', path: '/analyze', title: 'Одиночная проверка файла',
+    description: 'Принимает один файл, определяет тип медиаконтента и возвращает вероятностный результат анализа.',
+    params: [['file','File','обязательный','Изображение, аудио, видео или поддерживаемый файл'],['user_id','integer','обязательный','Идентификатор пользователя'],['username','string','необязательный','Имя пользователя'],['first_name','string','необязательный','Отображаемое имя'],['text_content','string','необязательный','Текстовое содержимое для маршрутизации']],
     response: `{
-  "verdict": "FAKE",
-  "confidence": 0.94,
+  "verdict": "UNCERTAIN",
+  "confidence": 0.76,
   "model_used": "sightengine",
-  "explanation": "Sightengine: вероятность ИИ-генерации 94%",
+  "explanation": "Обнаружены неоднозначные признаки",
+  "media_type": "image",
   "processing_ms": 1240
 }`,
   },
   {
-    method: 'POST',
-    path: '/bigcheck',
-    description: 'Пакетный анализ до 10 файлов с кросс-анализом',
-    params: [
-      { name: 'files', type: 'File[]', description: 'Массив файлов (до 10)' },
-    ],
+    method: 'POST', path: '/analyze/text/hybrid', title: 'Глубокая проверка текста',
+    description: 'Выполняет детекцию AI-признаков и фактчекинг текста. Минимальная длина — 50 символов.',
+    params: [['text','string (JSON)','обязательный','Текст для гибридного анализа']],
     response: `{
-  "results": [...],
-  "cross_analysis": {
-    "overall_verdict": "FAKE",
-    "confidence": 0.87
-  }
+  "verdict": "UNCERTAIN",
+  "ai_verdict": "HUMAN",
+  "ai_confidence": 0.31,
+  "model_used": "hybrid",
+  "processing_ms": 2180,
+  "fact_checks": [],
+  "tokens": []
 }`,
   },
   {
-    method: 'GET',
-    path: '/health',
-    description: 'Статус сервиса и БД',
-    params: [],
+    method: 'POST', path: '/bigcheck', title: 'Пакетная проверка',
+    description: 'Проверяет до 10 элементов и формирует общий результат кросс-анализа.',
+    params: [['files','File[]','обязательный','Один или несколько файлов'],['user_id','integer','обязательный','Идентификатор пользователя'],['text_content','string','необязательный','Дополнительный текст для анализа']],
+    response: `{
+  "overall_verdict": "UNCERTAIN",
+  "overall_confidence": 0.67,
+  "authenticity_index": 67,
+  "summary": "Однозначный вердикт вынести невозможно",
+  "results": [],
+  "total_files": 2,
+  "total_processing_ms": 3460
+}`,
+  },
+  {
+    method: 'GET', path: '/health', title: 'Состояние API',
+    description: 'Liveness-проверка сервиса. Не запускает ML-анализ.', params: [],
     response: `{
   "status": "ok",
-  "database": "connected",
-  "version": "0.6.0"
-}`,
-  },
-  {
-    method: 'GET',
-    path: '/user/{id}/stats',
-    description: 'Статистика пользователя',
-    params: [
-      { name: 'id', type: 'string', description: 'ID пользователя' },
-    ],
-    response: `{
-  "user_id": "abc123",
-  "is_premium": false,
-  "checks_today": 2,
-  "daily_limit": 3,
-  "total_checks": 47
-}`,
-  },
-  {
-    method: 'GET',
-    path: '/user/{id}/checks',
-    description: 'История проверок',
-    params: [
-      { name: 'id', type: 'string', description: 'ID пользователя' },
-      { name: 'limit', type: 'number', description: 'Количество записей (default: 50)' },
-      { name: 'offset', type: 'number', description: 'Смещение для пагинации' },
-    ],
-    response: `{
-  "checks": [
-    {
-      "id": "check_123",
-      "media_type": "image",
-      "verdict": "REAL",
-      "confidence": 0.92,
-      "created_at": "2026-03-10T12:00:00Z"
-    }
-  ]
+  "version": "0.5.0"
 }`,
   },
 ];
 
 export function Docs() {
-  return (
-    <div className="pt-24 pb-16">
-      <div className="container">
-        {/* Hero */}
-        <div className="text-center mb-16">
-          <h1 className="text-4xl font-bold text-mv-text mb-4">API Документация</h1>
-          <p className="text-lg text-mv-text-secondary">
-            REST API для интеграции системы Источник в ваши проекты
-          </p>
-          <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-mv-uncertain/20 text-mv-uncertain rounded-lg text-sm">
-            <AlertTriangle className="w-4 h-4" /> API находится в разработке. Свяжитесь с нами для раннего доступа.
-          </div>
-        </div>
-
-        {/* Base URL */}
-        <section className="mb-12">
-          <h2 className="text-2xl font-bold text-mv-accent mb-4">Base URL</h2>
-          <div className="bg-mv-surface border border-mv-border rounded-lg p-4">
-            <code className="text-mv-text font-mono">https://cloud.appwrite.io/v1</code>
-          </div>
-        </section>
-
-        {/* Authentication */}
-        <section className="mb-12">
-          <h2 className="text-2xl font-bold text-mv-accent mb-4">Аутентификация</h2>
-          <p className="text-mv-text-secondary mb-4">
-            Все запросы к API требуют API-ключ в заголовке:
-          </p>
-          <div className="bg-mv-surface border border-mv-border rounded-lg p-4 overflow-x-auto">
-            <pre className="text-mv-text font-mono text-sm">
-{`curl -X POST https://api.istochnik.io/v1/analyze \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -H "Content-Type: multipart/form-data" \\
-  -F "file=@photo.jpg" \\
-  -F "mediaType=image"`}
-            </pre>
-          </div>
-        </section>
-
-        {/* Endpoints */}
-        <section>
-          <h2 className="text-2xl font-bold text-mv-accent mb-6">Endpoints</h2>
-          <div className="space-y-8">
-            {endpoints.map((endpoint, index) => (
-              <div
-                key={index}
-                className="bg-mv-surface border border-mv-border rounded-xl overflow-hidden"
-              >
-                <div className="bg-mv-surface-2 px-6 py-4 border-b border-mv-border">
-                  <div className="flex items-center gap-4">
-                    <span className={`px-3 py-1 rounded text-xs font-bold ${
-                      endpoint.method === 'GET' 
-                        ? 'bg-mv-real/20 text-mv-real' 
-                        : 'bg-mv-accent/20 text-mv-accent'
-                    }`}>
-                      {endpoint.method}
-                    </span>
-                    <code className="text-mv-text font-mono">{endpoint.path}</code>
-                  </div>
-                  <p className="mt-2 text-sm text-mv-text-secondary">{endpoint.description}</p>
-                </div>
-
-                {endpoint.params.length > 0 && (
-                  <div className="px-6 py-4 border-b border-mv-border">
-                    <h4 className="text-sm font-semibold text-mv-text mb-3">Параметры</h4>
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-mv-text-secondary">
-                          <th className="text-left pb-2">Имя</th>
-                          <th className="text-left pb-2">Тип</th>
-                          <th className="text-left pb-2">Описание</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {endpoint.params.map((param, pIndex) => (
-                          <tr key={pIndex} className="border-t border-mv-border">
-                            <td className="py-2 font-mono text-mv-accent">{param.name}</td>
-                            <td className="py-2 text-mv-text-secondary">{param.type}</td>
-                            <td className="py-2 text-mv-text-secondary">{param.description}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-
-                <div className="px-6 py-4">
-                  <h4 className="text-sm font-semibold text-mv-text mb-3">Ответ</h4>
-                  <pre className="bg-mv-bg rounded-lg p-4 overflow-x-auto text-sm text-mv-text-secondary font-mono">
-                    {endpoint.response}
-                  </pre>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Contact */}
-        <div className="mt-16 text-center">
-          <p className="text-mv-text-secondary mb-4">
-            Нужен доступ к API или помощь с интеграцией?
-          </p>
-          <a
-            href={`mailto:${CONTACT_EMAIL}?subject=API%20Access%20Request`}
-            className="inline-block px-6 py-3 bg-mv-accent text-white rounded-lg font-medium hover:bg-mv-accent-hover transition-colors"
-          >
-            Написать на {CONTACT_EMAIL}
-          </a>
-        </div>
+  return <div className="pt-32 pb-24">
+    <div className="container">
+      <div className="grid lg:grid-cols-[.9fr_1.1fr] gap-10 items-end pb-16 border-b border-black/[.08]">
+        <div><p className="eyebrow mb-6">ЯВЬ / API</p><h1 className="section-title">Документация<br/>платформы</h1></div>
+        <div className="lg:ml-auto max-w-xl"><p className="text-lg leading-8 text-mv-text-secondary">Актуальные REST-эндпоинты для проверки медиа и текста. Внешний production-доступ предоставляется после согласования.</p><div className="mt-6 flex items-start gap-3 text-sm text-mv-uncertain"><AlertTriangle size={17} className="mt-0.5 shrink-0"/><span>API развивается. Формат отдельных полей может измениться до публикации стабильной версии.</span></div></div>
       </div>
+
+      <section className="py-14 grid md:grid-cols-2 gap-5">
+        <article className="bg-white border border-black/[.08] rounded-2xl p-7"><Server size={20}/><p className="eyebrow mt-8 mb-3">Локальная разработка</p><code className="text-sm">http://localhost:8000</code><p className="mt-4 text-sm leading-6 text-mv-text-secondary">Интерактивная OpenAPI-схема FastAPI доступна по адресу <code>/docs</code>.</p></article>
+        <article className="bg-white border border-black/[.08] rounded-2xl p-7"><Code2 size={20}/><p className="eyebrow mt-8 mb-3">Авторизация</p><code className="text-sm">x-api-secret: YOUR_API_SECRET</code><p className="mt-4 text-sm leading-6 text-mv-text-secondary">Секрет передаётся в заголовке каждого аналитического запроса. `/health` доступен без него.</p></article>
+      </section>
+
+      <section className="pb-14"><p className="eyebrow mb-6">Быстрый старт</p><div className="bg-[#0b0b0b] text-white rounded-2xl p-6 overflow-x-auto"><pre className="text-sm leading-7 font-mono text-white/75">{`curl -X POST http://localhost:8000/analyze \\
+  -H "x-api-secret: YOUR_API_SECRET" \\
+  -F "file=@photo.jpg" \\
+  -F "user_id=123" \\
+  -F "username=example"`}</pre></div></section>
+
+      <section><div className="flex items-end justify-between gap-6 mb-7"><div><p className="eyebrow mb-4">Reference</p><h2 className="text-3xl font-semibold tracking-[-.04em]">Эндпоинты</h2></div><span className="text-sm text-mv-text-muted">Версия 0.5.0</span></div>
+        <div className="space-y-5">{endpoints.map(endpoint=><article key={endpoint.path} className="bg-white border border-black/[.08] rounded-[18px] overflow-hidden">
+          <header className="p-6 sm:p-7 flex flex-col sm:flex-row sm:items-start gap-4 border-b border-black/[.07]"><span className={`w-fit px-2.5 py-1 rounded-md text-[11px] font-bold ${endpoint.method==='GET'?'bg-mv-real/10 text-mv-real':'bg-black text-white'}`}>{endpoint.method}</span><div><code className="font-semibold">{endpoint.path}</code><h3 className="text-xl font-semibold tracking-[-.025em] mt-4">{endpoint.title}</h3><p className="text-sm text-mv-text-secondary leading-6 mt-2">{endpoint.description}</p></div></header>
+          {endpoint.params.length>0&&<div className="p-6 sm:p-7 border-b border-black/[.07] overflow-x-auto"><h4 className="text-sm font-semibold mb-4">Параметры</h4><table className="w-full min-w-[650px] text-sm"><thead><tr className="text-left text-mv-text-muted"><th className="pb-3 font-medium">Имя</th><th className="pb-3 font-medium">Тип</th><th className="pb-3 font-medium">Статус</th><th className="pb-3 font-medium">Описание</th></tr></thead><tbody>{endpoint.params.map(param=><tr key={param[0]} className="border-t border-black/[.07]"><td className="py-3 font-mono">{param[0]}</td><td className="py-3 text-mv-text-secondary">{param[1]}</td><td className="py-3"><span className="flex items-center gap-1.5"><Check size={13}/>{param[2]}</span></td><td className="py-3 text-mv-text-secondary">{param[3]}</td></tr>)}</tbody></table></div>}
+          <div className="p-6 sm:p-7"><h4 className="text-sm font-semibold mb-4">Пример ответа</h4><pre className="bg-[#f4f4f2] rounded-xl p-5 overflow-x-auto text-sm leading-6 font-mono text-mv-text-secondary">{endpoint.response}</pre></div>
+        </article>)}</div>
+      </section>
+
+      <section className="mt-16 bg-white border border-black/[.08] rounded-[20px] p-8 sm:p-10 flex flex-col sm:flex-row sm:items-center justify-between gap-7 shadow-[0_2px_3px_rgba(0,0,0,.04),0_18px_44px_rgba(0,0,0,.06)]"><div><h2 className="text-2xl font-semibold tracking-[-.035em]">Нужен production-доступ?</h2><p className="mt-3 text-mv-text-secondary">Напишите команде ЯВЬ для согласования интеграции.</p></div><a href={`mailto:${CONTACT_EMAIL}?subject=YAV%20API%20Access`} className="btn-black shrink-0">{CONTACT_EMAIL}<ArrowRight size={16}/></a></section>
     </div>
-  );
+  </div>;
 }

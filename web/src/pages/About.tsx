@@ -1,167 +1,34 @@
-import { Shield, Lock, Bot, Unlock, Rocket, Handshake, Plus, Video, Link as LinkIconLucide, Grid } from 'lucide-react';
+import { ArrowRight, Award, FileSearch, FlaskConical, Layers3, ShieldCheck } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
-const CONTACT_EMAIL = 'istochnik-media@yandex.com';
+const CONTACT_EMAIL = 'yav.app@yandex.ru';
 
-const values = [
-  { icon: Shield, title: 'Борьба с фейками', description: 'Мы создаём инструменты, которые помогают людям отличать настоящий контент от сгенерированного ИИ.' },
-  { icon: Lock, title: 'Защита от манипуляций', description: 'Противодействие социальной инженерии и дипфейкам — наш вклад в безопасность цифровой среды.' },
-  { icon: Bot, title: 'ИИ на страже правды', description: 'Используем передовые модели машинного обучения для анализа медиа с точностью свыше 94%.' },
-  { icon: Unlock, title: 'Открытость', description: 'Прозрачность методов анализа и открытая архитектура — фундамент доверия к нашим результатам.' },
-  { icon: Rocket, title: 'Инновации', description: 'Постоянное обновление моделей и технологий для опережения генеративных инструментов.' },
-  { icon: Handshake, title: 'Доступность', description: 'Бесплатный доступ к базовым проверкам — каждый человек заслуживает инструмент верификации.' },
-];
-
-const badges = [
-  'Версия v0.6.0',
-  'Грантовая поддержка',
-  'Хакатоны',
-  'Акселераторы',
-  'Open Source',
-];
-
-const roadmapPlans = [
-  {
-    icon: <Video className="w-5 h-5" />,
-    title: 'Видео (скоро)',
-    description: 'Покадровый анализ FFmpeg + Sightengine pipeline, 81%.',
-  },
-  {
-    icon: <LinkIconLucide className="w-5 h-5" />,
-    title: 'Проверка по ссылке',
-    description: 'Вставь ссылку на пост в соцсетях, видео YouTube или картинку — сервис скачает и проверит.',
-  },
-  {
-    icon: <Grid className="w-5 h-5" />,
-    title: 'Тепловые карты',
-    description: 'Explainable AI — визуализация зон, где ИИ «ошибся» на сгенерированном фото.',
-  },
+const directions = [
+  { icon: FileSearch, title: 'Анализ цифрового контента', text: 'Исследуем признаки генерации и изменения изображений, аудио, видео и текста.' },
+  { icon: Layers3, title: 'Объяснимый результат', text: 'Переводим вероятностные сигналы моделей в последовательный отчёт с ограничениями.' },
+  { icon: ShieldCheck, title: 'Прикладные сценарии', text: 'Проектируем инструменты для работы с материалами, где важно понимать происхождение файла.' },
 ];
 
 export function About() {
-  return (
-    <div className="pt-24 pb-16">
-      <div className="container">
-        {/* Hero */}
-        <div className="text-center mb-16">
-          <h1 className="text-4xl font-bold text-mv-text mb-4">О проекте «Источник»</h1>
-          <p className="text-lg text-mv-text-secondary max-w-2xl mx-auto">
-            Мы строим инфраструктуру доверия к цифровому контенту — так, чтобы каждый мог отличить подлинное от поддельного
-          </p>
-        </div>
+  return <div className="pt-32 pb-24">
+    <div className="container">
+      <section className="grid lg:grid-cols-[1.05fr_.95fr] gap-12 lg:gap-20 pb-20 border-b border-black/[.08]">
+        <div><p className="eyebrow mb-7">О проекте ЯВЬ</p><h1 className="section-title max-w-3xl">Научно-прикладная платформа для проверки цифрового контента</h1></div>
+        <div className="lg:pt-10"><p className="text-lg leading-8 text-mv-text-secondary">ЯВЬ объединяет исследование методов детекции синтетического контента и разработку рабочего инструмента, который помогает интерпретировать результаты анализа без ложного обещания абсолютной точности.</p></div>
+      </section>
 
-        {/* Mission */}
-        <section className="mb-16">
-          <div className="bg-mv-surface border border-mv-border rounded-xl p-8 md:p-12">
-            <blockquote className="text-xl md:text-2xl text-mv-text font-medium leading-relaxed border-l-4 border-mv-accent pl-6 italic">
-              «В мире, где ИИ генерирует неотличимый от реальности контент за секунды, возможность верифицировать подлинность медиа — это не роскошь, а необходимость. Мы создаём Источник, чтобы вернуть людям контроль над информацией.»
-            </blockquote>
-          </div>
-        </section>
+      <section className="py-20 grid lg:grid-cols-[.8fr_1.2fr] gap-12 lg:gap-20 items-start">
+        <div><p className="eyebrow mb-6">Признание проекта</p><h2 className="text-3xl sm:text-4xl font-semibold tracking-[-.045em] leading-tight">Победитель конкурса предпринимательских проектов ФКН ВШЭ</h2></div>
+        <article className="bg-[#0b0b0b] text-white rounded-[22px] p-8 sm:p-10 lg:p-12 shadow-[0_2px_3px_rgba(0,0,0,.08),0_28px_64px_rgba(0,0,0,.15)]"><Award size={28}/><p className="mt-12 text-2xl sm:text-3xl font-semibold tracking-[-.04em] leading-tight">Победа подтвердила актуальность задачи и потенциал ЯВЬ как технологического продукта.</p><p className="mt-6 text-white/55 leading-7">Проект развивается на пересечении машинного обучения, анализа медиаданных и практики принятия решений.</p></article>
+      </section>
 
-        {/* What we do */}
-        <section className="mb-16">
-          <h2 className="text-2xl font-bold text-mv-accent mb-6">Что мы делаем</h2>
-          <p className="text-mv-text-secondary leading-relaxed mb-4">
-            <strong className="text-mv-text">Источник</strong> — это платформа верификации медиаконтента, которая использует специализированные модели машинного обучения для детекции AI-генерации в фотографиях, аудиозаписях, видео и текстах. Мы предоставляем не просто бинарный ответ «реально/фейк», а развёрнутый анализ с Индексом подлинности, детализацией по моделям и экспортируемыми отчётами.
-          </p>
-          <p className="text-mv-text-secondary leading-relaxed">
-            Проект доступен как веб-платформа и REST API для интеграции. Наша архитектура построена на React + Appwrite Cloud с асинхронной обработкой, что обеспечивает обработку запросов за 1-3 секунды.
-          </p>
-        </section>
+      <section className="py-20 border-y border-black/[.08]"><div className="grid md:grid-cols-2 gap-10 mb-14"><div><p className="eyebrow mb-6">Направление работы</p><h2 className="section-title">От исследовательской гипотезы к инструменту</h2></div><p className="text-mv-text-secondary leading-7 md:mt-auto max-w-xl md:ml-auto">Мы рассматриваем детекцию не как бинарный ответ «правда или ложь», а как систему вероятностных признаков, технических данных и контекста.</p></div>
+        <div className="grid md:grid-cols-3 gap-5">{directions.map(item=><article key={item.title} className="bg-white border border-black/[.08] rounded-2xl p-7 min-h-[270px] flex flex-col"><item.icon size={23}/><div className="mt-auto"><h3 className="text-xl font-semibold tracking-[-.03em]">{item.title}</h3><p className="mt-4 text-sm leading-6 text-mv-text-secondary">{item.text}</p></div></article>)}</div>
+      </section>
 
-        {/* Status */}
-        <section className="mb-16">
-          <h2 className="text-2xl font-bold text-mv-accent mb-6">Статус проекта</h2>
-          <p className="text-mv-text-secondary leading-relaxed mb-6">
-            Источник активно развивается. Проект поддерживается грантами, участвует в крупных хакатонах и акселераторах. Мы регулярно обновляем модели детекции и расширяем поддерживаемые форматы.
-          </p>
-          <div className="flex flex-wrap gap-3">
-            {badges.map((badge, index) => (
-              <span
-                key={index}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-mv-surface border border-mv-border rounded-full text-sm text-mv-text-secondary"
-              >
-                <span className="w-2 h-2 rounded-full bg-mv-accent" />
-                {badge}
-              </span>
-            ))}
-          </div>
-        </section>
+      <section className="py-20 grid lg:grid-cols-[.75fr_1.25fr] gap-12 lg:gap-20"><div><FlaskConical size={28}/><p className="eyebrow mt-8">Научно-прикладной подход</p></div><div className="space-y-8 text-lg leading-8 text-mv-text-secondary"><p>Исследовательская часть проекта посвящена оценке устойчивости методов детекции, сопоставлению сигналов и корректной интерпретации неопределённости.</p><p>Прикладная часть превращает эти методы в понятный пользовательский сценарий: загрузка материала, анализ, объяснение результата и сохранение контекста проверки.</p><p>Такой подход позволяет развивать продукт и одновременно проверять, насколько используемые методы полезны в реальных задачах.</p></div></section>
 
-        {/* Values */}
-        <section className="mb-16">
-          <h2 className="text-2xl font-bold text-mv-accent mb-6">Наши ценности</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {values.map((value, index) => (
-              <div
-                key={index}
-                className="bg-mv-surface border border-mv-border rounded-xl p-6 text-center hover:border-mv-accent/50 hover:-translate-y-1 transition-all"
-              >
-                <div className="w-12 h-12 mx-auto mb-4 rounded-lg bg-mv-accent/10 flex items-center justify-center text-mv-accent">
-                  <value.icon className="w-6 h-6" />
-                </div>
-                <h3 className="text-lg font-semibold text-mv-text mb-2">{value.title}</h3>
-                <p className="text-sm text-mv-text-secondary">{value.description}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Plans */}
-        <section className="mb-16">
-          <h2 className="text-2xl font-bold text-mv-accent mb-6">Наши планы</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {roadmapPlans.map((item, index) => (
-              <div
-                key={index}
-                className="bg-mv-surface border border-mv-border rounded-xl p-6 hover:border-mv-accent/50 hover:-translate-y-1 transition-all"
-              >
-                <div className="w-11 h-11 mb-4 rounded-lg bg-mv-accent/10 flex items-center justify-center text-mv-accent">
-                  {item.icon}
-                </div>
-                <h3 className="text-lg font-semibold text-mv-text mb-2">{item.title}</h3>
-                <p className="text-sm text-mv-text-secondary">{item.description}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Join Team */}
-        <section>
-          <h2 className="text-2xl font-bold text-mv-accent mb-6">Присоединяйся к команде</h2>
-          <div className="max-w-xl mx-auto">
-            <div className="bg-mv-surface border border-mv-border rounded-xl p-8 text-center hover:border-mv-accent transition-all">
-              <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-mv-surface-2 border-2 border-dashed border-mv-border flex items-center justify-center text-mv-text-muted">
-                <Plus className="w-8 h-8" />
-              </div>
-              <h3 className="text-xl font-semibold text-mv-text mb-2">Открытые позиции</h3>
-              <p className="text-mv-accent mb-4">ML-инженеры • Фронтенд-разработчики • Дизайнеры</p>
-              <p className="text-sm text-mv-text-secondary mb-6">
-                Мы ищем единомышленников, которые хотят вместе с нами бороться с фейками и дезинформацией.
-              </p>
-              
-              <div className="bg-mv-surface-2 rounded-lg p-4 mb-6 text-left">
-                <p className="text-sm text-mv-text-secondary mb-2">
-                  <strong className="text-mv-text">Как откликнуться:</strong>
-                </p>
-                <p className="text-sm text-mv-text-secondary mb-3">
-                  Напишите нам на почту с темой <span className="text-mv-accent font-mono">#ХОЧУ_В_КОМАНДУ</span>
-                </p>
-                <p className="text-sm text-mv-text-secondary">
-                  Пишите сразу с резюме — рассмотрим в течение недели.
-                </p>
-              </div>
-
-              <a
-                href={`mailto:${CONTACT_EMAIL}?subject=%23ХОЧУ_В_КОМАНДУ`}
-                className="inline-block px-6 py-3 bg-mv-accent text-white rounded-lg font-medium hover:bg-mv-accent-hover transition-colors"
-              >
-                Написать на {CONTACT_EMAIL}
-              </a>
-            </div>
-          </div>
-        </section>
-      </div>
+      <section className="bg-white border border-black/[.08] rounded-[22px] p-8 sm:p-12 flex flex-col md:flex-row md:items-center justify-between gap-8 shadow-[0_2px_3px_rgba(0,0,0,.04),0_20px_48px_rgba(0,0,0,.07)]"><div><h2 className="text-3xl font-semibold tracking-[-.04em]">Обсудить проект</h2><p className="mt-3 text-mv-text-secondary">Исследования, сотрудничество и применение платформы.</p></div><div className="flex flex-col sm:flex-row gap-3"><Link to="/research" className="btn-light">Исследования</Link><a href={`mailto:${CONTACT_EMAIL}`} className="btn-black">{CONTACT_EMAIL}<ArrowRight size={16}/></a></div></section>
     </div>
-  );
+  </div>;
 }

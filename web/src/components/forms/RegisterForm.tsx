@@ -8,11 +8,11 @@ import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { Mail, Lock, User, UserPlus } from 'lucide-react';
 import { Button, Input, Alert, Card } from '../ui';
-import { useAuthStore } from '../../store';
+import { useAuthStore, type AuthActionResult } from '../../store';
 import { isValidEmail, validatePassword } from '../../lib/utils';
 
 interface RegisterFormProps {
-  onSuccess?: () => void;
+  onSuccess?: (result: AuthActionResult) => void;
 }
 
 interface FormErrors {
@@ -80,7 +80,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
     const result = await register(name.trim(), email, password);
     
     if (result.success) {
-      onSuccess?.();
+      onSuccess?.(result);
     }
   };
 

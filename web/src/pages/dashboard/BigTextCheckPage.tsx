@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Clock, FileText, ShieldCheck, Sparkles } from 'lucide-react';
 
 import { Card, CardHeader, Button, Alert } from '../../components/ui';
@@ -51,6 +52,7 @@ const splitIntoWordSpans = (text: string, className: string, keyPrefix: string) 
 };
 
 export function BigTextCheckPage() {
+  const navigate = useNavigate();
   const { user } = useAuthStore();
 
   const [text, setText] = useState('');
@@ -139,6 +141,13 @@ export function BigTextCheckPage() {
       }
 
       const data = JSON.parse(responseBody);
+      if (data?.code === 'email_not_verified') {
+        navigate('/verify-email', {
+          replace: true,
+          state: { notice: 'Подтвердите email перед запуском анализа.' },
+        });
+        return;
+      }
       if (responseStatusCode && responseStatusCode >= 400) {
         throw new Error(data?.detail || 'Ошибка выполнения функции анализа.');
       }

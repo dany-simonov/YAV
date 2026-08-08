@@ -6,12 +6,23 @@
 
 import { useNavigate } from 'react-router-dom';
 import { RegisterForm } from '../../components/forms';
+import type { AuthActionResult } from '../../store';
 
 export function RegisterPage() {
   const navigate = useNavigate();
 
-  const handleSuccess = () => {
-    navigate('/dashboard');
+  const handleSuccess = (result: AuthActionResult) => {
+    if (result.user?.emailVerification) {
+      navigate('/dashboard', { replace: true });
+      return;
+    }
+    navigate('/verify-email', {
+      replace: true,
+      state: {
+        verificationEmailSent: result.verificationEmailSent,
+        verificationError: result.error,
+      },
+    });
   };
 
   return (

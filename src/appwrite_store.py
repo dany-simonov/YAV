@@ -125,7 +125,7 @@ async def get_authenticated_account(user_id: str, user_jwt: str) -> dict[str, An
 
 
 async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str, Any]:
-    """Create an owner-readable profile row once; repeated calls are safe."""
+    """Create a profile and mirror the authoritative Auth verification state."""
     endpoint, project_id, database_id, users_table_id, _ = _resource_config()
     user_id = str(account.get("$id") or "")
     if not user_id:
@@ -134,11 +134,24 @@ async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str
     encoded_user = quote(user_id, safe="")
     base_url = f"{endpoint}/tablesdb/{database_id}/tables/{users_table_id}/rows"
     headers = {"X-Appwrite-Project": project_id, "X-Appwrite-Key": api_key}
+    email_verified = account.get("emailVerification") is True
+
+    async def _sync_existing(client: httpx.AsyncClient, row: dict[str, Any]) -> dict[str, Any]:
+        if row.get("email_verified") is email_verified:
+            return row
+        updated = await client.patch(
+            f"{base_url}/{encoded_user}",
+            headers=headers,
+            json={"data": {"email_verified": email_verified}},
+        )
+        if updated.status_code != 200:
+            raise RuntimeError(f"Profile verification sync failed ({updated.status_code})")
+        return updated.json()
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         existing = await client.get(f"{base_url}/{encoded_user}", headers=headers)
         if existing.status_code == 200:
-            return existing.json()
+            return await _sync_existing(client, existing.json())
         if existing.status_code != 404:
             raise RuntimeError(f"Profile lookup failed ({existing.status_code})")
 
@@ -151,7 +164,7 @@ async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str
                     "name": str(account.get("name") or "Пользователь")[:128],
                     "plan": "free",
                     "status": "active",
-                    "email_verified": bool(account.get("emailVerification", False)),
+                    "email_verified": email_verified,
                     "checks_count": 0,
                     "last_check_at": None,
                 },
@@ -161,7 +174,7 @@ async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str
         if response.status_code == 409:
             existing = await client.get(f"{base_url}/{encoded_user}", headers=headers)
             if existing.status_code == 200:
-                return existing.json()
+                return await _sync_existing(client, existing.json())
     if response.status_code not in (200, 201):
         raise RuntimeError(f"Profile creation failed ({response.status_code})")
     return response.json()

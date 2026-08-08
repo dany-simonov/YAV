@@ -6,7 +6,8 @@
  */
 
 import { useState, useEffect } from 'react';
-import { useAuthStore } from '../store/authStore';
+import { useNavigate } from 'react-router-dom';
+import { useAuthStore, type AuthActionResult } from '../store/authStore';
 import { X, XCircle, Loader2 } from 'lucide-react';
 interface AuthModalProps {
   isOpen: boolean;
@@ -14,6 +15,7 @@ interface AuthModalProps {
 }
 
 export function AuthModal({ isOpen, onClose }: AuthModalProps) {
+  const navigate = useNavigate();
   // ============================================================================
   // Store Integration
   // ============================================================================
@@ -61,7 +63,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    let result: { success: boolean; error?: string };
+    let result: AuthActionResult;
 
     if (isLoginMode) {
       // Login mode: call login(email, password)
@@ -77,6 +79,16 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
       setName('');
       setEmail('');
       setPassword('');
+      if (result.user?.emailVerification) {
+        navigate('/dashboard');
+      } else {
+        navigate('/verify-email', {
+          state: {
+            verificationEmailSent: result.verificationEmailSent,
+            verificationError: result.error,
+          },
+        });
+      }
     }
     // If failed, error is automatically set in store and displayed
   };

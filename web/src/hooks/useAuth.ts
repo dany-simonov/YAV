@@ -3,6 +3,7 @@ import { account, ID } from '../lib/appwrite';
 import type { User } from '../types';
 import type { Models } from 'appwrite';
 
+/** @deprecated Legacy hook; it is not used by the active Router. Use useAuthStore instead. */
 export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);

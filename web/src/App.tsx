@@ -6,7 +6,15 @@
 
 import { useEffect, useState } from 'react';
 import { HashRouter, Routes, Route } from 'react-router-dom';
-import { Header, Footer, AuthModal, DashboardLayout, ProtectedRoute, PublicOnlyRoute } from './components';
+import {
+  Header,
+  Footer,
+  AuthModal,
+  DashboardLayout,
+  ProtectedRoute,
+  PublicOnlyRoute,
+  VerificationRoute,
+} from './components';
 import { 
   Home, 
   About, 
@@ -18,6 +26,8 @@ import {
   NotFound,
   LoginPage,
   RegisterPage,
+  VerifyEmailPage,
+  VerifyEmailCallbackPage,
   DashboardOverview,
   NewCheckPage,
   BigTextCheckPage,
@@ -117,6 +127,16 @@ function AppContent() {
           </PublicOnlyRoute>
         }
       />
+
+      <Route
+        path="/verify-email"
+        element={
+          <VerificationRoute>
+            <VerifyEmailPage />
+          </VerificationRoute>
+        }
+      />
+      <Route path="/verify-email/callback" element={<VerifyEmailCallbackPage />} />
 
       {/* Protected Dashboard Routes */}
       <Route

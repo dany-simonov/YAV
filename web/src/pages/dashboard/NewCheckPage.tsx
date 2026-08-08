@@ -5,7 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { AppwriteException } from 'appwrite';
 import {
   FileImage, FileText, Send, Loader2
@@ -31,6 +31,7 @@ const tabs: Tab[] = [
 ];
 
 export function NewCheckPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as TabType) || 'media';
   
@@ -193,6 +194,20 @@ export function NewCheckPage() {
       }
 
       const resultData = JSON.parse(execution.responseBody);
+      if (resultData.code === 'email_not_verified') {
+        if (uploadedFileId) {
+          try {
+            await storage.deleteFile(APPWRITE_CONFIG.buckets.uploads, uploadedFileId);
+          } catch {
+            // Best effort cleanup before leaving the page.
+          }
+        }
+        navigate('/verify-email', {
+          replace: true,
+          state: { notice: 'Подтвердите email перед запуском анализа.' },
+        });
+        return;
+      }
       if (resultData.detail) {
         throw new Error(resultData.detail);
       }

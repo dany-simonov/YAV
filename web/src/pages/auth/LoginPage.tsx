@@ -6,12 +6,13 @@
 
 import { useNavigate } from 'react-router-dom';
 import { LoginForm } from '../../components/forms';
+import type { AuthActionResult } from '../../store';
 
 export function LoginPage() {
   const navigate = useNavigate();
 
-  const handleSuccess = () => {
-    navigate('/dashboard');
+  const handleSuccess = (result: AuthActionResult) => {
+    navigate(result.user?.emailVerification ? '/dashboard' : '/verify-email', { replace: true });
   };
 
   return (

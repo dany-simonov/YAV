@@ -5,13 +5,31 @@
  */
 
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuthStore } from '../../store';
+import { useAuthStore, type User } from '../../store';
 import { Spinner } from '../ui';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
   redirectTo?: string;
 }
+
+export const getProtectedRouteRedirect = (user: User | null): string | null => {
+  if (!user) return '/login';
+  return user.emailVerification ? null : '/verify-email';
+};
+
+export const getPublicOnlyRedirect = (
+  user: User | null,
+  verifiedRedirect = '/dashboard'
+): string | null => {
+  if (!user) return null;
+  return user.emailVerification ? verifiedRedirect : '/verify-email';
+};
+
+export const getVerificationRouteRedirect = (user: User | null): string | null => {
+  if (!user) return '/login';
+  return user.emailVerification ? '/dashboard' : null;
+};
 
 export function ProtectedRoute({ 
   children, 
@@ -32,9 +50,15 @@ export function ProtectedRoute({
     );
   }
 
-  // Redirect to login if not authenticated
-  if (!user) {
-    return <Navigate to={redirectTo} state={{ from: location }} replace />;
+  const redirect = getProtectedRouteRedirect(user);
+  if (redirect) {
+    return (
+      <Navigate
+        to={redirect === '/login' ? redirectTo : redirect}
+        state={{ from: location }}
+        replace
+      />
+    );
   }
 
   return <>{children}</>;
@@ -69,12 +93,27 @@ export function PublicOnlyRoute({
     );
   }
 
-  // Redirect to dashboard if already authenticated
-  if (user) {
+  const redirect = getPublicOnlyRedirect(user, redirectTo);
+  if (redirect) {
     // Check if there's a return path
-    const from = (location.state as { from?: Location })?.from?.pathname || redirectTo;
-    return <Navigate to={from} replace />;
+    const from = (location.state as { from?: Location })?.from?.pathname;
+    return <Navigate to={user?.emailVerification && from ? from : redirect} replace />;
   }
 
   return <>{children}</>;
+}
+
+export function VerificationRoute({ children }: { children: React.ReactNode }) {
+  const { user, isLoading, isInitialized } = useAuthStore();
+
+  if (!isInitialized || isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-mv-bg">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  const redirect = getVerificationRouteRedirect(user);
+  return redirect ? <Navigate to={redirect} replace /> : <>{children}</>;
 }

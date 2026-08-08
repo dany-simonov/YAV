@@ -16,7 +16,7 @@ export { NotFound } from './NotFound';
 export { Dashboard } from './Dashboard';
 
 // Auth pages
-export { LoginPage, RegisterPage } from './auth';
+export { LoginPage, RegisterPage, VerifyEmailPage, VerifyEmailCallbackPage } from './auth';
 
 // Dashboard pages (explicit paths to avoid casing issues)
 export { DashboardOverview } from './dashboard/DashboardOverview';

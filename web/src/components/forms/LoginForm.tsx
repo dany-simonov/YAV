@@ -8,11 +8,11 @@ import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { Mail, Lock, LogIn } from 'lucide-react';
 import { Button, Input, Alert, Card } from '../ui';
-import { useAuthStore } from '../../store';
+import { useAuthStore, type AuthActionResult } from '../../store';
 import { isValidEmail } from '../../lib/utils';
 
 interface LoginFormProps {
-  onSuccess?: () => void;
+  onSuccess?: (result: AuthActionResult) => void;
 }
 
 interface FormErrors {
@@ -57,7 +57,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
     const result = await login(email, password);
     
     if (result.success) {
-      onSuccess?.();
+      onSuccess?.(result);
     }
   };
 

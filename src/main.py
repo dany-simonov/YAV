@@ -34,6 +34,10 @@ from src.appwrite_store import (  # noqa: E402
 )
 
 
+class EmailNotVerifiedError(PermissionError):
+    """Raised when an authenticated account has not verified its email."""
+
+
 def _extract_payload(req: Any) -> dict[str, Any]:
     """Extract request payload from Appwrite context.req in a robust way."""
     for attr in ("body_json", "bodyJson", "json"):
@@ -230,6 +234,9 @@ async def _execute_request(
     if action == "ensure_profile":
         return {"profile_id": str(profile.get("$id") or user_id)}
 
+    if account.get("emailVerification") is not True:
+        raise EmailNotVerifiedError("Подтвердите email перед запуском анализа.")
+
     result = await _analyze(payload, user_jwt)
     check_id = await persist_check_result(
         result,
@@ -282,5 +289,14 @@ def main(context: Any):
             )
             _log_analysis_result(context, result, media_type)
         return _response_json(context, result, 200)
+    except EmailNotVerifiedError:
+        return _response_json(
+            context,
+            {
+                "detail": "Подтвердите email перед запуском анализа.",
+                "code": "email_not_verified",
+            },
+            403,
+        )
     except Exception as exc:
         return _response_json(context, {"detail": str(exc)}, 400)

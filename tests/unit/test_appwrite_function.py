@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.main import _download_file_bytes, _execute_request, main
+from src.main import EmailNotVerifiedError, _download_file_bytes, _execute_request, main
 
 
 def test_main_passes_dynamic_api_key_from_request_headers():
@@ -104,10 +104,10 @@ async def test_execute_request_uses_runtime_identity_not_payload_user_id():
     }
     with patch(
         "src.main.get_authenticated_account",
-        new=AsyncMock(return_value={"$id": "runtime-user"}),
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
     ), patch(
         "src.main.ensure_user_profile",
-        new=AsyncMock(return_value={"$id": "runtime-user"}),
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
     ), patch(
         "src.main._analyze", new=AsyncMock(return_value=result)
     ), patch(
@@ -139,10 +139,10 @@ async def test_file_payload_passes_runtime_jwt_to_download_and_keeps_db_key():
     }
     with patch(
         "src.main.get_authenticated_account",
-        new=AsyncMock(return_value={"$id": "runtime-user"}),
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
     ), patch(
         "src.main.ensure_user_profile",
-        new=AsyncMock(return_value={"$id": "runtime-user"}),
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
     ) as profile_mock, patch(
         "src.main._download_file_bytes", new=AsyncMock(return_value=b"own-file")
     ) as download_mock, patch(
@@ -167,10 +167,10 @@ async def test_file_payload_passes_runtime_jwt_to_download_and_keeps_db_key():
 async def test_forbidden_file_stops_analysis_and_persistence():
     with patch(
         "src.main.get_authenticated_account",
-        new=AsyncMock(return_value={"$id": "runtime-user"}),
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
     ), patch(
         "src.main.ensure_user_profile",
-        new=AsyncMock(return_value={"$id": "runtime-user"}),
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
     ), patch(
         "src.main._download_file_bytes",
         new=AsyncMock(side_effect=PermissionError("File is not accessible")),
@@ -199,7 +199,7 @@ async def test_text_analysis_does_not_attempt_storage_download():
     }
     with patch(
         "src.main.get_authenticated_account",
-        new=AsyncMock(return_value={"$id": "runtime-user"}),
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
     ), patch(
         "src.main.ensure_user_profile",
         new=AsyncMock(return_value={"$id": "runtime-user"}),
@@ -219,6 +219,79 @@ async def test_text_analysis_does_not_attempt_storage_download():
 
     assert response["check_id"] == "check-1"
     download_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unverified_analyze_is_rejected_before_analysis_or_persistence():
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": False}),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(return_value={"$id": "runtime-user"}),
+    ), patch("src.main._analyze", new=AsyncMock()) as analyze_mock, patch(
+        "src.main._download_file_bytes", new=AsyncMock()
+    ) as download_mock, patch(
+        "src.main.persist_check_result", new=AsyncMock()
+    ) as persist_mock:
+        with pytest.raises(EmailNotVerifiedError):
+            await _execute_request(
+                {
+                    "fileId": "file-id",
+                    "mediaType": "image",
+                    "emailVerification": True,
+                    "email_verified": True,
+                },
+                "dynamic-key",
+                "runtime-user",
+                "runtime-jwt",
+            )
+
+    analyze_mock.assert_not_awaited()
+    download_mock.assert_not_awaited()
+    persist_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_profile_remains_available_to_unverified_user():
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": False}),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(return_value={"$id": "runtime-user"}),
+    ), patch("src.main._analyze", new=AsyncMock()) as analyze_mock:
+        response = await _execute_request(
+            {"action": "ensure_profile"},
+            "dynamic-key",
+            "runtime-user",
+            "runtime-jwt",
+        )
+
+    assert response == {"profile_id": "runtime-user"}
+    analyze_mock.assert_not_awaited()
+
+
+def test_main_returns_stable_403_for_unverified_account():
+    context = SimpleNamespace(
+        req=SimpleNamespace(body_json={"text": "content"}, headers={}),
+        res=SimpleNamespace(json=lambda payload, status=200: (payload, status)),
+    )
+    with patch(
+        "src.main._execute_request",
+        new=MagicMock(
+            side_effect=EmailNotVerifiedError("internal message must not leak"),
+        ),
+    ):
+        response = main(context)
+
+    assert response == (
+        {
+            "detail": "Подтвердите email перед запуском анализа.",
+            "code": "email_not_verified",
+        },
+        403,
+    )
 
 
 @pytest.mark.asyncio

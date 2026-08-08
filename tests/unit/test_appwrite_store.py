@@ -85,7 +85,7 @@ async def test_profile_creation_is_owner_readable_and_has_safe_defaults():
 
 @pytest.mark.asyncio
 async def test_profile_creation_is_idempotent_when_row_exists():
-    client = _client_with(_response("get", 200, {"$id": "user-1"}))
+    client = _client_with(_response("get", 200, {"$id": "user-1", "email_verified": False}))
     with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
         profile = await ensure_user_profile({"$id": "user-1"}, "dynamic-key")
     assert profile["$id"] == "user-1"
@@ -97,12 +97,30 @@ async def test_profile_creation_recovers_from_concurrent_create():
     client = _client_with(
         _response("get", 404),
         _response("post", 409),
-        _response("get", 200, {"$id": "user-1"}),
+        _response("get", 200, {"$id": "user-1", "email_verified": False}),
     )
     with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
         profile = await ensure_user_profile({"$id": "user-1"}, "dynamic-key")
     assert profile["$id"] == "user-1"
     assert client.get.await_count == 2
+
+
+@pytest.mark.parametrize(("stored", "authoritative"), [(False, True), (True, False)])
+@pytest.mark.asyncio
+async def test_profile_mirrors_authoritative_email_verification(stored, authoritative):
+    client = _client_with(
+        _response("get", 200, {"$id": "user-1", "email_verified": stored}),
+        _response("patch", 200, {"$id": "user-1", "email_verified": authoritative}),
+    )
+    account = {"$id": "user-1", "emailVerification": authoritative}
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        profile = await ensure_user_profile(account, "dynamic-key")
+
+    assert profile["email_verified"] is authoritative
+    assert client.patch.await_args.kwargs["json"] == {
+        "data": {"email_verified": authoritative}
+    }
 
 
 @pytest.mark.asyncio

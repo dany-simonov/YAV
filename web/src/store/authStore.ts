@@ -15,6 +15,11 @@ import { create } from 'zustand';
 import { AppwriteException } from 'appwrite';
 import { account, ID, type Models } from '../lib/appwrite';
 import { ensureUserProfile } from '../lib/serverProfile';
+import {
+  confirmEmailVerification,
+  resendEmailVerification,
+  sendEmailVerification,
+} from '../lib/emailVerification';
 
 // ============================================================================
 // Types
@@ -50,15 +55,41 @@ interface AuthState {
   isInitialized: boolean;
 }
 
+export interface AuthActionResult {
+  success: boolean;
+  error?: string;
+  user?: User;
+  verificationEmailSent?: boolean;
+}
+
+export type VerificationSessionState = 'same' | 'none' | 'other';
+
+export interface ConfirmVerificationResult {
+  success: boolean;
+  error?: string;
+  reason?: 'invalid' | 'network';
+  sessionState?: VerificationSessionState;
+  alreadyVerified?: boolean;
+}
+
 interface AuthActions {
   /** Initialize auth state (check existing session) */
   initialize: () => Promise<void>;
   
   /** Login with email and password */
-  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  login: (email: string, password: string) => Promise<AuthActionResult>;
   
   /** Register new user */
-  register: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  register: (name: string, email: string, password: string) => Promise<AuthActionResult>;
+
+  /** Send an email verification message for the current account. */
+  sendVerification: () => Promise<AuthActionResult>;
+
+  /** Resend an email verification message for the current account. */
+  resendVerification: () => Promise<AuthActionResult>;
+
+  /** Confirm an email verification callback token. */
+  confirmVerification: (userId: string, secret: string) => Promise<ConfirmVerificationResult>;
   
   /** Logout current user */
   logout: () => Promise<void>;
@@ -67,7 +98,7 @@ interface AuthActions {
   clearError: () => void;
   
   /** Refresh user data */
-  refreshUser: () => Promise<void>;
+  refreshUser: () => Promise<User | null>;
 }
 
 type AuthStore = AuthState & AuthActions;
@@ -93,14 +124,23 @@ const transformUser = (appwriteUser: Models.User<Models.Preferences>): User => (
  * Map Appwrite error codes to user-friendly messages
  * Uses AppwriteException for type-safe error handling
  */
-const getErrorMessage = (error: unknown): string => {
+type AuthOperation = 'login' | 'register' | 'verification' | 'generic';
+
+const getErrorMessage = (error: unknown, operation: AuthOperation = 'generic'): string => {
   // Handle Appwrite-specific exceptions
   if (error instanceof AppwriteException) {
-    const { code, type, message } = error;
-    
-    // Log error details in development
-    if (import.meta.env.DEV) {
-      console.warn('[Auth Error]', { code, type, message });
+    const { code, type } = error;
+
+    if (operation === 'login' && [400, 401, 404].includes(code)) {
+      return 'Неверный email или пароль';
+    }
+    if (operation === 'register' && code === 409) {
+      return 'Не удалось создать аккаунт с указанными данными';
+    }
+    if (operation === 'verification') {
+      if (code === 429) return 'Слишком много попыток. Попробуйте позже';
+      if (code >= 500 || code === 0) return 'Не удалось связаться с сервисом подтверждения';
+      return 'Не удалось выполнить подтверждение email';
     }
     
     // Map by HTTP status code
@@ -116,17 +156,10 @@ const getErrorMessage = (error: unknown): string => {
         return 'Ошибка авторизации. Проверьте данные и попробуйте снова';
         
       case 404:
-        // User not found
-        if (type === 'user_not_found') {
-          return 'Пользователь с таким email не найден';
-        }
         return 'Запрашиваемый ресурс не найден';
         
       case 409:
         // Conflict - user already exists
-        if (type === 'user_already_exists') {
-          return 'Пользователь с таким email уже существует';
-        }
         return 'Конфликт данных. Попробуйте другой email';
         
       case 429:
@@ -151,8 +184,7 @@ const getErrorMessage = (error: unknown): string => {
       return 'Некорректный формат email';
     }
     
-    // Return original message if nothing matched
-    return message || 'Произошла ошибка при авторизации';
+    return 'Произошла ошибка при авторизации';
   }
   
   // Handle generic JavaScript errors
@@ -166,15 +198,25 @@ const getErrorMessage = (error: unknown): string => {
       return 'Превышено время ожидания. Попробуйте снова';
     }
     
-    // Log unexpected errors in development
-    if (import.meta.env.DEV) {
-      console.error('[Auth Unexpected Error]', error);
-    }
-    
-    return error.message;
+    return operation === 'verification'
+      ? 'Не удалось выполнить подтверждение email'
+      : 'Произошла ошибка при авторизации';
   }
   
   return 'Произошла неизвестная ошибка';
+};
+
+const getVerificationFailureReason = (error: unknown): 'invalid' | 'network' => {
+  if (error instanceof AppwriteException) {
+    return error.code === 0 || error.code >= 500 ? 'network' : 'invalid';
+  }
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    if (message.includes('network') || message.includes('fetch') || message.includes('timeout')) {
+      return 'network';
+    }
+  }
+  return 'invalid';
 };
 
 const discardCurrentSession = async (): Promise<void> => {
@@ -189,7 +231,7 @@ const discardCurrentSession = async (): Promise<void> => {
 // Store Implementation
 // ============================================================================
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set, get) => ({
   // Initial state
   user: null,
   session: null,
@@ -230,38 +272,29 @@ export const useAuthStore = create<AuthStore>((set) => ({
     let sessionCreated = false;
     try {
       set({ isActionLoading: true, error: null });
-      
-      if (import.meta.env.DEV) {
-        console.log('[Auth] Attempting login for:', email);
-      }
-      
+
       // Create email/password session
-      const session = await account.createEmailPasswordSession(email, password);
+      const session = await account.createEmailPasswordSession({
+        email: email.trim(),
+        password,
+      });
       sessionCreated = true;
-      
-      if (import.meta.env.DEV) {
-        console.log('[Auth] Session created:', session.$id);
-      }
-      
+
       // Fetch user data
       const appwriteUser = await account.get();
       await ensureUserProfile();
       const user = transformUser(appwriteUser);
-      
-      if (import.meta.env.DEV) {
-        console.log('[Auth] Login successful:', user.email);
-      }
-      
+
       set({ 
         user,
         session,
         isActionLoading: false 
       });
-      
-      return { success: true };
+
+      return { success: true, user };
     } catch (error) {
       if (sessionCreated) await discardCurrentSession();
-      const errorMessage = getErrorMessage(error);
+      const errorMessage = getErrorMessage(error, 'login');
       set({ 
         isActionLoading: false, 
         error: errorMessage 
@@ -274,51 +307,159 @@ export const useAuthStore = create<AuthStore>((set) => ({
     let sessionCreated = false;
     try {
       set({ isActionLoading: true, error: null });
-      
-      if (import.meta.env.DEV) {
-        console.log('[Auth] Attempting registration for:', email);
-      }
-      
+
+      const normalizedEmail = email.trim();
+
       // Step 1: Create new user account
-      const newUser = await account.create(ID.unique(), email, password, name);
-      
-      if (import.meta.env.DEV) {
-        console.log('[Auth] User created:', newUser.$id);
-      }
-      
+      await account.create({
+        userId: ID.unique(),
+        email: normalizedEmail,
+        password,
+        name,
+      });
+
       // Step 2: Automatically log in after registration
-      const session = await account.createEmailPasswordSession(email, password);
+      const session = await account.createEmailPasswordSession({
+        email: normalizedEmail,
+        password,
+      });
       sessionCreated = true;
-      
-      if (import.meta.env.DEV) {
-        console.log('[Auth] Auto-login session created:', session.$id);
-      }
-      
+
       // Step 3: Fetch full user data
       const appwriteUser = await account.get();
       await ensureUserProfile();
       const user = transformUser(appwriteUser);
-      
-      if (import.meta.env.DEV) {
-        console.log('[Auth] Registration complete:', user.email);
-      }
-      
+
       set({ 
         user,
         session,
-        isActionLoading: false 
       });
-      
-      return { success: true };
+
+      if (user.emailVerification) {
+        set({ isActionLoading: false });
+        return { success: true, user, verificationEmailSent: false };
+      }
+
+      try {
+        await sendEmailVerification();
+        set({ isActionLoading: false });
+        return { success: true, user, verificationEmailSent: true };
+      } catch (verificationError) {
+        // Account and session remain valid; the verification page offers resend.
+        set({ isActionLoading: false });
+        return {
+          success: true,
+          user,
+          verificationEmailSent: false,
+          error: getErrorMessage(verificationError, 'verification'),
+        };
+      }
     } catch (error) {
       if (sessionCreated) await discardCurrentSession();
-      const errorMessage = getErrorMessage(error);
+      const errorMessage = getErrorMessage(error, 'register');
       set({ 
         isActionLoading: false, 
         error: errorMessage 
       });
       return { success: false, error: errorMessage };
     }
+  },
+
+  sendVerification: async () => {
+    const currentUser = get().user;
+    if (!currentUser) {
+      return { success: false, error: 'Для отправки письма необходимо войти' };
+    }
+    if (currentUser.emailVerification) {
+      return { success: true, user: currentUser, verificationEmailSent: false };
+    }
+
+    try {
+      set({ isActionLoading: true, error: null });
+      await sendEmailVerification();
+      set({ isActionLoading: false });
+      return { success: true, user: currentUser, verificationEmailSent: true };
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'verification');
+      set({ isActionLoading: false });
+      return { success: false, error: errorMessage };
+    }
+  },
+
+  resendVerification: async () => {
+    const currentUser = get().user;
+    if (!currentUser) {
+      return { success: false, error: 'Для отправки письма необходимо войти' };
+    }
+    if (currentUser.emailVerification) {
+      return { success: true, user: currentUser, verificationEmailSent: false };
+    }
+
+    try {
+      set({ isActionLoading: true, error: null });
+      await resendEmailVerification();
+      set({ isActionLoading: false });
+      return { success: true, user: currentUser, verificationEmailSent: true };
+    } catch (error) {
+      const errorMessage = getErrorMessage(error, 'verification');
+      set({ isActionLoading: false });
+      return { success: false, error: errorMessage };
+    }
+  },
+
+  confirmVerification: async (userId: string, secret: string) => {
+    if (!userId || !secret) {
+      return { success: false, error: 'Ссылка подтверждения неполная' };
+    }
+
+    try {
+      await confirmEmailVerification({ userId, secret });
+    } catch (error) {
+      try {
+        const appwriteUser = await account.get();
+        if (appwriteUser.$id === userId && appwriteUser.emailVerification) {
+          const user = transformUser(appwriteUser);
+          set({ user });
+          try {
+            await ensureUserProfile();
+          } catch {
+            // Auth is authoritative; the next bootstrap/analyze retries the mirror sync.
+          }
+          return { success: true, sessionState: 'same', alreadyVerified: true };
+        }
+      } catch {
+        // A missing or unrelated session does not change the token failure result.
+      }
+      return {
+        success: false,
+        error: getErrorMessage(error, 'verification'),
+        reason: getVerificationFailureReason(error),
+      };
+    }
+
+    const currentStateUser = get().user;
+    let appwriteUser: Models.User<Models.Preferences>;
+    try {
+      appwriteUser = await account.get();
+    } catch {
+      if (currentStateUser && currentStateUser.$id !== userId) {
+        return { success: true, sessionState: 'other' };
+      }
+      return { success: true, sessionState: 'none' };
+    }
+
+    if (appwriteUser.$id !== userId) {
+      return { success: true, sessionState: 'other' };
+    }
+
+    const user = transformUser(appwriteUser);
+    set({ user });
+    try {
+      await ensureUserProfile();
+    } catch {
+      // Auth is authoritative; the next bootstrap/analyze retries the mirror sync.
+    }
+    return { success: true, sessionState: 'same', alreadyVerified: false };
   },
 
   logout: async () => {
@@ -332,8 +473,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
         session: null, 
         isActionLoading: false 
       });
-    } catch (error) {
-      console.error('Logout error:', error);
+    } catch {
       // Even if logout fails on server, clear local state
       set({ 
         user: null, 
@@ -350,10 +490,13 @@ export const useAuthStore = create<AuthStore>((set) => ({
   refreshUser: async () => {
     try {
       const appwriteUser = await account.get();
+      await ensureUserProfile();
       const user = transformUser(appwriteUser);
       set({ user });
+      return user;
     } catch {
       set({ user: null, session: null });
+      return null;
     }
   },
 }));

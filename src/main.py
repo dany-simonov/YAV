@@ -57,6 +57,28 @@ def _extract_payload(req: Any) -> dict[str, Any]:
     return {}
 
 
+def _extract_dynamic_api_key(req: Any) -> str:
+    """Extract the per-execution Appwrite API key from request headers."""
+    headers = getattr(req, "headers", None)
+    if callable(headers):
+        headers = headers()
+    if not headers:
+        return ""
+
+    try:
+        for name, value in headers.items():
+            if str(name).lower() == "x-appwrite-key":
+                return str(value).strip()
+    except (AttributeError, TypeError):
+        pass
+
+    try:
+        value = headers["x-appwrite-key"]
+    except (KeyError, TypeError):
+        return ""
+    return str(value).strip()
+
+
 def _response_json(context: Any, payload: dict[str, Any], status: int = 200):
     """Return JSON response compatible with Appwrite runtime variants."""
     safe_payload = json.loads(json.dumps(payload, default=str))
@@ -80,18 +102,18 @@ def _detect_media_type_from_payload(payload: dict[str, Any]) -> MediaType:
     return mapping.get(raw, MediaType.TEXT)
 
 
-async def _download_file_bytes(file_id: str, bucket_id: str) -> bytes:
+async def _download_file_bytes(file_id: str, bucket_id: str, api_key: str = "") -> bytes:
     endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", "").rstrip("/")
     project_id = os.getenv("APPWRITE_FUNCTION_PROJECT_ID", "")
-    api_key = os.getenv("APPWRITE_FUNCTION_API_KEY", "")
+    resolved_api_key = api_key or os.getenv("APPWRITE_FUNCTION_API_KEY", "")
 
-    if not endpoint or not project_id or not api_key:
+    if not endpoint or not project_id or not resolved_api_key:
         raise RuntimeError("Missing APPWRITE_FUNCTION_API_ENDPOINT/PROJECT_ID/API_KEY")
 
     url = f"{endpoint}/storage/buckets/{bucket_id}/files/{file_id}/download"
     headers = {
         "X-Appwrite-Project": project_id,
-        "X-Appwrite-Key": api_key,
+        "X-Appwrite-Key": resolved_api_key,
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -108,7 +130,7 @@ HYBRID_MAX_TEXT_LENGTH = 10_000
 hybrid_analyzer = HybridTextAnalyzer()
 
 
-async def _analyze(payload: dict[str, Any]) -> dict[str, Any]:
+async def _analyze(payload: dict[str, Any], api_key: str = "") -> dict[str, Any]:
     router = MediaRouter()
     started = time.perf_counter()
 
@@ -136,7 +158,7 @@ async def _analyze(payload: dict[str, Any]) -> dict[str, Any]:
             or os.getenv("UPLOADS_BUCKET_ID")
             or "69af36f900139c5afe5b"
         )
-        file_bytes = await _download_file_bytes(file_id, bucket_id)
+        file_bytes = await _download_file_bytes(file_id, bucket_id, api_key)
 
         # If mediaType was not explicitly provided, router will infer as much as possible.
         if media_type == MediaType.TEXT:
@@ -183,7 +205,8 @@ def main(context: Any):
     """Appwrite function handler."""
     try:
         payload = _extract_payload(context.req)
-        result = _run_coro_sync(_analyze(payload))
+        api_key = _extract_dynamic_api_key(context.req)
+        result = _run_coro_sync(_analyze(payload, api_key))
         return _response_json(context, result, 200)
     except Exception as exc:
         return _response_json(context, {"detail": str(exc)}, 400)

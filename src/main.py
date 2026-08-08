@@ -135,26 +135,28 @@ def _detect_media_type_from_payload(payload: dict[str, Any]) -> MediaType:
     return mapping.get(raw, MediaType.TEXT)
 
 
-async def _download_file_bytes(file_id: str, bucket_id: str, api_key: str = "") -> bytes:
+async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> bytes:
+    """Download a user-owned file while enforcing the invoking user's ACL."""
     endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", "").rstrip("/")
     project_id = os.getenv("APPWRITE_FUNCTION_PROJECT_ID", "")
-    resolved_api_key = api_key or os.getenv("APPWRITE_FUNCTION_API_KEY", "")
 
-    if not endpoint or not project_id or not resolved_api_key:
-        raise RuntimeError("Missing APPWRITE_FUNCTION_API_ENDPOINT/PROJECT_ID/API_KEY")
+    if not user_jwt:
+        raise PermissionError("Authenticated Appwrite user context is required")
+    if not endpoint or not project_id:
+        raise RuntimeError("Missing APPWRITE_FUNCTION_API_ENDPOINT/PROJECT_ID")
 
     url = f"{endpoint}/storage/buckets/{bucket_id}/files/{file_id}/download"
     headers = {
         "X-Appwrite-Project": project_id,
-        "X-Appwrite-Key": resolved_api_key,
+        "X-Appwrite-JWT": user_jwt,
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.get(url, headers=headers)
+        if response.status_code in (401, 403, 404):
+            raise PermissionError("File is not accessible to the authenticated user")
         if response.status_code >= 400:
-            raise RuntimeError(
-                f"Storage download failed ({response.status_code}) for bucket={bucket_id}, fileId={file_id}"
-            )
+            raise RuntimeError("Storage download failed")
         return response.content
 
 
@@ -163,7 +165,7 @@ HYBRID_MAX_TEXT_LENGTH = 10_000
 hybrid_analyzer = HybridTextAnalyzer()
 
 
-async def _analyze(payload: dict[str, Any], api_key: str = "") -> dict[str, Any]:
+async def _analyze(payload: dict[str, Any], user_jwt: str) -> dict[str, Any]:
     router = MediaRouter()
     started = time.perf_counter()
 
@@ -191,7 +193,7 @@ async def _analyze(payload: dict[str, Any], api_key: str = "") -> dict[str, Any]
             or os.getenv("UPLOADS_BUCKET_ID")
             or "uploads"
         )
-        file_bytes = await _download_file_bytes(file_id, bucket_id, api_key)
+        file_bytes = await _download_file_bytes(file_id, bucket_id, user_jwt)
 
         # If mediaType was not explicitly provided, router will infer as much as possible.
         if media_type == MediaType.TEXT:
@@ -228,7 +230,7 @@ async def _execute_request(
     if action == "ensure_profile":
         return {"profile_id": str(profile.get("$id") or user_id)}
 
-    result = await _analyze(payload, api_key)
+    result = await _analyze(payload, user_jwt)
     check_id = await persist_check_result(
         result,
         user_id,

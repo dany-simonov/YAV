@@ -91,6 +91,29 @@ def _response_json(context: Any, payload: dict[str, Any], status: int = 200):
             return safe_payload
 
 
+def _log_analysis_result(context: Any, result: dict[str, Any], media_type: MediaType) -> None:
+    """Log a compact result summary without request data or credentials."""
+    log = getattr(context, "log", None)
+    if not callable(log):
+        return
+
+    def _safe_value(value: Any) -> str:
+        raw = getattr(value, "value", value)
+        return str(raw if raw is not None else "unknown").replace("\r", " ").replace("\n", " ")[:64]
+
+    message = (
+        f"analysis_result media_type={_safe_value(result.get('media_type', media_type))} "
+        f"verdict={_safe_value(result.get('verdict'))} "
+        f"confidence={_safe_value(result.get('confidence'))} "
+        f"model={_safe_value(result.get('model_used'))} "
+        f"processing_ms={_safe_value(result.get('processing_ms'))}"
+    )
+    try:
+        log(message)
+    except Exception:
+        pass
+
+
 def _detect_media_type_from_payload(payload: dict[str, Any]) -> MediaType:
     raw = str(payload.get("mediaType") or "").strip().lower()
     mapping = {
@@ -207,6 +230,8 @@ def main(context: Any):
         payload = _extract_payload(context.req)
         api_key = _extract_dynamic_api_key(context.req)
         result = _run_coro_sync(_analyze(payload, api_key))
+        media_type = MediaType.TEXT if payload.get("text") else _detect_media_type_from_payload(payload)
+        _log_analysis_result(context, result, media_type)
         return _response_json(context, result, 200)
     except Exception as exc:
         return _response_json(context, {"detail": str(exc)}, 400)

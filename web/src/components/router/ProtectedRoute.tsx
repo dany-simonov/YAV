@@ -40,6 +40,30 @@ export function ProtectedRoute({
   return <>{children}</>;
 }
 
+/** Requires both an active account and a confirmed email address. */
+export function VerifiedRoute({ children }: { children: React.ReactNode }) {
+  const { user, isLoading, isInitialized } = useAuthStore();
+  const location = useLocation();
+
+  if (!isInitialized || isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-mv-bg">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  if (!user.emailVerification) {
+    return <Navigate to="/verify-email/pending" state={{ from: location }} replace />;
+  }
+
+  return <>{children}</>;
+}
+
 /**
  * Public Only Route Component
  * ===========================

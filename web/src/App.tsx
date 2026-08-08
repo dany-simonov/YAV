@@ -1,18 +1,11 @@
-/**
- * App Root Component
- * ==================
- * Основной компонент приложения с роутингом.
- */
-
 import { useEffect, useState } from 'react';
 import { HashRouter, Routes, Route } from 'react-router-dom';
-import { Header, Footer, AuthModal, DashboardLayout, ProtectedRoute, PublicOnlyRoute } from './components';
+import { Header, Footer, AuthModal, DashboardLayout, ProtectedRoute, PublicOnlyRoute, VerifiedRoute } from './components';
 import { 
   Home, 
   About, 
   FAQ, 
   Docs, 
-  ProductHistory,
   Privacy, 
   Terms, 
   NotFound,
@@ -22,7 +15,11 @@ import {
   NewCheckPage,
   BigTextCheckPage,
   HistoryPage,
-  ApiSettingsPage
+  ApiSettingsPage,
+  Research,
+  ArcticResearch,
+  VerifyEmailPage,
+  EmailVerificationPendingPage
 } from './pages';
 import { useAuthStore } from './store';
 
@@ -75,9 +72,10 @@ function AppContent() {
         { path: '/about', element: <About /> },
         { path: '/faq', element: <FAQ /> },
         { path: '/docs', element: <Docs /> },
-        { path: '/history', element: <ProductHistory /> },
         { path: '/privacy', element: <Privacy /> },
         { path: '/terms', element: <Terms /> },
+        { path: '/research', element: <Research /> },
+        { path: '/research/arctic', element: <ArcticResearch /> },
       ].map(({ path, element }) => (
         <Route
           key={path}
@@ -118,6 +116,10 @@ function AppContent() {
         }
       />
 
+      {/* Appwrite email verification callback and resend screen */}
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
+      <Route path="/verify-email/pending" element={<EmailVerificationPendingPage />} />
+
       {/* Protected Dashboard Routes */}
       <Route
         path="/dashboard"
@@ -130,7 +132,7 @@ function AppContent() {
         <Route index element={<DashboardOverview />} />
         <Route path="check" element={<NewCheckPage />} />
         <Route path="big-text" element={<BigTextCheckPage />} />
-        <Route path="history" element={<HistoryPage />} />
+        <Route path="history" element={<VerifiedRoute><HistoryPage /></VerifiedRoute>} />
         <Route path="api" element={<ApiSettingsPage />} />
       </Route>
 

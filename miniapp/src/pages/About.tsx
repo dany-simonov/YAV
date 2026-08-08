@@ -5,8 +5,8 @@ export function About() {
     <div className="min-h-screen bg-mv-bg p-4 pb-24">
       {/* Logo & Title */}
       <div className="flex flex-col items-center text-center mb-8">
-        <img src="/logo.png" alt="Источник" className="w-16 h-16" />
-        <h1 className="text-2xl font-bold text-mv-text">Источник</h1>
+        <img src="/yav-logo.png" alt="ЯВЬ" className="w-24 h-24 p-1 rounded-2xl bg-white border border-black/15 object-contain shadow-md" />
+        <h1 className="text-2xl font-bold text-mv-text">ЯВЬ</h1>
         <p className="text-mv-text-secondary">Верификация медиаконтента</p>
       </div>
 
@@ -49,7 +49,7 @@ export function About() {
 
       {/* Version */}
       <p className="text-center text-mv-text-secondary text-xs">
-        v0.5.0 · Источник
+        v0.5.0 · ЯВЬ
       </p>
     </div>
   )

@@ -57,7 +57,13 @@ interface AuthActions {
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   
   /** Register new user */
-  register: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  register: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string; verificationSent?: boolean }>;
+
+  /** Send or resend email verification link */
+  sendEmailVerification: () => Promise<{ success: boolean; error?: string }>;
+
+  /** Complete verification from Appwrite callback */
+  confirmEmailVerification: (userId: string, secret: string) => Promise<{ success: boolean; error?: string }>;
   
   /** Logout current user */
   logout: () => Promise<void>;
@@ -70,6 +76,9 @@ interface AuthActions {
 }
 
 type AuthStore = AuthState & AuthActions;
+
+const getVerificationCallbackUrl = () =>
+  `${window.location.origin}${window.location.pathname}#/verify-email`;
 
 // ============================================================================
 // Helper Functions
@@ -253,6 +262,42 @@ export const useAuthStore = create<AuthStore>((set) => ({
     }
   },
 
+  sendEmailVerification: async () => {
+    try {
+      set({ isActionLoading: true, error: null });
+      await account.createVerification(getVerificationCallbackUrl());
+      set({ isActionLoading: false });
+      return { success: true };
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      set({ isActionLoading: false, error: errorMessage });
+      return { success: false, error: errorMessage };
+    }
+  },
+
+  confirmEmailVerification: async (userId: string, secret: string) => {
+    try {
+      set({ isActionLoading: true, error: null });
+      await account.updateVerification(userId, secret);
+
+      // The callback can be opened in a browser without the original session.
+      // Verification is already complete at this point, so refreshing the local
+      // user is best-effort and must not turn a successful verification into an error.
+      try {
+        const appwriteUser = await account.get();
+        const user = transformUser(appwriteUser);
+        set({ user, isActionLoading: false });
+      } catch {
+        set({ isActionLoading: false });
+      }
+      return { success: true };
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      set({ isActionLoading: false, error: errorMessage });
+      return { success: false, error: errorMessage };
+    }
+  },
+
   register: async (name: string, email: string, password: string) => {
     try {
       set({ isActionLoading: true, error: null });
@@ -282,6 +327,19 @@ export const useAuthStore = create<AuthStore>((set) => ({
       if (import.meta.env.DEV) {
         console.log('[Auth] Registration complete:', user.email);
       }
+
+      // Step 4: Ask Appwrite to send an account verification link.
+      // Registration itself remains successful if mail delivery is temporarily unavailable:
+      // the user can resend the link from the verification screen.
+      let verificationSent = false;
+      try {
+        await account.createVerification(getVerificationCallbackUrl());
+        verificationSent = true;
+      } catch (verificationError) {
+        if (import.meta.env.DEV) {
+          console.warn('[Auth] Verification email was not sent:', verificationError);
+        }
+      }
       
       set({ 
         user,
@@ -289,7 +347,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
         isActionLoading: false 
       });
       
-      return { success: true };
+      return { success: true, verificationSent };
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       set({ 

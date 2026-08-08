@@ -8,7 +8,7 @@ import { useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { AppwriteException } from 'appwrite';
 import {
-  FileImage, FileText, Send, Loader2
+  Send, Loader2
 } from 'lucide-react';
 
 import { Card, Button, Alert } from '../../components/ui';
@@ -23,12 +23,11 @@ import type { UploadFile, TabType, CheckResult } from '../../types';
 interface Tab {
   id: TabType;
   label: string;
-  icon: React.ReactNode;
 }
 
 const tabs: Tab[] = [
-  { id: 'media', label: 'Файл', icon: <FileImage className="w-4 h-4" /> },
-  { id: 'text', label: 'Текст', icon: <FileText className="w-4 h-4" /> },
+  { id: 'media', label: 'Файл' },
+  { id: 'text', label: 'Текст' },
 ];
 
 export function NewCheckPage() {
@@ -199,7 +198,8 @@ export function NewCheckPage() {
       const normalizedResult = normalizeFunctionResult(resultData, mediaType);
       setResult(normalizedResult);
 
-      if (user?.$id) {
+      // Personal history is available only after Appwrite confirms the email.
+      if (user?.$id && user.emailVerification) {
         const sourceLabel =
           activeTab === 'media' && files[0]?.file?.name
             ? files[0].file.name
@@ -232,33 +232,31 @@ export function NewCheckPage() {
   };
 
   return (
-    <div className="max-w-4xl space-y-7 pt-4 lg:pt-8">
+    <div className="max-w-5xl space-y-8 pt-6 lg:pt-12">
       <div>
         <p className="eyebrow mb-4">Рабочая область</p>
-        <h1 className="text-4xl lg:text-[42px] leading-none tracking-[-.045em] font-semibold text-mv-text">Новая проверка</h1>
-        <p className="mt-4 text-mv-text-secondary">Выберите материал. Максимальный размер файла в текущем продукте — 20 МБ.</p>
+        <h1 className="text-4xl lg:text-[46px] leading-none tracking-[-.045em] font-semibold text-mv-text">Новая проверка</h1>
+        <p className="mt-5 text-[17px] text-mv-text-secondary">Выберите материал. Максимальный размер файла в текущем продукте — 20 МБ.</p>
       </div>
 
-      <Card padding="none" variant="elevated" className="overflow-hidden !rounded-[20px]">
-        <div className="flex px-4 pt-3 border-b border-mv-border">
+      <Card padding="none" variant="elevated" className="overflow-hidden !rounded-[20px] !p-6 sm:!p-8 shadow-[0_2px_3px_rgba(0,0,0,.04),0_24px_58px_rgba(0,0,0,.09)]">
+        <div className="flex w-fit p-1 bg-[#f5f5f3] border border-black/[.06] rounded-[12px] shadow-[0_4px_12px_rgba(0,0,0,.08)] mb-7">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => handleTabChange(tab.id)}
               className={cn(
-                'flex items-center gap-2 px-5 py-3 text-sm font-medium transition-colors relative',
-                activeTab === tab.id ? 'text-black' : 'text-mv-text-secondary hover:text-mv-text',
+                'flex items-center gap-2 px-5 py-3 rounded-[9px] text-sm font-medium transition-all relative',
+                activeTab === tab.id ? 'text-black bg-white shadow-[0_1px_3px_rgba(0,0,0,.12)]' : 'text-mv-text-secondary hover:text-mv-text',
                 isAnalyzing && 'pointer-events-none opacity-50'
               )}
             >
-              {tab.icon}
               {tab.label}
-              {activeTab === tab.id && <div className="absolute bottom-0 left-3 right-3 h-px bg-black" />}
             </button>
           ))}
         </div>
 
-        <div className="p-4 sm:p-6">
+        <div>
           {activeTab === 'media' ? (
             <FileDropzone
               files={files}
@@ -272,7 +270,7 @@ export function NewCheckPage() {
           )}
         </div>
 
-        <div className="px-6 py-4 bg-[#fafaf9] border-t border-mv-border flex items-center justify-between">
+        <div className="pt-7 flex items-center justify-between">
           <p className="text-sm text-mv-text-muted">
             {activeTab === 'media' ? `${files.length} файл(ов) выбрано` : `${text.length} символов`}
           </p>

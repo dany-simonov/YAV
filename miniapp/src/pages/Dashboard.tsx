@@ -42,8 +42,8 @@ export function Dashboard() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-2">
-          <img src="/logo.png" alt="Источник" className="w-8 h-8" />
-          <span className="text-lg font-semibold text-mv-text">Источник</span>
+          <img src="/yav-logo.png" alt="ЯВЬ" className="w-12 h-12 p-0.5 rounded-xl bg-white border border-black/15 object-contain shadow-sm" />
+          <span className="text-lg font-semibold text-mv-text">ЯВЬ</span>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-mv-text-secondary text-sm">{firstName}</span>

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ChevronDown } from 'lucide-react';
 
-const CONTACT_EMAIL = 'istochnik-media@yandex.com';
+const CONTACT_EMAIL = 'yav.app@yandex.ru';
 
 interface FAQItem {
   question: string;
@@ -18,8 +18,8 @@ const faqData: FAQCategory[] = [
     title: 'Общие вопросы',
     items: [
       {
-        question: 'Что такое Источник?',
-        answer: 'Источник — это платформа верификации медиаконтента, которая использует модели машинного обучения для определения, был ли контент (фото, аудио, текст) создан человеком или сгенерирован искусственным интеллектом.',
+        question: 'Что такое ЯВЬ?',
+        answer: 'ЯВЬ — это платформа верификации медиаконтента, которая использует модели машинного обучения для определения, был ли контент (фото, аудио, текст) создан человеком или сгенерирован искусственным интеллектом.',
       },
       {
         question: 'Как работает проверка?',
@@ -102,7 +102,7 @@ export function FAQ() {
         <div className="text-center mb-16">
           <h1 className="text-4xl font-bold text-mv-text mb-4">Часто задаваемые вопросы</h1>
           <p className="text-lg text-mv-text-secondary">
-            Ответы на популярные вопросы о платформе Источник
+            Ответы на популярные вопросы о платформе ЯВЬ
           </p>
         </div>
 

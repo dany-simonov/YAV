@@ -6,10 +6,9 @@
 
 import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { Mail, Lock, User, UserPlus } from 'lucide-react';
-import { Button, Input, Alert, Card } from '../ui';
+import { Button, Input, Alert } from '../ui';
 import { useAuthStore } from '../../store';
-import { isValidEmail, validatePassword } from '../../lib/utils';
+import { isValidEmail, normalizeEmail, validatePassword } from '../../lib/utils';
 
 interface RegisterFormProps {
   onSuccess?: () => void;
@@ -77,7 +76,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
     
     if (!validate()) return;
     
-    const result = await register(name.trim(), email, password);
+    const result = await register(name.trim(), normalizeEmail(email), password);
     
     if (result.success) {
       onSuccess?.();
@@ -95,17 +94,8 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
   const strength = getPasswordStrength(password);
 
   return (
-    <Card variant="elevated" padding="lg" className="w-full max-w-md mx-auto">
-      {/* Header */}
-      <div className="text-center mb-8">
-        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-black flex items-center justify-center">
-          <UserPlus className="w-8 h-8 text-white" />
-        </div>
-        <h1 className="text-2xl font-bold text-mv-text">Создать аккаунт</h1>
-        <p className="mt-2 text-mv-text-secondary">
-          Зарегистрируйтесь для получения бесплатных проверок
-        </p>
-      </div>
+    <div className="w-full">
+      <div className="mb-9"><p className="eyebrow mb-5">Регистрация</p><h2 className="text-[42px] sm:text-[52px] leading-[1.04] tracking-[-.05em] font-semibold">Создать аккаунт<br/>в ЯВЬ</h2><p className="mt-6 text-lg text-mv-text-secondary">Уже есть аккаунт? <Link to="/login" className="underline underline-offset-4 hover:text-black">Войти</Link></p></div>
 
       {/* Error Alert */}
       {error && (
@@ -126,23 +116,26 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
             if (errors.name) setErrors((prev) => ({ ...prev, name: undefined }));
           }}
           error={errors.name}
-          leftIcon={<User className="w-5 h-5" />}
+          size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
           autoComplete="name"
           disabled={isActionLoading}
         />
 
         <Input
-          label="Email"
+          label="Электронная почта"
           type="email"
-          placeholder="your@email.com"
+          placeholder="name@company.ru"
           value={email}
           onChange={(e) => {
-            setEmail(e.target.value);
+            setEmail(e.target.value.replace(/\s/g, '').toLowerCase());
             if (errors.email) setErrors((prev) => ({ ...prev, email: undefined }));
           }}
           error={errors.email}
-          leftIcon={<Mail className="w-5 h-5" />}
+          size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
           autoComplete="email"
+          inputMode="email"
+          autoCapitalize="none"
+          spellCheck={false}
           disabled={isActionLoading}
         />
 
@@ -157,7 +150,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
               if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }));
             }}
             error={errors.password}
-            leftIcon={<Lock className="w-5 h-5" />}
+            size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
             autoComplete="new-password"
             disabled={isActionLoading}
           />
@@ -196,7 +189,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
             if (errors.confirmPassword) setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
           }}
           error={errors.confirmPassword}
-          leftIcon={<Lock className="w-5 h-5" />}
+          size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
           autoComplete="new-password"
           disabled={isActionLoading}
         />
@@ -204,7 +197,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
         <Button
           type="submit"
           fullWidth
-          size="lg"
+          size="lg" className="!min-h-[58px] !rounded-[11px] !bg-black !text-base"
           isLoading={isActionLoading}
         >
           Создать аккаунт
@@ -223,16 +216,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
         </Link>
       </p>
 
-      {/* Footer Links */}
-      <div className="mt-8 text-center text-sm">
-        <span className="text-mv-text-secondary">Уже есть аккаунт? </span>
-        <Link
-          to="/login"
-          className="text-mv-accent hover:text-mv-accent-hover font-medium transition-colors"
-        >
-          Войти
-        </Link>
-      </div>
-    </Card>
+      <Link to="/" className="btn-light w-full mt-3 !min-h-[58px] !text-base">Вернуться на сайт</Link>
+    </div>
   );
 }

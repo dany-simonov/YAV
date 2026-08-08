@@ -6,10 +6,9 @@
 
 import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { Mail, Lock, LogIn } from 'lucide-react';
-import { Button, Input, Alert, Card } from '../ui';
+import { Button, Input, Alert } from '../ui';
 import { useAuthStore } from '../../store';
-import { isValidEmail } from '../../lib/utils';
+import { isValidEmail, normalizeEmail } from '../../lib/utils';
 
 interface LoginFormProps {
   onSuccess?: () => void;
@@ -54,7 +53,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
     
     if (!validate()) return;
     
-    const result = await login(email, password);
+    const result = await login(normalizeEmail(email), password);
     
     if (result.success) {
       onSuccess?.();
@@ -62,17 +61,8 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
   };
 
   return (
-    <Card variant="elevated" padding="lg" className="w-full max-w-md mx-auto">
-      {/* Header */}
-      <div className="text-center mb-8">
-        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-black flex items-center justify-center">
-          <LogIn className="w-8 h-8 text-white" />
-        </div>
-        <h1 className="text-2xl font-bold text-mv-text">Вход в Источник</h1>
-        <p className="mt-2 text-mv-text-secondary">
-          Войдите, чтобы получить доступ к проверкам
-        </p>
-      </div>
+    <div className="w-full">
+      <div className="mb-9"><p className="eyebrow mb-5">Вход в систему</p><h2 className="text-[42px] sm:text-[52px] leading-[1.04] tracking-[-.05em] font-semibold">Продолжить в<br/>ЯВЬ</h2><p className="mt-6 text-lg text-mv-text-secondary">Нет аккаунта? <Link to="/register" className="underline underline-offset-4 hover:text-black">Создать</Link></p></div>
 
       {/* Error Alert */}
       {error && (
@@ -84,17 +74,21 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
       {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-5">
         <Input
-          label="Email"
+          label="Электронная почта"
           type="email"
-          placeholder="your@email.com"
+          placeholder="name@company.ru"
           value={email}
           onChange={(e) => {
-            setEmail(e.target.value);
+            setEmail(e.target.value.replace(/\s/g, '').toLowerCase());
             if (errors.email) setErrors((prev) => ({ ...prev, email: undefined }));
           }}
           error={errors.email}
-          leftIcon={<Mail className="w-5 h-5" />}
+          size="lg"
+          className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
           autoComplete="email"
+          inputMode="email"
+          autoCapitalize="none"
+          spellCheck={false}
           disabled={isActionLoading}
         />
 
@@ -108,7 +102,8 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
             if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }));
           }}
           error={errors.password}
-          leftIcon={<Lock className="w-5 h-5" />}
+          size="lg"
+          className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
           autoComplete="current-password"
           disabled={isActionLoading}
         />
@@ -116,23 +111,15 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
         <Button
           type="submit"
           fullWidth
-          size="lg"
+          size="lg" className="!min-h-[58px] !rounded-[11px] !bg-black !text-base"
           isLoading={isActionLoading}
         >
           Войти
         </Button>
       </form>
 
-      {/* Footer Links */}
-      <div className="mt-8 text-center text-sm">
-        <span className="text-mv-text-secondary">Нет аккаунта? </span>
-        <Link
-          to="/register"
-          className="text-mv-accent hover:text-mv-accent-hover font-medium transition-colors"
-        >
-          Зарегистрироваться
-        </Link>
-      </div>
-    </Card>
+      <Link to="/" className="btn-light w-full mt-3 !min-h-[58px] !text-base">Вернуться на сайт</Link>
+      <p className="mt-7 text-xs sm:text-sm text-mv-text-muted leading-6">Продолжая, вы соглашаетесь с <Link to="/terms" className="underline">условиями использования</Link> и <Link to="/privacy" className="underline">политикой конфиденциальности</Link>.</p>
+    </div>
   );
 }

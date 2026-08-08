@@ -14,7 +14,7 @@ from api.routers import analyze, bigcheck, health
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 app = FastAPI(
-    title="Источник API",
+    title="ЯВЬ API",
     version="0.5.0",
     docs_url="/docs",
     redoc_url=None,

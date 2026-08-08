@@ -190,7 +190,7 @@ export function ApiSettingsPage() {
       <Card>
         <CardHeader
           title="Документация"
-          description="Быстрый старт с API Источника"
+          description="Быстрый старт с API ЯВЬ"
         />
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">

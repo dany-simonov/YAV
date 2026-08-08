@@ -6,7 +6,9 @@
  */
 
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/authStore';
+import { isValidEmail, normalizeEmail } from '../lib/utils';
 import { X, XCircle, Loader2 } from 'lucide-react';
 interface AuthModalProps {
   isOpen: boolean;
@@ -14,6 +16,7 @@ interface AuthModalProps {
 }
 
 export function AuthModal({ isOpen, onClose }: AuthModalProps) {
+  const navigate = useNavigate();
   // ============================================================================
   // Store Integration
   // ============================================================================
@@ -29,6 +32,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [emailError, setEmailError] = useState('');
 
   // ============================================================================
   // Effects
@@ -40,6 +44,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
       setName('');
       setEmail('');
       setPassword('');
+      setEmailError('');
       clearError();
       setIsLoginMode(true);
     }
@@ -55,20 +60,28 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
     clearError(); // Always clear errors when switching modes
     setName('');
     setPassword('');
+    setEmailError('');
   };
 
   /** Handle form submission */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidEmail(normalizedEmail)) {
+      setEmailError('Введите корректный e-mail с доменной зоной, например name@company.ru');
+      return;
+    }
+    setEmailError('');
+
     let result: { success: boolean; error?: string };
 
     if (isLoginMode) {
       // Login mode: call login(email, password)
-      result = await login(email, password);
+      result = await login(normalizedEmail, password);
     } else {
       // Register mode: call register(name, email, password)
-      result = await register(name.trim(), email, password);
+      result = await register(name.trim(), normalizedEmail, password);
     }
 
     if (result.success) {
@@ -77,6 +90,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
       setName('');
       setEmail('');
       setPassword('');
+      if (!isLoginMode) navigate('/verify-email/pending');
     }
     // If failed, error is automatically set in store and displayed
   };
@@ -87,7 +101,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
 
   if (!isOpen) return null;
 
-  const modalTitle = isLoginMode ? 'Вход в Источник' : 'Регистрация в Источнике';
+  const modalTitle = isLoginMode ? 'Вход в ЯВЬ' : 'Регистрация в ЯВЬ';
   const submitButtonText = isLoginMode ? 'Войти' : 'Создать аккаунт';
   const loadingText = isLoginMode ? 'Вход...' : 'Создание...';
   const toggleText = isLoginMode 
@@ -154,12 +168,19 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
                 type="email"
                 id="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value.replace(/\s/g, '').toLowerCase());
+                  if (emailError) setEmailError('');
+                }}
                 required
-                placeholder="your@email.com"
+                placeholder="name@company.ru"
+                inputMode="email"
+                autoCapitalize="none"
+                spellCheck={false}
                 disabled={isActionLoading}
                 className="w-full px-4 py-3 bg-mv-surface-2 border border-mv-border rounded-lg text-mv-text placeholder:text-mv-text-muted focus:border-mv-accent focus:outline-none transition-colors disabled:opacity-50"
               />
+              {emailError && <p className="mt-2 text-sm text-mv-fake">{emailError}</p>}
             </div>
 
             {/* Password field */}

@@ -6,6 +6,7 @@
 
 import { useNavigate } from 'react-router-dom';
 import { LoginForm } from '../../components/forms';
+import { AuthLayout } from '../../components/layout';
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -15,11 +16,6 @@ export function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-mv-bg flex items-center justify-center p-4">
-      
-      <div className="relative w-full max-w-md">
-        <LoginForm onSuccess={handleSuccess} />
-      </div>
-    </div>
+    <AuthLayout mode="login"><LoginForm onSuccess={handleSuccess} /></AuthLayout>
   );
 }

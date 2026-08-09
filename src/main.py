@@ -125,10 +125,41 @@ def _extract_dynamic_api_key(req: Any) -> str:
     return _extract_request_header(req, "x-appwrite-key")
 
 
+def _validate_storage_metadata(metadata: Any) -> dict[str, Any]:
+    """Validate and retain only the Storage fields used by the security boundary.
+
+    Appwrite Storage adds system fields to its File response.  They are trusted
+    response-shape extras rather than request input, so deliberately ignore
+    them after validating the narrow subset required for analysis.
+    """
+    if not isinstance(metadata, dict):
+        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
+
+    filename = metadata.get("name")
+    mime_type = metadata.get("mimeType")
+    size = metadata.get("sizeOriginal")
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or len(filename) > MAX_FILENAME_LENGTH
+        or not isinstance(mime_type, str)
+        or not mime_type
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+    ):
+        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
+    if size <= 0:
+        raise SecurityValidationError("invalid_media", "Файл пустой.", 422)
+    if size > MAX_FILE_BYTES:
+        raise SecurityValidationError("file_too_large", "Файл превышает лимит в 20 MiB.", 413)
+
+    return {"name": filename, "mimeType": mime_type, "sizeOriginal": size}
+
+
 def _metadata_media_type(metadata: dict[str, Any]) -> MediaType:
     """Use Storage MIME/name as corroborating signals, never as file truth."""
-    mime = metadata.get("$mimeType")
-    filename = metadata.get("$name")
+    mime = metadata.get("mimeType")
+    filename = metadata.get("name")
     if not isinstance(mime, str) or not isinstance(filename, str):
         raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
     mime_type = _METADATA_MIME_TYPES.get(mime.split(";", 1)[0].strip().lower())
@@ -198,23 +229,7 @@ async def _get_file_metadata(file_id: str, bucket_id: str, user_jwt: str) -> dic
         metadata = response.json()
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502) from exc
-    if not isinstance(metadata, dict):
-        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
-    size = metadata.get("$sizeOriginal")
-    if isinstance(size, bool):
-        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
-    try:
-        size = int(size)
-    except (TypeError, ValueError) as exc:
-        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422) from exc
-    if size <= 0:
-        raise SecurityValidationError("invalid_media", "Файл пустой.", 422)
-    if size > MAX_FILE_BYTES:
-        raise SecurityValidationError("file_too_large", "Файл превышает лимит в 20 MiB.", 413)
-    filename = metadata.get("$name", "")
-    if not isinstance(filename, str) or len(filename) > MAX_FILENAME_LENGTH:
-        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
-    return metadata
+    return _validate_storage_metadata(metadata)
 
 
 async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> bytes:

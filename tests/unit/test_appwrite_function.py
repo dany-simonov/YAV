@@ -10,6 +10,7 @@ from src.main import (
     _download_file_bytes,
     _execute_request,
     _get_file_metadata,
+    _metadata_media_type,
     main,
 )
 from src.validation import SecurityValidationError
@@ -40,6 +41,37 @@ def _stream_response(status_code=200, chunks=(b"file-bytes",)):
 def _client_for_stream(stream):
     client = AsyncMock()
     client.stream = MagicMock(return_value=stream)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    return client
+
+
+def _appwrite_file_response(**overrides):
+    """Realistic Appwrite Storage File response, including system fields."""
+    response = {
+        "$id": "file-id",
+        "bucketId": "uploads",
+        "$createdAt": "2026-08-09T12:00:00.000+00:00",
+        "$updatedAt": "2026-08-09T12:00:00.000+00:00",
+        "$permissions": ["read(\"user:user-id\")"],
+        "name": "2026-08-09 15-28-02.mp4",
+        "signature": "a" * 32,
+        "mimeType": "video/mp4",
+        "sizeOriginal": 4_500_000,
+        "chunksTotal": 1,
+        "chunksUploaded": 1,
+        "encryption": False,
+        "compression": "none",
+    }
+    response.update(overrides)
+    return response
+
+
+def _client_for_metadata(payload):
+    response = MagicMock(status_code=200)
+    response.json.return_value = payload
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=response)
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
     return client
@@ -106,19 +138,39 @@ async def test_download_hides_forbidden_file_details(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_metadata_checks_size_before_download(monkeypatch):
+async def test_metadata_accepts_realistic_appwrite_file_response(monkeypatch):
     monkeypatch.setenv("APPWRITE_FUNCTION_API_ENDPOINT", "https://appwrite.example/v1")
     monkeypatch.setenv("APPWRITE_FUNCTION_PROJECT_ID", "project-id")
-    response = MagicMock(status_code=200)
-    response.json.return_value = {"$sizeOriginal": 20 * 1024 * 1024 + 1, "$name": "image.jpg"}
-    client = AsyncMock()
-    client.get = AsyncMock(return_value=response)
-    client.__aenter__ = AsyncMock(return_value=client)
-    client.__aexit__ = AsyncMock(return_value=False)
+    client = _client_for_metadata(_appwrite_file_response())
+    with patch("src.main.httpx.AsyncClient", return_value=client):
+        metadata = await _get_file_metadata("file-id", "uploads", "runtime-jwt")
+    assert metadata == {
+        "name": "2026-08-09 15-28-02.mp4",
+        "mimeType": "video/mp4",
+        "sizeOriginal": 4_500_000,
+    }
+    assert _metadata_media_type(metadata).value == "video"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "expected_code"),
+    [
+        (_appwrite_file_response(name=None), "invalid_media"),
+        (_appwrite_file_response(mimeType=None), "invalid_media"),
+        (_appwrite_file_response(sizeOriginal="4500000"), "invalid_media"),
+        (_appwrite_file_response(sizeOriginal=20 * 1024 * 1024 + 1), "file_too_large"),
+        (_appwrite_file_response(sizeOriginal=0), "invalid_media"),
+    ],
+)
+async def test_metadata_rejects_malformed_required_fields(monkeypatch, metadata, expected_code):
+    monkeypatch.setenv("APPWRITE_FUNCTION_API_ENDPOINT", "https://appwrite.example/v1")
+    monkeypatch.setenv("APPWRITE_FUNCTION_PROJECT_ID", "project-id")
+    client = _client_for_metadata(metadata)
     with patch("src.main.httpx.AsyncClient", return_value=client):
         with pytest.raises(SecurityValidationError) as raised:
             await _get_file_metadata("file-id", "uploads", "runtime-jwt")
-    assert raised.value.code == "file_too_large"
+    assert raised.value.code == expected_code
 
 
 @pytest.mark.asyncio

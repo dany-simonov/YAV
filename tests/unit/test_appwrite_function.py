@@ -92,7 +92,7 @@ def test_main_passes_dynamic_api_key_from_request_headers():
     ):
         main(context)
 
-    request, api_key, user_id, user_jwt = execute_mock.call_args.args
+    request, api_key, user_id, user_jwt = execute_mock.call_args.args[:4]
     assert request.file_id == "file-id"
     assert api_key == "runtime-key"
     assert user_id == "runtime-user"

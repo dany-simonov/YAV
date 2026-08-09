@@ -5,10 +5,11 @@ from __future__ import annotations
 import httpx
 
 from adapters.base import BaseAdapter
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ProviderEvidence
 from core.config import settings
-from core.enums import MediaType, ModelUsed, Verdict
+from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
+from core.result_normalization import canonicalize_result
 from src.provider_protection import admit_provider_operation
 from src.validation import normalize_confidence
 
@@ -70,10 +71,23 @@ class AIOrNotTextAdapter(BaseAdapter):
         else:
             verdict = Verdict.UNCERTAIN
 
-        return AnalysisResult(
-            verdict=verdict,
-            confidence=round(score, 4),
-            model_used=ModelUsed.AIORNOT_TEXT,
-            explanation=f"AI or Not: вероятность написания ИИ {round(score * 100)}%.",
-            media_type=MediaType.TEXT,
+        # Current integration contract treats `confidence` as the AI-text
+        # likelihood. `is_detected` is retained as provider evidence; verdict
+        # thresholds intentionally remain score-authoritative for compatibility.
+        return canonicalize_result(
+            AnalysisResult(
+                verdict=verdict,
+                confidence=round(score, 4),
+                model_used=ModelUsed.AIORNOT_TEXT,
+                explanation=f"AI or Not: вероятность написания ИИ {round(score * 100)}%.",
+                media_type=MediaType.TEXT,
+            ),
+            ProviderEvidence(
+                provider="aiornot",
+                model="text_sync",
+                raw_score=score,
+                score_kind=ScoreKind.AI_PROBABILITY,
+                predicted_label=verdict.value,
+                safe_details={"is_detected": detected},
+            ),
         )

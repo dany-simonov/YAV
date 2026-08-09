@@ -5,10 +5,11 @@ import logging
 import httpx
 
 from adapters.base import BaseAdapter
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ProviderEvidence
 from core.config import settings
-from core.enums import MediaType, ModelUsed, Verdict
+from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
+from core.result_normalization import canonicalize_result
 from src.validation import normalize_confidence
 from src.provider_protection import admit_provider_operation
 
@@ -67,10 +68,20 @@ class SightengineAdapter(BaseAdapter):
 
         explanation = f"Sightengine: вероятность ИИ-генерации {round(score * 100)}%"
 
-        return AnalysisResult(
-            verdict=verdict,
-            confidence=round(score, 4),
-            model_used=ModelUsed.SIGHTENGINE,
-            explanation=explanation,
-            media_type=MediaType.IMAGE,
+        return canonicalize_result(
+            AnalysisResult(
+                verdict=verdict,
+                confidence=round(score, 4),
+                model_used=ModelUsed.SIGHTENGINE,
+                explanation=explanation,
+                media_type=MediaType.IMAGE,
+            ),
+            ProviderEvidence(
+                provider="sightengine",
+                model="genai",
+                raw_score=score,
+                score_kind=ScoreKind.AI_PROBABILITY,
+                predicted_label=verdict.value,
+                safe_details={"score_field": "type.ai_generated"},
+            ),
         )

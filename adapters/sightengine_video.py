@@ -5,10 +5,11 @@ from __future__ import annotations
 import httpx
 
 from adapters.base import BaseAdapter
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ProviderEvidence
 from core.config import settings
-from core.enums import MediaType, ModelUsed, Verdict
+from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
+from core.result_normalization import canonicalize_result
 from src.provider_protection import admit_provider_operation
 from src.validation import normalize_confidence
 
@@ -73,10 +74,23 @@ class SightengineVideoAdapter(BaseAdapter):
         else:
             verdict = Verdict.UNCERTAIN
 
-        return AnalysisResult(
-            verdict=verdict,
-            confidence=round(score, 4),
-            model_used=ModelUsed.SIGHTENGINE_VIDEO_DIRECT,
-            explanation=f"Sightengine Video: вероятность deepfake {round(score * 100)}%.",
-            media_type=MediaType.VIDEO,
+        return canonicalize_result(
+            AnalysisResult(
+                verdict=verdict,
+                confidence=round(score, 4),
+                model_used=ModelUsed.SIGHTENGINE_VIDEO_DIRECT,
+                explanation=f"Sightengine Video: вероятность deepfake {round(score * 100)}%.",
+                media_type=MediaType.VIDEO,
+            ),
+            ProviderEvidence(
+                provider="sightengine",
+                model=self.MODEL,
+                raw_score=score,
+                score_kind=ScoreKind.AI_PROBABILITY,
+                predicted_label=verdict.value,
+                safe_details={
+                    "aggregation": "max_frame_probability",
+                    "frames_scored": len(scores),
+                },
+            ),
         )

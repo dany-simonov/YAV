@@ -16,6 +16,7 @@ import time
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -32,38 +33,69 @@ from src.appwrite_store import (  # noqa: E402
     get_authenticated_account,
     persist_check_result,
 )
+from src.media_validation import validate_media_bytes  # noqa: E402
+from src.validation import (  # noqa: E402
+    FileAnalyzeRequest,
+    SecurityValidationError,
+    TextAnalyzeRequest,
+    ValidatedRequest,
+    MAX_FILE_BYTES,
+    MAX_FILENAME_LENGTH,
+    parse_json_object,
+    validate_request_payload,
+)
 
 
 class EmailNotVerifiedError(PermissionError):
     """Raised when an authenticated account has not verified its email."""
 
 
-def _extract_payload(req: Any) -> dict[str, Any]:
-    """Extract request payload from Appwrite context.req in a robust way."""
-    for attr in ("body_json", "bodyJson", "json"):
-        value = getattr(req, attr, None)
-        if value:
-            if callable(value):
-                value = value()
-            if isinstance(value, dict):
-                return value
+_METADATA_MIME_TYPES = {
+    "image/jpeg": MediaType.IMAGE,
+    "image/png": MediaType.IMAGE,
+    "image/webp": MediaType.IMAGE,
+    "audio/mpeg": MediaType.AUDIO,
+    "audio/wav": MediaType.AUDIO,
+    "audio/ogg": MediaType.AUDIO,
+    "audio/mp4": MediaType.AUDIO,
+    "video/mp4": MediaType.VIDEO,
+    "video/avi": MediaType.VIDEO,
+    "video/quicktime": MediaType.VIDEO,
+}
+_METADATA_EXTENSIONS = {
+    ".jpg": MediaType.IMAGE,
+    ".jpeg": MediaType.IMAGE,
+    ".png": MediaType.IMAGE,
+    ".webp": MediaType.IMAGE,
+    ".mp3": MediaType.AUDIO,
+    ".wav": MediaType.AUDIO,
+    ".ogg": MediaType.AUDIO,
+    ".m4a": MediaType.AUDIO,
+    ".mp4": MediaType.VIDEO,
+    ".avi": MediaType.VIDEO,
+    ".mov": MediaType.VIDEO,
+}
 
+
+def _extract_payload(req: Any) -> dict[str, Any]:
+    """Read a bounded JSON object without silently coercing malformed input."""
     raw = getattr(req, "body", None)
     if callable(raw):
         raw = raw()
+    if raw not in (None, "", b""):
+        return parse_json_object(raw)
 
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode("utf-8", errors="replace")
-
-    if isinstance(raw, str) and raw.strip():
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return {"text": raw}
-
-    return {}
+    # Runtime variants may expose only a parsed JSON object. It remains subject
+    # to the same schema and serialized-size checks below.
+    for attr in ("body_json", "bodyJson", "json"):
+        value = getattr(req, attr, None)
+        if callable(value):
+            value = value()
+        if value is not None:
+            if not isinstance(value, dict):
+                raise SecurityValidationError("invalid_json", "JSON должен быть объектом.")
+            return value
+    raise SecurityValidationError("invalid_json", "Некорректный JSON запроса.")
 
 
 def _extract_request_header(req: Any, header_name: str) -> str:
@@ -91,6 +123,24 @@ def _extract_request_header(req: Any, header_name: str) -> str:
 def _extract_dynamic_api_key(req: Any) -> str:
     """Extract the per-execution Appwrite API key from request headers."""
     return _extract_request_header(req, "x-appwrite-key")
+
+
+def _metadata_media_type(metadata: dict[str, Any]) -> MediaType:
+    """Use Storage MIME/name as corroborating signals, never as file truth."""
+    mime = metadata.get("$mimeType")
+    filename = metadata.get("$name")
+    if not isinstance(mime, str) or not isinstance(filename, str):
+        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
+    mime_type = _METADATA_MIME_TYPES.get(mime.split(";", 1)[0].strip().lower())
+    suffix = Path(filename).suffix.lower()
+    extension_type = _METADATA_EXTENSIONS.get(suffix)
+    if not mime_type or not extension_type:
+        raise SecurityValidationError("unsupported_media_type", "Неподдерживаемый формат файла.", 415)
+    if mime_type != extension_type:
+        raise SecurityValidationError(
+            "media_type_mismatch", "Метаданные файла не соответствуют формату.", 415
+        )
+    return mime_type
 
 
 def _response_json(context: Any, payload: dict[str, Any], status: int = 200):
@@ -128,15 +178,43 @@ def _log_analysis_result(context: Any, result: dict[str, Any], media_type: Media
         pass
 
 
-def _detect_media_type_from_payload(payload: dict[str, Any]) -> MediaType:
-    raw = str(payload.get("mediaType") or "").strip().lower()
-    mapping = {
-        "image": MediaType.IMAGE,
-        "audio": MediaType.AUDIO,
-        "video": MediaType.VIDEO,
-        "text": MediaType.TEXT,
-    }
-    return mapping.get(raw, MediaType.TEXT)
+async def _get_file_metadata(file_id: str, bucket_id: str, user_jwt: str) -> dict[str, Any]:
+    """Read Storage metadata with the invoking user's JWT before download."""
+    endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", "").rstrip("/")
+    project_id = os.getenv("APPWRITE_FUNCTION_PROJECT_ID", "")
+    if not user_jwt:
+        raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
+    if not endpoint or not project_id:
+        raise RuntimeError("Storage configuration is unavailable")
+    url = f"{endpoint}/storage/buckets/{quote(bucket_id, safe='')}/files/{quote(file_id, safe='')}"
+    headers = {"X-Appwrite-Project": project_id, "X-Appwrite-JWT": user_jwt}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(url, headers=headers)
+    if response.status_code in (401, 403, 404):
+        raise SecurityValidationError("file_not_accessible", "Файл недоступен.", 404)
+    if response.status_code >= 400:
+        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
+    try:
+        metadata = response.json()
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502) from exc
+    if not isinstance(metadata, dict):
+        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
+    size = metadata.get("$sizeOriginal")
+    if isinstance(size, bool):
+        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
+    try:
+        size = int(size)
+    except (TypeError, ValueError) as exc:
+        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422) from exc
+    if size <= 0:
+        raise SecurityValidationError("invalid_media", "Файл пустой.", 422)
+    if size > MAX_FILE_BYTES:
+        raise SecurityValidationError("file_too_large", "Файл превышает лимит в 20 MiB.", 413)
+    filename = metadata.get("$name", "")
+    if not isinstance(filename, str) or len(filename) > MAX_FILENAME_LENGTH:
+        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
+    return metadata
 
 
 async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> bytes:
@@ -145,65 +223,66 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
     project_id = os.getenv("APPWRITE_FUNCTION_PROJECT_ID", "")
 
     if not user_jwt:
-        raise PermissionError("Authenticated Appwrite user context is required")
+        raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
     if not endpoint or not project_id:
         raise RuntimeError("Missing APPWRITE_FUNCTION_API_ENDPOINT/PROJECT_ID")
 
-    url = f"{endpoint}/storage/buckets/{bucket_id}/files/{file_id}/download"
+    url = (
+        f"{endpoint}/storage/buckets/{quote(bucket_id, safe='')}/files/"
+        f"{quote(file_id, safe='')}/download"
+    )
     headers = {
         "X-Appwrite-Project": project_id,
         "X-Appwrite-JWT": user_jwt,
     }
 
+    chunks: list[bytes] = []
+    total = 0
     async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.get(url, headers=headers)
-        if response.status_code in (401, 403, 404):
-            raise PermissionError("File is not accessible to the authenticated user")
-        if response.status_code >= 400:
-            raise RuntimeError("Storage download failed")
-        return response.content
+        async with client.stream("GET", url, headers=headers) as response:
+            if response.status_code in (401, 403, 404):
+                raise SecurityValidationError("file_not_accessible", "Файл недоступен.", 404)
+            if response.status_code >= 400:
+                raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_FILE_BYTES:
+                    raise SecurityValidationError("file_too_large", "Файл превышает лимит в 20 MiB.", 413)
+                chunks.append(chunk)
+    if total == 0:
+        raise SecurityValidationError("invalid_media", "Файл пустой.", 422)
+    return b"".join(chunks)
 
 
-HYBRID_MIN_TEXT_LENGTH = 200
-HYBRID_MAX_TEXT_LENGTH = 10_000
 hybrid_analyzer = HybridTextAnalyzer()
 
 
-async def _analyze(payload: dict[str, Any], user_jwt: str) -> dict[str, Any]:
+async def _analyze(request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str) -> dict[str, Any]:
     router = MediaRouter()
     started = time.perf_counter()
 
-    text = str(payload.get("text") or "").strip()
-    mode = str(payload.get("mode") or payload.get("analysisType") or "").strip().lower()
-    media_type = _detect_media_type_from_payload(payload)
-
-    if text:
-        if mode in {"hybrid_text", "big_text", "factcheck"}:
-            if len(text) < HYBRID_MIN_TEXT_LENGTH:
-                raise ValueError(f"Минимум {HYBRID_MIN_TEXT_LENGTH} символов для глубокой проверки.")
-            if len(text) > HYBRID_MAX_TEXT_LENGTH:
-                text = text[:HYBRID_MAX_TEXT_LENGTH]
+    if isinstance(request, TextAnalyzeRequest):
+        text = request.text
+        mode = request.mode or request.analysis_type
+        if mode:
             result = await hybrid_analyzer.analyze(text)
-            result["truncated"] = len(payload.get("text", "")) > HYBRID_MAX_TEXT_LENGTH
         else:
             result = await router.route(MediaType.TEXT, b"", text)
     else:
-        file_id = str(payload.get("fileId") or "").strip()
-        if not file_id:
-            raise ValueError("fileId is required when text is empty")
-
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
             or os.getenv("UPLOADS_BUCKET_ID")
             or "uploads"
         )
-        file_bytes = await _download_file_bytes(file_id, bucket_id, user_jwt)
-
-        # If mediaType was not explicitly provided, router will infer as much as possible.
-        if media_type == MediaType.TEXT:
-            media_type = router.detect_type(None, "uploaded.bin", "")
-
-        result = await router.route(media_type, file_bytes, "")
+        metadata = await _get_file_metadata(request.file_id, bucket_id, user_jwt)
+        file_bytes = await _download_file_bytes(request.file_id, bucket_id, user_jwt)
+        expected = MediaType(request.media_type) if request.media_type else None
+        media_info = await asyncio.to_thread(validate_media_bytes, file_bytes, expected)
+        if _metadata_media_type(metadata) != media_info.media_type:
+            raise SecurityValidationError(
+                "media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415
+            )
+        result = await router.route(media_info.media_type, file_bytes, "")
 
     processing_ms = int((time.perf_counter() - started) * 1000)
     if isinstance(result, dict):
@@ -216,32 +295,31 @@ async def _analyze(payload: dict[str, Any], user_jwt: str) -> dict[str, Any]:
 
 
 async def _execute_request(
-    payload: dict[str, Any], api_key: str, user_id: str, user_jwt: str
+    payload: dict[str, Any] | ValidatedRequest, api_key: str, user_id: str, user_jwt: str
 ) -> dict[str, Any]:
     """Authorize the execution, ensure its profile, and persist trusted results."""
     if not api_key:
         raise RuntimeError("Missing Appwrite Function API key")
     if not user_id or not user_jwt:
-        raise PermissionError("Authenticated Appwrite user context is required")
-
-    action = str(payload.get("action") or "analyze").strip().lower()
-    if action not in {"analyze", "ensure_profile"}:
-        raise ValueError("Unsupported action")
+        raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
+    request = validate_request_payload(payload) if isinstance(payload, dict) else payload
 
     account = await get_authenticated_account(user_id, user_jwt)
     profile = await ensure_user_profile(account, api_key)
 
-    if action == "ensure_profile":
+    if request.action == "ensure_profile":
         return {"profile_id": str(profile.get("$id") or user_id)}
 
     if account.get("emailVerification") is not True:
         raise EmailNotVerifiedError("Подтвердите email перед запуском анализа.")
 
-    result = await _analyze(payload, user_jwt)
+    if not isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest)):
+        raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
+    result = await _analyze(request, user_jwt)
     check_id = await persist_check_result(
         result,
         user_id,
-        str(payload.get("sourceLabel") or ""),
+        request.source_label or "",
         api_key,
     )
     result["check_id"] = check_id
@@ -277,16 +355,18 @@ def main(context: Any):
     """Appwrite function handler."""
     try:
         payload = _extract_payload(context.req)
+        request = validate_request_payload(payload)
         api_key = _extract_dynamic_api_key(context.req) or os.getenv(
             "APPWRITE_FUNCTION_API_KEY", ""
         )
         user_id = _extract_request_header(context.req, "x-appwrite-user-id")
         user_jwt = _extract_request_header(context.req, "x-appwrite-user-jwt")
-        result = _run_coro_sync(_execute_request(payload, api_key, user_id, user_jwt))
-        if str(payload.get("action") or "").strip().lower() != "ensure_profile":
-            media_type = (
-                MediaType.TEXT if payload.get("text") else _detect_media_type_from_payload(payload)
-            )
+        result = _run_coro_sync(_execute_request(request, api_key, user_id, user_jwt))
+        if request.action != "ensure_profile":
+            try:
+                media_type = MediaType(str(result.get("media_type", "text")))
+            except (TypeError, ValueError):
+                media_type = MediaType.TEXT
             _log_analysis_result(context, result, media_type)
         return _response_json(context, result, 200)
     except EmailNotVerifiedError:
@@ -298,5 +378,11 @@ def main(context: Any):
             },
             403,
         )
-    except Exception as exc:
-        return _response_json(context, {"detail": str(exc)}, 400)
+    except SecurityValidationError as exc:
+        return _response_json(context, {"detail": exc.detail, "code": exc.code}, exc.status_code)
+    except Exception:
+        return _response_json(
+            context,
+            {"detail": "Внутренняя ошибка сервиса.", "code": "internal_error"},
+            500,
+        )

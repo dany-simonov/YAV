@@ -9,6 +9,7 @@ from adapters.base import BaseAdapter
 from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
+from src.validation import normalize_confidence
 
 # Type hints added
 # Logging improved
@@ -35,7 +36,12 @@ class HFImageAdapter(BaseAdapter):
                     MediaType.IMAGE,
                 )
 
-            body = response.json()
+            try:
+                body = response.json()
+            except ValueError:
+                return self._build_uncertain(
+                    "HuggingFace Image: неожиданный формат ответа.", ModelUsed.HF_IMAGE, MediaType.IMAGE
+                )
 
             # Handle cold start
             if isinstance(body, dict) and body.get("error", "").startswith("Model"):
@@ -50,7 +56,7 @@ class HFImageAdapter(BaseAdapter):
                 )
             break
 
-        if not isinstance(body, list):
+        if not isinstance(body, list) or not body or len(body) > 100:
             return self._build_uncertain(
                 "HuggingFace Image: неожиданный формат ответа.",
                 ModelUsed.HF_IMAGE,
@@ -58,12 +64,22 @@ class HFImageAdapter(BaseAdapter):
             )
 
         # Find best prediction
-        best = max(body, key=lambda x: x.get("score", 0))
-        label = best.get("label", "").upper()
-        score = best.get("score", 0.5)
+        candidates: list[tuple[str, float]] = []
+        for item in body:
+            if not isinstance(item, dict) or not isinstance(item.get("label"), str):
+                continue
+            try:
+                candidates.append((item["label"].upper(), normalize_confidence(item.get("score"))))
+            except ValueError:
+                continue
+        if not candidates:
+            return self._build_uncertain(
+                "HuggingFace Image: неожиданный формат ответа.", ModelUsed.HF_IMAGE, MediaType.IMAGE
+            )
+        label, score = max(candidates, key=lambda item: item[1])
 
         if score > 0.7:
-            verdict = Verdict.FAKE if label == "FAKE" else Verdict.REAL
+            verdict = Verdict.FAKE if label == "FAKE" else Verdict.REAL if label == "REAL" else Verdict.UNCERTAIN
         else:
             verdict = Verdict.UNCERTAIN
 

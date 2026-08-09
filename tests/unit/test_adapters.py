@@ -239,15 +239,15 @@ class TestSaplingAdapter:
         assert result.verdict == Verdict.UNCERTAIN
 
     @pytest.mark.asyncio
-    async def test_long_text_truncated_and_warns(self):
-        """Text over 10 000 chars must be truncated; explanation must mention truncation."""
+    async def test_long_text_is_rejected_without_silent_truncation(self):
+        """Text over 10 000 chars must not be silently sent to the provider."""
         from adapters.sapling import SaplingAdapter
 
-        body = {"score": 0.82, "sentence_scores": []}
-        with patch("httpx.AsyncClient", return_value=_mock_client(body)):
+        with patch("httpx.AsyncClient") as client:
             result = await SaplingAdapter().analyze(b"A" * 11_000)
-        assert result.verdict == Verdict.FAKE
-        assert "обрезан" in result.explanation
+        assert result.verdict == Verdict.UNCERTAIN
+        assert "превышает" in result.explanation
+        client.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_uncertain_midrange(self):

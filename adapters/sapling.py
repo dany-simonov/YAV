@@ -9,6 +9,7 @@ from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError
+from src.validation import bounded_provider_string, normalize_confidence
 
 # Validated input parameters
 # Following best practices
@@ -33,10 +34,14 @@ class SaplingAdapter(BaseAdapter):
                 media_type=MediaType.TEXT,
             )
 
-        truncated = False
         if len(text) > MAX_TEXT_LENGTH:
-            text = text[:MAX_TEXT_LENGTH]
-            truncated = True
+            return AnalysisResult(
+                verdict=Verdict.UNCERTAIN,
+                confidence=0.0,
+                model_used=ModelUsed.SAPLING,
+                explanation="Текст превышает лимит в 10 000 символов.",
+                media_type=MediaType.TEXT,
+            )
 
         payload = {"key": settings.sapling_api_key, "text": text}
 
@@ -54,10 +59,21 @@ class SaplingAdapter(BaseAdapter):
             raise ExternalAPIError("sapling", "rate_limit")
         if response.status_code >= 500:
             raise ExternalAPIError("sapling", "server_error")
-
-        body = response.json()
-        score = body.get("score", 0.5)
+        if response.status_code >= 400:
+            raise ExternalAPIError("sapling", "request_error")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ExternalAPIError("sapling", "invalid_response") from exc
+        if not isinstance(body, dict):
+            raise ExternalAPIError("sapling", "invalid_response")
+        try:
+            score = normalize_confidence(body.get("score"))
+        except ValueError as exc:
+            raise ExternalAPIError("sapling", "invalid_response") from exc
         sentence_scores = body.get("sentence_scores", [])
+        if not isinstance(sentence_scores, list):
+            sentence_scores = []
 
         if score >= 0.80:
             verdict = Verdict.FAKE
@@ -69,17 +85,21 @@ class SaplingAdapter(BaseAdapter):
         # Find most suspicious sentence
         top_sentence = ""
         top_score = 0.0
-        for item in sentence_scores:
-            if isinstance(item, list) and len(item) >= 2 and item[1] > top_score:
-                top_sentence = item[0]
-                top_score = item[1]
+        for item in sentence_scores[:100]:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            try:
+                item_score = normalize_confidence(item[1])
+            except ValueError:
+                continue
+            sentence = bounded_provider_string(item[0], 100)
+            if sentence and item_score > top_score:
+                top_sentence = sentence
+                top_score = item_score
 
         explanation = f"Sapling AI: вероятность написан ИИ {round(score * 100)}%."
         if top_sentence:
             explanation += f" Наиболее подозрительное предложение: «{top_sentence[:100]}» ({round(top_score * 100)}%)"
-        if truncated:
-            explanation += " (текст был обрезан до 10 000 символов)"
-
         return AnalysisResult(
             verdict=verdict,
             confidence=round(score, 4),

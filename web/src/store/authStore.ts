@@ -20,6 +20,7 @@ import {
   resendEmailVerification,
   sendEmailVerification,
 } from '../lib/emailVerification';
+import { normalizeDisplayName } from '../lib/profileValidation';
 
 // ============================================================================
 // Types
@@ -309,13 +310,19 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ isActionLoading: true, error: null });
 
       const normalizedEmail = email.trim();
+      const normalizedName = normalizeDisplayName(name);
+      if (!normalizedName) {
+        const errorMessage = 'Имя содержит недопустимые символы или имеет неверную длину';
+        set({ isActionLoading: false, error: errorMessage });
+        return { success: false, error: errorMessage };
+      }
 
       // Step 1: Create new user account
       await account.create({
         userId: ID.unique(),
         email: normalizedEmail,
         password,
-        name,
+        name: normalizedName,
       });
 
       // Step 2: Automatically log in after registration

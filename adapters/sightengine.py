@@ -9,6 +9,7 @@ from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError
+from src.validation import normalize_confidence
 
 # Reduced complexity
 # Cache-friendly design
@@ -41,12 +42,21 @@ class SightengineAdapter(BaseAdapter):
             raise ExternalAPIError("sightengine", "rate_limit")
         if response.status_code >= 500:
             raise ExternalAPIError("sightengine", "server_error")
-
-        body = response.json()
-        if body.get("status") != "success":
-            raise ExternalAPIError("sightengine", f"status={body.get('status')}")
-
-        score = body.get("type", {}).get("ai_generated", 0.5)
+        if response.status_code >= 400:
+            raise ExternalAPIError("sightengine", "request_error")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ExternalAPIError("sightengine", "invalid_response") from exc
+        if not isinstance(body, dict) or body.get("status") != "success":
+            raise ExternalAPIError("sightengine", "invalid_response")
+        result_type = body.get("type")
+        if not isinstance(result_type, dict):
+            raise ExternalAPIError("sightengine", "invalid_response")
+        try:
+            score = normalize_confidence(result_type.get("ai_generated"))
+        except ValueError as exc:
+            raise ExternalAPIError("sightengine", "invalid_response") from exc
 
         if score >= 0.75:
             verdict = Verdict.FAKE

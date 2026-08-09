@@ -10,6 +10,7 @@ import { Mail, Lock, User, UserPlus } from 'lucide-react';
 import { Button, Input, Alert, Card } from '../ui';
 import { useAuthStore, type AuthActionResult } from '../../store';
 import { isValidEmail, validatePassword } from '../../lib/utils';
+import { normalizeDisplayName } from '../../lib/profileValidation';
 
 interface RegisterFormProps {
   onSuccess?: (result: AuthActionResult) => void;
@@ -36,12 +37,11 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
     const newErrors: FormErrors = {};
     
     // Name validation
+    const normalizedName = normalizeDisplayName(name);
     if (!name.trim()) {
       newErrors.name = 'Имя обязательно';
-    } else if (name.trim().length < 2) {
-      newErrors.name = 'Минимум 2 символа';
-    } else if (name.trim().length > 50) {
-      newErrors.name = 'Максимум 50 символов';
+    } else if (!normalizedName) {
+      newErrors.name = 'Имя должно содержать от 2 до 50 символов без управляющих символов';
     }
     
     // Email validation
@@ -77,7 +77,9 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
     
     if (!validate()) return;
     
-    const result = await register(name.trim(), email, password);
+    const normalizedName = normalizeDisplayName(name);
+    if (!normalizedName) return;
+    const result = await register(normalizedName, email.trim(), password);
     
     if (result.success) {
       onSuccess?.(result);

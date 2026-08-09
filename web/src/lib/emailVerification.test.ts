@@ -76,4 +76,24 @@ describe('email verification helpers', () => {
     ).toBeNull();
     expect(String(replaceState.mock.calls[0][2])).not.toContain('userId');
   });
+
+  it('rejects duplicate and oversized callback parameters while cleaning them', () => {
+    const replaceState = vi.fn();
+    expect(
+      consumeEmailVerificationToken(
+        'https://example.test/?userId=user-1&userId=user-2&secret=secret-1#/verify-email/callback',
+        replaceState,
+        null
+      )
+    ).toBeNull();
+    expect(String(replaceState.mock.calls[0][2])).not.toContain('secret-1');
+
+    expect(
+      consumeEmailVerificationToken(
+        `https://example.test/?userId=user-1&secret=${'x'.repeat(257)}#/verify-email/callback`,
+        vi.fn(),
+        null
+      )
+    ).toBeNull();
+  });
 });

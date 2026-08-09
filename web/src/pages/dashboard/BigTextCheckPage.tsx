@@ -6,6 +6,7 @@ import { Card, CardHeader, Button, Alert } from '../../components/ui';
 import { TextInput } from '../../components/upload';
 import { functions, APPWRITE_CONFIG } from '../../lib/appwrite';
 import { cn } from '../../lib/utils';
+import { safeExternalUrl } from '../../lib/safeExternalUrl';
 import { useAuthStore } from '../../store';
 import type { HybridTextResult, HybridToken } from '../../types';
 
@@ -100,7 +101,7 @@ export function BigTextCheckPage() {
         firstName: user.name.split(' ')[0] || '',
         mediaType: 'text',
         mode: 'hybrid_text',
-        sourceLabel: text.slice(0, 120),
+        sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
       };
 
       const execution = await functions.createExecution(
@@ -304,14 +305,14 @@ export function BigTextCheckPage() {
                   <div key={`${item.exact_quote}-${index}`} className="p-4 rounded-lg bg-mv-surface-2 border border-mv-border">
                     <p className="text-sm font-medium text-mv-text mb-2">{item.exact_quote}</p>
                     <p className="text-sm text-mv-text-secondary mb-2">{item.truth}</p>
-                    {item.source_url && (
+                    {safeExternalUrl(item.source_url) && (
                       <a
-                        href={item.source_url}
+                        href={safeExternalUrl(item.source_url) || undefined}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-xs text-mv-accent hover:underline"
                       >
-                        {item.source_url}
+                        {safeExternalUrl(item.source_url)}
                       </a>
                     )}
                   </div>

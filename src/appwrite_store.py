@@ -11,6 +11,13 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+from src.validation import (
+    MAX_DETAILS_BYTES,
+    MAX_EXPLANATION,
+    MAX_MODEL,
+    MAX_PROVIDER,
+    MAX_SOURCE_LABEL,
+)
 
 
 DEFAULT_ENDPOINT = "https://fra.cloud.appwrite.io/v1"
@@ -76,17 +83,34 @@ def serialize_check_details(result: dict[str, Any]) -> str:
         "check_id",
     }
     details = {key: value for key, value in result.items() if key not in stored_columns}
-    return json.dumps(details, ensure_ascii=False, default=_value, separators=(",", ":"))
+    try:
+        encoded = json.dumps(
+            details,
+            ensure_ascii=False,
+            default=_value,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return '{"truncated":true}'
+    if len(encoded.encode("utf-8")) > MAX_DETAILS_BYTES:
+        return '{"truncated":true}'
+    return encoded
 
 
 def map_analysis_to_check_row(
     result: dict[str, Any], user_id: str, source_label: str = ""
 ) -> dict[str, Any]:
     """Map an analysis response to the trusted checks table schema."""
-    model = str(_value(result.get("model_used")) or "")
+    model = str(_value(result.get("model_used")) or "")[:MAX_MODEL]
     verdict = str(_value(result.get("ai_verdict") or result.get("verdict")) or "UNCERTAIN")
     media_type = str(_value(result.get("media_type")) or "text")
     explanation = result.get("explanation")
+    provider = _provider_for_model(model)
+    try:
+        processing_ms = int(result.get("processing_ms") or 0)
+    except (TypeError, ValueError):
+        processing_ms = 0
 
     return {
         "user_id": user_id,
@@ -94,11 +118,11 @@ def map_analysis_to_check_row(
         "status": "completed",
         "verdict": verdict[:24],
         "authenticity_index": _legacy_authenticity_index(result),
-        "provider": _provider_for_model(model),
-        "model": model[:128] or None,
-        "explanation": str(explanation) if explanation is not None else None,
-        "source_label": str(source_label)[:255] or None,
-        "processing_ms": int(result.get("processing_ms") or 0),
+        "provider": provider[:MAX_PROVIDER] if provider else None,
+        "model": model or None,
+        "explanation": str(explanation)[:MAX_EXPLANATION] if explanation is not None else None,
+        "source_label": str(source_label)[:MAX_SOURCE_LABEL] or None,
+        "processing_ms": max(0, processing_ms),
         "details": serialize_check_details(result),
     }
 

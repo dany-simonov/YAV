@@ -9,6 +9,11 @@ import g4f
 
 from adapters.sapling import SaplingAdapter
 from core.enums import ModelUsed
+from src.validation import (
+    MAX_FACT_CHECK_ITEMS,
+    bounded_provider_string,
+    safe_external_url,
+)
 
 # Strict system prompt for web-enabled fact-checking
 FACTCHECK_SYSTEM_PROMPT = (
@@ -162,14 +167,23 @@ class HybridTextAnalyzer:
         sapling_res = await sapling_task
 
         raw_checks = fc_parsed.get("fact_checks", []) if isinstance(fc_parsed, dict) else []
+        if not isinstance(raw_checks, list):
+            raw_checks = []
         fact_checks = []
-        for item in raw_checks:
+        for item in raw_checks[:MAX_FACT_CHECK_ITEMS]:
             if not isinstance(item, dict):
                 continue
-            source_url = item.get("source_url") or item.get("source") or ""
+            quote = bounded_provider_string(item.get("exact_quote"), 500)
+            truth = bounded_provider_string(item.get("truth"), 2_000)
+            status = bounded_provider_string(item.get("status"), 32).lower()
+            if not quote or status not in {"fake", "manipulation", "plagiarism", "ok"}:
+                continue
+            source_url = safe_external_url(item.get("source_url") or item.get("source"))
             fact_checks.append(
                 {
-                    **item,
+                    "exact_quote": quote,
+                    "truth": truth,
+                    "status": status,
                     "source_url": source_url,
                 }
             )

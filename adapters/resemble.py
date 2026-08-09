@@ -10,26 +10,36 @@ from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError
+from src.validation import normalize_confidence
 
 # Improved type safety
 # Thread-safe operation
 # Validated input parameters
 logger = logging.getLogger(__name__)
+MAX_CONVERTED_WAV_BYTES = 120 * 1024 * 1024
 
 
 def _convert_ogg_to_wav(ogg_bytes: bytes) -> bytes:
     """Convert OGG bytes to WAV bytes using ffmpeg (in-memory, no disk I/O)."""
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_s16le", "pipe:1"],
+            [
+                "ffmpeg", "-v", "error", "-nostdin", "-t", "300", "-i", "pipe:0",
+                "-ac", "2", "-ar", "96000", "-f", "wav", "-acodec", "pcm_s16le",
+                "-fs", str(MAX_CONVERTED_WAV_BYTES), "pipe:1",
+            ],
             input=ogg_bytes,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
         )
-    except FileNotFoundError:
-        raise ExternalAPIError("ffmpeg", "FFmpeg не установлен. Установите с https://ffmpeg.org/download.html")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        raise ExternalAPIError("ffmpeg", "audio_conversion_failed")
     
     if proc.returncode != 0:
-        logger.error("ffmpeg OGG->WAV conversion failed: %s", proc.stderr.decode(errors="replace"))
+        raise ExternalAPIError("resemble", "audio_conversion_failed")
+    if len(proc.stdout) > MAX_CONVERTED_WAV_BYTES:
         raise ExternalAPIError("resemble", "audio_conversion_failed")
     return proc.stdout
 
@@ -61,12 +71,18 @@ class ResembleAdapter(BaseAdapter):
             raise ExternalAPIError("resemble", "rate_limit")
         if response.status_code >= 500:
             raise ExternalAPIError("resemble", "server_error")
-
-        body = response.json()
-        if not body.get("success", False):
-            raise ExternalAPIError("resemble", "API returned success=false")
-
-        score = body.get("score", 0.5)
+        if response.status_code >= 400:
+            raise ExternalAPIError("resemble", "request_error")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ExternalAPIError("resemble", "invalid_response") from exc
+        if not isinstance(body, dict) or body.get("success") is not True:
+            raise ExternalAPIError("resemble", "invalid_response")
+        try:
+            score = normalize_confidence(body.get("score"))
+        except ValueError as exc:
+            raise ExternalAPIError("resemble", "invalid_response") from exc
 
         if score >= 0.75:
             verdict = Verdict.FAKE

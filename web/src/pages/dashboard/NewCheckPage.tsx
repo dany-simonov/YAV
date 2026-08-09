@@ -135,7 +135,7 @@ export function NewCheckPage() {
 
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
-    : text.length >= 50;
+    : text.length >= 50 && text.length <= 10000;
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;
@@ -182,7 +182,7 @@ export function NewCheckPage() {
           username: user.name,
           firstName: user.name.split(' ')[0] || '',
           mediaType,
-          sourceLabel: text.slice(0, 120),
+          sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else {

@@ -7,6 +7,8 @@ export interface EmailVerificationToken {
 
 const CALLBACK_PATH = '/verify-email/callback';
 const TOKEN_KEYS = ['userId', 'secret'] as const;
+const MAX_USER_ID_LENGTH = 36;
+const MAX_SECRET_LENGTH = 256;
 
 export function buildEmailVerificationUrl(origin = window.location.origin): string {
   const url = new URL('/', origin);
@@ -36,9 +38,12 @@ export function confirmEmailVerification(
 }
 
 function tokenFromParams(params: URLSearchParams): EmailVerificationToken | null {
+  if (TOKEN_KEYS.some((key) => params.getAll(key).length !== 1)) return null;
   const userId = params.get('userId')?.trim() || '';
   const secret = params.get('secret')?.trim() || '';
-  return userId && secret ? { userId, secret } : null;
+  return userId && secret && userId.length <= MAX_USER_ID_LENGTH && secret.length <= MAX_SECRET_LENGTH
+    ? { userId, secret }
+    : null;
 }
 
 function removeTokenParams(params: URLSearchParams): void {

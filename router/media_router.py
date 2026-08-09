@@ -22,22 +22,16 @@ MIME_TYPE_MAP: dict[str, MediaType] = {
     "image/jpeg": MediaType.IMAGE,
     "image/png": MediaType.IMAGE,
     "image/webp": MediaType.IMAGE,
-    "image/gif": MediaType.IMAGE,
     # Audio
     "audio/ogg": MediaType.AUDIO,
     "audio/mpeg": MediaType.AUDIO,
-    "audio/mp3": MediaType.AUDIO,
     "audio/wav": MediaType.AUDIO,
-    "audio/x-wav": MediaType.AUDIO,
     "audio/mp4": MediaType.AUDIO,
     "audio/m4a": MediaType.AUDIO,
-    "audio/x-m4a": MediaType.AUDIO,
-    "audio/aac": MediaType.AUDIO,
     # Video
     "video/mp4": MediaType.VIDEO,
     "video/avi": MediaType.VIDEO,
     "video/quicktime": MediaType.VIDEO,
-    "video/x-matroska": MediaType.VIDEO,
 }
 
 EXTENSION_MAP: dict[str, MediaType] = {
@@ -52,7 +46,6 @@ EXTENSION_MAP: dict[str, MediaType] = {
     ".mp4": MediaType.VIDEO,
     ".avi": MediaType.VIDEO,
     ".mov": MediaType.VIDEO,
-    ".mkv": MediaType.VIDEO,
 }
 
 

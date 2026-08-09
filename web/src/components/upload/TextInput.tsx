@@ -33,7 +33,7 @@ export function TextInput({
   
   const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value;
-    if (newValue.length <= maxLength + 100) {
+    if (newValue.length <= maxLength) {
       onChange(newValue);
     }
   };

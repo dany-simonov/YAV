@@ -127,6 +127,27 @@ class TestRoute:
         assert result.model_used == ModelUsed.HF_IMAGE
 
     @pytest.mark.asyncio
+    async def test_sightengine_429_uses_hf_fallback_without_raw_provider_error(self):
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=type("Response", (), {"status_code": 429})())
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        hf_result = AnalysisResult(
+            verdict=Verdict.REAL,
+            confidence=0.1,
+            model_used=ModelUsed.HF_IMAGE,
+            explanation="safe fallback",
+            media_type=MediaType.IMAGE,
+        )
+        with patch("adapters.sightengine.httpx.AsyncClient", return_value=client), patch(
+            "router.media_router.HFImageAdapter.analyze", new=AsyncMock(return_value=hf_result)
+        ) as hf:
+            result = await MediaRouter().route(MediaType.IMAGE, b"img_bytes")
+        assert result is hf_result
+        hf.assert_awaited_once()
+        assert "raw" not in result.explanation
+
+    @pytest.mark.asyncio
     async def test_image_falls_back_after_typed_infrastructure_failure(self):
         primary = AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout"))
         fallback = AsyncMock(return_value=REAL_RESULT)

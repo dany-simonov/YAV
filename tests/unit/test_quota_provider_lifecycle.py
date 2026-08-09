@@ -190,3 +190,47 @@ async def test_aiornot_and_sapling_technical_failures_refund_once():
         with pytest.raises(ProviderInfrastructureError):
             await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
     assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_sightengine_technical_failure_then_hf_success_consumes_quota_once():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def image_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.IMAGE, b"image")
+
+    image_result = AnalysisResult(
+        verdict=Verdict.REAL,
+        confidence=0.1,
+        model_used=ModelUsed.HF_IMAGE,
+        explanation="safe",
+        media_type=MediaType.IMAGE,
+    )
+    with patch("src.main.MediaRouter.route", new=image_route), patch(
+        "router.media_router.SightengineAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "unavailable")),
+    ), patch("router.media_router.HFImageAdapter.analyze", new=AsyncMock(return_value=image_result)) as hf:
+        await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["consumed"]
+    hf.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sightengine_and_hf_technical_failures_refund_once():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def image_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.IMAGE, b"image")
+
+    with patch("src.main.MediaRouter.route", new=image_route), patch(
+        "router.media_router.SightengineAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout")),
+    ), patch(
+        "router.media_router.HFImageAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("huggingface", "unavailable")),
+    ):
+        with pytest.raises(ProviderInfrastructureError):
+            await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["refunded"]

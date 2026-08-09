@@ -32,6 +32,22 @@ def _mock_client(response_body: object, status_code: int = 200) -> AsyncMock:
 
 class TestSightengineAdapter:
     @pytest.mark.asyncio
+    async def test_uses_genai_multipart_request_without_exposing_credentials(self):
+        from adapters.sightengine import SightengineAdapter
+
+        client = _mock_client({"status": "success", "type": {"ai_generated": 0.95}})
+        with patch("adapters.sightengine.httpx.AsyncClient", return_value=client):
+            result = await SightengineAdapter().analyze(b"image_bytes")
+        assert client.post.await_args.args[0] == SightengineAdapter.URL
+        assert client.post.await_args.kwargs["data"] == {
+            "api_user": "test_se_user",
+            "api_secret": "test_se_secret",
+            "models": "genai",
+        }
+        assert client.post.await_args.kwargs["files"] == {"media": ("image.jpg", b"image_bytes", "image/jpeg")}
+        assert "test_se_secret" not in result.explanation
+
+    @pytest.mark.asyncio
     async def test_fake_verdict(self):
         from adapters.sightengine import SightengineAdapter
 
@@ -87,6 +103,36 @@ class TestSightengineAdapter:
                 await SightengineAdapter().analyze(b"image_bytes")
         assert exc_info.value.service == "sightengine"
         assert exc_info.value.detail == "rate_limit"
+
+    @pytest.mark.asyncio
+    async def test_normal_4xx_is_not_typed_as_infrastructure_failure(self):
+        from adapters.sightengine import SightengineAdapter
+
+        with patch("adapters.sightengine.httpx.AsyncClient", return_value=_mock_client({}, status_code=422)):
+            with pytest.raises(ExternalAPIError) as raised:
+                await SightengineAdapter().analyze(b"image_bytes")
+        assert not isinstance(raised.value, ProviderInfrastructureError)
+        assert raised.value.detail == "request_error"
+
+    @pytest.mark.asyncio
+    async def test_provider_guard_denial_prevents_sightengine_http(self):
+        from adapters.sightengine import SightengineAdapter
+        from src.provider_protection import begin_provider_budget, end_provider_budget
+        from src.rate_limit import RateLimitError
+
+        async def deny(provider: str) -> None:
+            assert provider == "sightengine"
+            raise RateLimitError("provider_temporarily_unavailable", "safe", 503)
+
+        tokens = begin_provider_budget(deny)
+        try:
+            with patch("adapters.sightengine.httpx.AsyncClient") as client:
+                with pytest.raises(ProviderInfrastructureError) as raised:
+                    await SightengineAdapter().analyze(b"image_bytes")
+        finally:
+            end_provider_budget(tokens)
+        assert raised.value.kind == "capacity"
+        client.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_server_error_raises_external_api_error(self):

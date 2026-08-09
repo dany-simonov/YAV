@@ -146,3 +146,47 @@ async def test_exception_propagation_cannot_trigger_double_refund():
         await _analyze_with_route(store, route)
     assert store.transitions.count("refunded") == 1
     assert "consumed" not in store.transitions
+
+
+@pytest.mark.asyncio
+async def test_aiornot_completed_result_consumes_quota_once():
+    store = _QuotaStore()
+    text = " ".join(["word"] * 64)
+    completed = _result(Verdict.FAKE)
+    completed.model_used = ModelUsed.AIORNOT_TEXT
+    with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock(return_value=completed)) as aiornot, patch(
+        "router.media_router.SaplingAdapter.analyze", new=AsyncMock()
+    ) as sapling:
+        await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["consumed"]
+    aiornot.assert_awaited_once()
+    sapling.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_aiornot_technical_failure_then_sapling_success_consumes_quota_once():
+    store = _QuotaStore()
+    text = " ".join(["word"] * 64)
+    with patch(
+        "router.media_router.AIOrNotTextAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "timeout")),
+    ), patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=_result(Verdict.REAL))) as sapling:
+        await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["consumed"]
+    sapling.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_aiornot_and_sapling_technical_failures_refund_once():
+    store = _QuotaStore()
+    text = " ".join(["word"] * 64)
+    with patch(
+        "router.media_router.AIOrNotTextAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "timeout")),
+    ), patch(
+        "router.media_router.SaplingAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("sapling", "unavailable")),
+    ):
+        with pytest.raises(ProviderInfrastructureError):
+            await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["refunded"]

@@ -213,3 +213,58 @@ class TestRoute:
             )
         mock_analyze.assert_awaited_once()
         assert result.model_used == ModelUsed.SAPLING
+
+    @pytest.mark.asyncio
+    async def test_eligible_text_routes_to_aiornot_without_sapling(self):
+        text = " ".join(["word"] * 64)
+        aiornot_result = AnalysisResult(
+            verdict=Verdict.FAKE,
+            confidence=0.9,
+            model_used=ModelUsed.AIORNOT_TEXT,
+            explanation="safe",
+            media_type=MediaType.TEXT,
+        )
+        with patch(
+            "router.media_router.AIOrNotTextAdapter.analyze",
+            new=AsyncMock(return_value=aiornot_result),
+        ) as aiornot, patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock()) as sapling:
+            result = await MediaRouter().route(MediaType.TEXT, b"", text)
+        aiornot.assert_awaited_once()
+        sapling.assert_not_awaited()
+        assert result.model_used == ModelUsed.AIORNOT_TEXT
+
+    @pytest.mark.asyncio
+    async def test_short_valid_text_bypasses_aiornot_and_routes_to_sapling(self):
+        text = "x" * 50
+        fallback = AnalysisResult(
+            verdict=Verdict.UNCERTAIN,
+            confidence=0.5,
+            model_used=ModelUsed.SAPLING,
+            explanation="safe",
+            media_type=MediaType.TEXT,
+        )
+        with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock()) as aiornot, patch(
+            "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=fallback)
+        ) as sapling:
+            result = await MediaRouter().route(MediaType.TEXT, b"", text)
+        aiornot.assert_not_awaited()
+        sapling.assert_awaited_once()
+        assert result.model_used == ModelUsed.SAPLING
+
+    @pytest.mark.asyncio
+    async def test_eligible_text_uses_sapling_after_aiornot_technical_failure(self):
+        text = " ".join(["word"] * 64)
+        fallback = AnalysisResult(
+            verdict=Verdict.REAL,
+            confidence=0.1,
+            model_used=ModelUsed.SAPLING,
+            explanation="safe",
+            media_type=MediaType.TEXT,
+        )
+        with patch(
+            "router.media_router.AIOrNotTextAdapter.analyze",
+            new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "timeout")),
+        ), patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=fallback)) as sapling:
+            result = await MediaRouter().route(MediaType.TEXT, b"", text)
+        sapling.assert_awaited_once()
+        assert result.model_used == ModelUsed.SAPLING

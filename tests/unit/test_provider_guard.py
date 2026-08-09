@@ -26,6 +26,15 @@ async def test_provider_guard_uses_provider_minute_dimension_and_configured_limi
 
 
 @pytest.mark.asyncio
+async def test_aiornot_guard_uses_its_own_configured_provider_key(monkeypatch):
+    store = _store(monkeypatch)
+    monkeypatch.setenv("PROVIDER_AIORNOT_PER_MINUTE", "7")
+    store.consume = AsyncMock(return_value=0)
+    await store.guard_provider("aiornot")
+    assert store.consume.await_args.args == ("provider_minute", "aiornot", "minute", 7)
+
+
+@pytest.mark.asyncio
 async def test_provider_guard_denial_is_safe_503(monkeypatch):
     store = _store(monkeypatch)
     store.consume = AsyncMock(return_value=30)

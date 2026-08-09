@@ -24,5 +24,6 @@ class ModelUsed(str, Enum):
     SAPLING = "sapling"
     HF_IMAGE = "hf_image_inference"
     HF_AUDIO = "hf_audio_inference"
+    AIORNOT_TEXT = "aiornot_text"
     FALLBACK_UNCERTAIN = "fallback_uncertain"
     HYBRID_G4F = "g4f_hybrid"

@@ -3,6 +3,7 @@
 import logging
 import os
 
+from adapters.aiornot_text import AIOrNotTextAdapter
 from adapters.hf_audio import HFAudioAdapter
 from adapters.hf_image import HFImageAdapter
 from adapters.resemble import ResembleAdapter
@@ -11,7 +12,7 @@ from adapters.sightengine import SightengineAdapter
 from adapters.video_pipeline import VideoPipeline
 from api.schemas import AnalysisResult
 from core.enums import MediaType, Verdict
-from core.exceptions import ExternalAPIError, UnsupportedMediaType
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError, UnsupportedMediaType
 
 # Cleaner API design
 # Improved type safety
@@ -112,6 +113,11 @@ class MediaRouter:
 
             case MediaType.TEXT:
                 text_bytes = text_content.encode("utf-8") if text_content else file_bytes
+                if AIOrNotTextAdapter.is_eligible(text_bytes):
+                    try:
+                        return await AIOrNotTextAdapter().analyze(text_bytes)
+                    except ProviderInfrastructureError:
+                        return await SaplingAdapter().analyze(text_bytes)
                 return await SaplingAdapter().analyze(text_bytes)
 
             case _:

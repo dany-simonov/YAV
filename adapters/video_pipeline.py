@@ -4,10 +4,11 @@ import asyncio
 import subprocess
 
 from adapters.base import BaseAdapter
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ProviderEvidence
 from core.config import settings
-from core.enums import MediaType, ModelUsed, Verdict
+from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from core.exceptions import ExternalAPIError, FileTooLarge, VideoTooLong
+from core.result_normalization import canonicalize_result
 from src.media_validation import MAX_VIDEO_FRAMES, validate_media_bytes
 from src.validation import MAX_FILE_BYTES, SecurityValidationError
 
@@ -153,10 +154,28 @@ class VideoPipeline(BaseAdapter):
             f"Подозрительных: {fake_count}, подлинных: {real_count}. "
             f"Доля подозрительных: {round(fake_ratio * 100)}%."
         )
-        return AnalysisResult(
-            verdict=verdict,
-            confidence=round(confidence, 4),
-            model_used=model_used,
-            explanation=explanation,
-            media_type=MediaType.VIDEO,
+        # `confidence` is left untouched for legacy consumers. It is not a
+        # canonical probability: historical frame conversion can invert REAL
+        # class confidence before the aggregate decision. The v2 result keeps
+        # only the actual aggregate signal and its transparent frame metrics.
+        return canonicalize_result(
+            AnalysisResult(
+                verdict=verdict,
+                confidence=round(confidence, 4),
+                model_used=model_used,
+                explanation=explanation,
+                media_type=MediaType.VIDEO,
+            ),
+            ProviderEvidence(
+                provider="huggingface" if use_hf_fallback else "sightengine",
+                model=model_used.value,
+                raw_score=fake_ratio,
+                score_kind=ScoreKind.AGGREGATED_SIGNAL,
+                predicted_label=verdict.value,
+                safe_details={
+                    "aggregation_rule": "legacy_frame_ratio_thresholds",
+                    "frames_analyzed": total_frames,
+                    "fake_frame_ratio": fake_ratio,
+                },
+            ),
         )

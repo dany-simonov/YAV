@@ -5,10 +5,11 @@ from __future__ import annotations
 import httpx
 
 from adapters.base import BaseAdapter
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ProviderEvidence
 from core.config import settings
-from core.enums import MediaType, ModelUsed, Verdict
+from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
+from core.result_normalization import canonicalize_result
 from src.provider_protection import admit_provider_operation
 from src.validation import normalize_confidence
 
@@ -61,10 +62,24 @@ class AIOrNotAudioAdapter(BaseAdapter):
             case _:
                 raise ProviderInfrastructureError("aiornot", "invalid_response")
 
-        return AnalysisResult(
-            verdict=verdict,
-            confidence=round(score, 4),
-            model_used=ModelUsed.AIORNOT_AUDIO,
-            explanation=f"AI or Not Voice: вероятность синтетической речи {round(score * 100)}%.",
-            media_type=MediaType.AUDIO,
+        return canonicalize_result(
+            AnalysisResult(
+                verdict=verdict,
+                confidence=round(score, 4),
+                model_used=ModelUsed.AIORNOT_AUDIO,
+                explanation=(
+                    f"AI or Not Voice: вердикт {provider_verdict.lower()} "
+                    f"с уверенностью {round(score * 100)}%."
+                ),
+                media_type=MediaType.AUDIO,
+            ),
+            ProviderEvidence(
+                provider="aiornot",
+                model="voice",
+                raw_score=score,
+                score_kind=ScoreKind.CLASS_CONFIDENCE,
+                predicted_label=provider_verdict.lower(),
+                safe_details={"score_field": "report.confidence"},
+            ),
+            use_decision_based_authenticity_index=True,
         )

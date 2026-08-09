@@ -29,3 +29,11 @@ class ModelUsed(str, Enum):
     AIORNOT_AUDIO = "aiornot_audio"
     FALLBACK_UNCERTAIN = "fallback_uncertain"
     HYBRID_G4F = "g4f_hybrid"
+
+
+class ScoreKind(str, Enum):
+    """Meaning of a provider score before BE-06 normalization."""
+
+    AI_PROBABILITY = "ai_probability"
+    CLASS_CONFIDENCE = "class_confidence"
+    AGGREGATED_SIGNAL = "aggregated_signal"

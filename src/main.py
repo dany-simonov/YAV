@@ -356,7 +356,9 @@ async def _analyze(
         result["processing_ms"] = processing_ms
         return result
 
-    body = result.model_dump()
+    # Keep legacy Function responses byte-for-byte field-compatible until a
+    # provider is migrated to BE-06 canonical semantics.
+    body = result.model_dump(exclude_none=True)
     body["processing_ms"] = processing_ms
     return body
 

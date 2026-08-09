@@ -6,7 +6,6 @@
 
 import { useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { AppwriteException } from 'appwrite';
 import {
   FileImage, FileText, Send, Loader2
 } from 'lucide-react';
@@ -16,6 +15,11 @@ import { FileDropzone, TextInput } from '../../components/upload';
 import { CheckResultCard } from '../../components/CheckResultCard';
 import { cn } from '../../lib/utils';
 import { functions, storage, ID, APPWRITE_CONFIG } from '../../lib/appwrite';
+import {
+  AnalysisExecutionError,
+  analysisErrorMessageFromUnknown,
+  parseAnalysisBackendError,
+} from '../../lib/analysisError';
 import { useAuthStore } from '../../store';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 
@@ -77,26 +81,6 @@ export function NewCheckPage() {
       processing_ms: Number(source?.processing_ms ?? source?.processingTime ?? 0),
       media_type: source?.media_type ?? mediaType,
     };
-  };
-
-  const mapAnalyzeError = (err: unknown): string => {
-    if (err instanceof AppwriteException) {
-      if (err.code === 401) return 'Нет доступа к функции анализа. Выполните вход снова.';
-      if (err.code === 404) {
-        const type = (err.type || '').toLowerCase();
-        if (type.includes('bucket')) {
-          return `Bucket не найден: ${APPWRITE_CONFIG.buckets.uploads}. Проверьте Storage -> Buckets в Appwrite.`;
-        }
-        if (type.includes('function')) {
-          return `Function не найдена: ${APPWRITE_CONFIG.functions.analyze}. Проверьте Functions в Appwrite.`;
-        }
-        return 'Ресурс не найден в Appwrite (function или bucket).';
-      }
-      if (err.code === 429) return 'Слишком много запросов. Подождите и повторите.';
-      return err.message || 'Ошибка Appwrite при анализе.';
-    }
-    if (err instanceof Error) return err.message;
-    return 'Произошла неизвестная ошибка анализа.';
   };
 
   const resetState = () => {
@@ -194,7 +178,8 @@ export function NewCheckPage() {
       }
 
       const resultData = JSON.parse(execution.responseBody);
-      if (resultData.code === 'email_not_verified') {
+      const backendError = parseAnalysisBackendError(resultData);
+      if (backendError?.code === 'email_not_verified') {
         if (uploadedFileId) {
           try {
             await storage.deleteFile(APPWRITE_CONFIG.buckets.uploads, uploadedFileId);
@@ -208,8 +193,8 @@ export function NewCheckPage() {
         });
         return;
       }
-      if (resultData.detail) {
-        throw new Error(resultData.detail);
+      if (backendError || execution.responseStatusCode >= 400) {
+        throw new AnalysisExecutionError(backendError);
       }
 
       const normalizedResult = normalizeFunctionResult(resultData, mediaType);
@@ -229,7 +214,7 @@ export function NewCheckPage() {
       }
 
     } catch (e) {
-      const message = mapAnalyzeError(e);
+      const message = analysisErrorMessageFromUnknown(e);
       setError(message);
       if (activeTab === 'media' && files.length > 0) {
         setFileStatus(files[0].id, 'error', 0, message);

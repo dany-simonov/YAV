@@ -8,8 +8,9 @@ from adapters.base import BaseAdapter
 from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ExternalAPIError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.validation import normalize_confidence
+from src.provider_protection import admit_provider_operation
 
 # Reduced complexity
 # Cache-friendly design
@@ -21,6 +22,7 @@ class SightengineAdapter(BaseAdapter):
 
     async def analyze(self, data: bytes) -> AnalysisResult:
         try:
+            await admit_provider_operation("sightengine")
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(
                     self.URL,
@@ -31,32 +33,30 @@ class SightengineAdapter(BaseAdapter):
                     },
                     files={"media": ("image.jpg", data, "image/jpeg")},
                 )
-        except httpx.TimeoutException:
-            return self._build_uncertain(
-                "SightEngine: таймаут запроса, результат неопределён.",
-                ModelUsed.SIGHTENGINE,
-                MediaType.IMAGE,
-            )
+        except httpx.TimeoutException as exc:
+            raise ProviderInfrastructureError("sightengine", "timeout") from exc
+        except httpx.TransportError as exc:
+            raise ProviderInfrastructureError("sightengine", "transport") from exc
 
         if response.status_code == 429:
             raise ExternalAPIError("sightengine", "rate_limit")
         if response.status_code >= 500:
-            raise ExternalAPIError("sightengine", "server_error")
+            raise ProviderInfrastructureError("sightengine", "unavailable")
         if response.status_code >= 400:
             raise ExternalAPIError("sightengine", "request_error")
         try:
             body = response.json()
         except ValueError as exc:
-            raise ExternalAPIError("sightengine", "invalid_response") from exc
+            raise ProviderInfrastructureError("sightengine", "invalid_response") from exc
         if not isinstance(body, dict) or body.get("status") != "success":
-            raise ExternalAPIError("sightengine", "invalid_response")
+            raise ProviderInfrastructureError("sightengine", "invalid_response")
         result_type = body.get("type")
         if not isinstance(result_type, dict):
-            raise ExternalAPIError("sightengine", "invalid_response")
+            raise ProviderInfrastructureError("sightengine", "invalid_response")
         try:
             score = normalize_confidence(result_type.get("ai_generated"))
         except ValueError as exc:
-            raise ExternalAPIError("sightengine", "invalid_response") from exc
+            raise ProviderInfrastructureError("sightengine", "invalid_response") from exc
 
         if score >= 0.75:
             verdict = Verdict.FAKE

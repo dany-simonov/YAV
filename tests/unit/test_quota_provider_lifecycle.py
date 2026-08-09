@@ -1,0 +1,148 @@
+"""Quota terminal-state integration for completed and failed provider chains."""
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from api.schemas import AnalysisResult
+from core.enums import MediaType, ModelUsed, Verdict
+from core.exceptions import ProviderInfrastructureError
+from router.media_router import MediaRouter
+from src.main import _analyze
+from src.provider_protection import admit_provider_operation
+from src.rate_limit import QuotaReservation, RateLimitError
+from src.validation import TextAnalyzeRequest
+
+
+class _QuotaStore:
+    def __init__(self, guard=None) -> None:
+        self.reservation = QuotaReservation("reservation", "user", "quota_daily", "2026-08-09", "reserved")
+        self.transitions: list[str] = []
+        self.guard_provider = guard or AsyncMock()
+
+    async def reserve_quota(self, _user_id):
+        return self.reservation
+
+    async def transition_quota(self, reservation, target):
+        assert reservation is self.reservation
+        self.transitions.append(target)
+
+
+def _result(verdict: Verdict) -> AnalysisResult:
+    return AnalysisResult(
+        verdict=verdict,
+        confidence=0.5,
+        model_used=ModelUsed.SAPLING,
+        explanation="safe",
+        media_type=MediaType.TEXT,
+    )
+
+
+async def _analyze_with_route(store: _QuotaStore, route):
+    request = TextAnalyzeRequest(text="x" * 50)
+    with patch("src.main.MediaRouter.route", new=route):
+        return await _analyze(request, "jwt", quota_store=store, user_id="user")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [Verdict.REAL, Verdict.FAKE, Verdict.UNCERTAIN])
+async def test_completed_result_finalizes_quota_exactly_once(verdict):
+    store = _QuotaStore()
+    await _analyze_with_route(store, AsyncMock(return_value=_result(verdict)))
+    assert store.transitions == ["consumed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", [Verdict.REAL, Verdict.UNCERTAIN])
+async def test_successful_fallback_finalizes_without_refund(verdict):
+    store = _QuotaStore()
+
+    async def completed_fallback(*_args, **_kwargs):
+        try:
+            raise ProviderInfrastructureError("primary", "timeout")
+        except ProviderInfrastructureError:
+            return _result(verdict)
+
+    await _analyze_with_route(store, completed_fallback)
+    assert store.transitions == ["consumed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["timeout", "transport", "unavailable", "invalid_response"])
+async def test_all_technical_provider_failures_refund_exactly_once(kind):
+    store = _QuotaStore()
+    route = AsyncMock(side_effect=ProviderInfrastructureError("provider", kind))
+    with pytest.raises(ProviderInfrastructureError):
+        await _analyze_with_route(store, route)
+    assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_mixed_technical_fallback_chain_refunds_once_and_propagates():
+    store = _QuotaStore()
+
+    async def exhausted_chain(*_args, **_kwargs):
+        try:
+            raise ProviderInfrastructureError("primary", "timeout")
+        except ProviderInfrastructureError:
+            raise ProviderInfrastructureError("fallback", "unavailable")
+
+    with pytest.raises(ProviderInfrastructureError) as raised:
+        await _analyze_with_route(store, exhausted_chain)
+    assert raised.value.service == "fallback"
+    assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_provider_guard_capacity_denial_refunds_once():
+    async def deny(_provider):
+        raise RateLimitError("provider_temporarily_unavailable", "safe", 503)
+
+    store = _QuotaStore(guard=deny)
+
+    async def admitted_operation(*_args, **_kwargs):
+        await admit_provider_operation("sightengine")
+        raise AssertionError("provider HTTP must not execute after guard denial")
+
+    with pytest.raises(ProviderInfrastructureError) as raised:
+        await _analyze_with_route(store, admitted_operation)
+    assert raised.value.kind == "capacity"
+    assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_provider_guard_denial_with_successful_fallback_finalizes_once():
+    async def guard(provider):
+        if provider == "sightengine":
+            raise RateLimitError("provider_temporarily_unavailable", "safe", 503)
+
+    store = _QuotaStore(guard=guard)
+    real_route = MediaRouter.route
+
+    async def image_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.IMAGE, b"image")
+
+    async def primary(_adapter, _data):
+        await admit_provider_operation("sightengine")
+        raise AssertionError("provider HTTP must not execute after guard denial")
+
+    async def fallback(_adapter, _data):
+        await admit_provider_operation("huggingface")
+        return _result(Verdict.REAL)
+
+    with patch("src.main.MediaRouter.route", new=image_route), patch(
+        "router.media_router.SightengineAdapter.analyze", new=primary
+    ), patch("router.media_router.HFImageAdapter.analyze", new=fallback):
+        await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+
+    assert store.transitions == ["consumed"]
+
+
+@pytest.mark.asyncio
+async def test_exception_propagation_cannot_trigger_double_refund():
+    store = _QuotaStore()
+    route = AsyncMock(side_effect=ProviderInfrastructureError("provider", "transport"))
+    with pytest.raises(ProviderInfrastructureError):
+        await _analyze_with_route(store, route)
+    assert store.transitions.count("refunded") == 1
+    assert "consumed" not in store.transitions

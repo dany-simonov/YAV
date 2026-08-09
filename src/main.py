@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 from core.enums import MediaType  # noqa: E402
 from core.analyzer import HybridTextAnalyzer  # noqa: E402
+from core.exceptions import ProviderInfrastructureError  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
     ensure_user_profile,
@@ -36,6 +37,7 @@ from src.appwrite_store import (  # noqa: E402
 )
 from src.media_validation import validate_media_bytes  # noqa: E402
 from src.rate_limit import AppwriteTablesRateLimitStore, RateLimitError, enforce_admission  # noqa: E402
+from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
 from src.validation import (  # noqa: E402
     FileAnalyzeRequest,
     SecurityValidationError,
@@ -300,11 +302,20 @@ async def _analyze(
         if quota_store is None:
             return await operation()
         reservation = await quota_store.reserve_quota(user_id)
+        budget_token = begin_provider_budget(quota_store.guard_provider)
         try:
             result = await operation()
-        except Exception:
+        except ProviderInfrastructureError:
             await quota_store.transition_quota(reservation, "refunded")
             raise
+        except Exception:
+            # The provider request was admitted and reached a non-technical
+            # terminal outcome (for example a provider 4xx).  Do not leave a
+            # reservation indefinitely pending, and never refund it here.
+            await quota_store.transition_quota(reservation, "consumed")
+            raise
+        finally:
+            end_provider_budget(budget_token)
         await quota_store.transition_quota(reservation, "consumed")
         return result
 
@@ -447,6 +458,15 @@ def main(context: Any):
         if exc.retry_after is not None:
             payload["retry_after"] = exc.retry_after
         return _response_json(context, payload, exc.status_code)
+    except ProviderInfrastructureError:
+        return _response_json(
+            context,
+            {
+                "detail": "Сервис анализа временно недоступен. Попробуйте позже.",
+                "code": "provider_temporarily_unavailable",
+            },
+            503,
+        )
     except Exception:
         return _response_json(
             context,

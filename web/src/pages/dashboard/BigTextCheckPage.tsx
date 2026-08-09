@@ -5,6 +5,11 @@ import { AlertCircle, CheckCircle2, Clock, FileText, ShieldCheck, Sparkles } fro
 import { Card, CardHeader, Button, Alert } from '../../components/ui';
 import { TextInput } from '../../components/upload';
 import { functions, APPWRITE_CONFIG } from '../../lib/appwrite';
+import {
+  AnalysisExecutionError,
+  analysisErrorMessageFromUnknown,
+  parseAnalysisBackendError,
+} from '../../lib/analysisError';
 import { cn } from '../../lib/utils';
 import { safeExternalUrl } from '../../lib/safeExternalUrl';
 import { useAuthStore } from '../../store';
@@ -111,7 +116,6 @@ export function BigTextCheckPage() {
       );
 
       let responseBody = execution.responseBody || '';
-      let lastStatus = execution.status || '';
       let responseStatusCode = execution.responseStatusCode;
 
       if (!responseBody && execution.$id) {
@@ -122,44 +126,37 @@ export function BigTextCheckPage() {
             APPWRITE_CONFIG.functions.analyze,
             execution.$id
           );
-          lastStatus = refreshed.status || '';
           responseStatusCode = refreshed.responseStatusCode;
           if (refreshed.responseBody) {
             responseBody = refreshed.responseBody;
             break;
           }
-          if (lastStatus && lastStatus !== 'processing') {
+          if (refreshed.status && refreshed.status !== 'processing') {
             break;
           }
         }
       }
 
       if (!responseBody) {
-        if (lastStatus && lastStatus !== 'processing') {
-          throw new Error(`Функция завершилась со статусом ${lastStatus}. Проверьте логи Appwrite Function.`);
-        }
-        throw new Error('Функция не вернула ответ. Проверьте логи Appwrite Function.');
+        throw new AnalysisExecutionError(null);
       }
 
       const data = JSON.parse(responseBody);
-      if (data?.code === 'email_not_verified') {
+      const backendError = parseAnalysisBackendError(data);
+      if (backendError?.code === 'email_not_verified') {
         navigate('/verify-email', {
           replace: true,
           state: { notice: 'Подтвердите email перед запуском анализа.' },
         });
         return;
       }
-      if (responseStatusCode && responseStatusCode >= 400) {
-        throw new Error(data?.detail || 'Ошибка выполнения функции анализа.');
-      }
-      if (data?.detail) {
-        throw new Error(data.detail);
+      if (backendError || (responseStatusCode && responseStatusCode >= 400)) {
+        throw new AnalysisExecutionError(backendError);
       }
 
       setResult(data as HybridTextResult);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Произошла ошибка при проверке.';
-      setError(message);
+      setError(analysisErrorMessageFromUnknown(err));
     } finally {
       setIsAnalyzing(false);
     }

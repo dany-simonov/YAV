@@ -6,7 +6,7 @@ import pytest
 
 from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ExternalAPIError, UnsupportedMediaType
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError, UnsupportedMediaType
 from router.media_router import MediaRouter
 
 # ---------------------------------------------------------------------------
@@ -125,6 +125,17 @@ class TestRoute:
         se_analyze.assert_awaited_once()
         hf_analyze.assert_awaited_once()
         assert result.model_used == ModelUsed.HF_IMAGE
+
+    @pytest.mark.asyncio
+    async def test_image_falls_back_after_typed_infrastructure_failure(self):
+        primary = AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout"))
+        fallback = AsyncMock(return_value=REAL_RESULT)
+        with patch("router.media_router.SightengineAdapter.analyze", primary), patch(
+            "router.media_router.HFImageAdapter.analyze", fallback
+        ):
+            result = await MediaRouter().route(MediaType.IMAGE, b"img_bytes")
+        assert result.verdict == Verdict.REAL
+        fallback.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_audio_routes_to_resemble(self):

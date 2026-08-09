@@ -8,8 +8,9 @@ from adapters.base import BaseAdapter
 from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ExternalAPIError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.validation import bounded_provider_string, normalize_confidence
+from src.provider_protection import admit_provider_operation
 
 # Validated input parameters
 # Following best practices
@@ -46,31 +47,30 @@ class SaplingAdapter(BaseAdapter):
         payload = {"key": settings.sapling_api_key, "text": text}
 
         try:
+            await admit_provider_operation("sapling")
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(self.URL, json=payload)
-        except httpx.TimeoutException:
-            return self._build_uncertain(
-                "Sapling AI: таймаут запроса.",
-                ModelUsed.SAPLING,
-                MediaType.TEXT,
-            )
+        except httpx.TimeoutException as exc:
+            raise ProviderInfrastructureError("sapling", "timeout") from exc
+        except httpx.TransportError as exc:
+            raise ProviderInfrastructureError("sapling", "transport") from exc
 
         if response.status_code == 429:
             raise ExternalAPIError("sapling", "rate_limit")
         if response.status_code >= 500:
-            raise ExternalAPIError("sapling", "server_error")
+            raise ProviderInfrastructureError("sapling", "unavailable")
         if response.status_code >= 400:
             raise ExternalAPIError("sapling", "request_error")
         try:
             body = response.json()
         except ValueError as exc:
-            raise ExternalAPIError("sapling", "invalid_response") from exc
+            raise ProviderInfrastructureError("sapling", "invalid_response") from exc
         if not isinstance(body, dict):
-            raise ExternalAPIError("sapling", "invalid_response")
+            raise ProviderInfrastructureError("sapling", "invalid_response")
         try:
             score = normalize_confidence(body.get("score"))
         except ValueError as exc:
-            raise ExternalAPIError("sapling", "invalid_response") from exc
+            raise ProviderInfrastructureError("sapling", "invalid_response") from exc
         sentence_scores = body.get("sentence_scores", [])
         if not isinstance(sentence_scores, list):
             sentence_scores = []

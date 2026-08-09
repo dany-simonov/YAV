@@ -9,6 +9,7 @@ import g4f
 
 from adapters.sapling import SaplingAdapter
 from core.enums import ModelUsed
+from src.provider_protection import admit_provider_operation
 from src.validation import (
     MAX_FACT_CHECK_ITEMS,
     bounded_provider_string,
@@ -55,6 +56,9 @@ class HybridTextAnalyzer:
                 timeout=self.FACTCHECK_TIMEOUT_S,
             )
 
+        # g4f is an external provider too: each cascade attempt must pass the
+        # request budget and the global provider-minute guard before I/O.
+        await admit_provider_operation("g4f")
         raw = await asyncio.to_thread(_run)
         content = "" if raw is None else ("".join(raw) if not isinstance(raw, str) else raw)
         ok, parsed = self._parse_json(content)

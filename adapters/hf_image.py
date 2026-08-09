@@ -9,7 +9,9 @@ from adapters.base import BaseAdapter
 from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.validation import normalize_confidence
+from src.provider_protection import admit_provider_operation
 
 # Type hints added
 # Logging improved
@@ -27,21 +29,25 @@ class HFImageAdapter(BaseAdapter):
 
         for attempt in range(MAX_RETRIES + 1):
             try:
+                await admit_provider_operation("huggingface")
                 async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                     response = await client.post(MODEL_URL, headers=headers, content=data)
-            except httpx.TimeoutException:
-                return self._build_uncertain(
-                    "HuggingFace Image: таймаут запроса.",
-                    ModelUsed.HF_IMAGE,
-                    MediaType.IMAGE,
-                )
+            except httpx.TimeoutException as exc:
+                raise ProviderInfrastructureError("huggingface", "timeout") from exc
+            except httpx.TransportError as exc:
+                raise ProviderInfrastructureError("huggingface", "transport") from exc
+
+            if response.status_code >= 500:
+                raise ProviderInfrastructureError("huggingface", "unavailable")
+            if response.status_code == 429:
+                raise ExternalAPIError("huggingface", "rate_limit")
+            if response.status_code >= 400:
+                raise ExternalAPIError("huggingface", "request_error")
 
             try:
                 body = response.json()
-            except ValueError:
-                return self._build_uncertain(
-                    "HuggingFace Image: неожиданный формат ответа.", ModelUsed.HF_IMAGE, MediaType.IMAGE
-                )
+            except ValueError as exc:
+                raise ProviderInfrastructureError("huggingface", "invalid_response") from exc
 
             # Handle cold start
             if isinstance(body, dict) and body.get("error", "").startswith("Model"):
@@ -57,11 +63,7 @@ class HFImageAdapter(BaseAdapter):
             break
 
         if not isinstance(body, list) or not body or len(body) > 100:
-            return self._build_uncertain(
-                "HuggingFace Image: неожиданный формат ответа.",
-                ModelUsed.HF_IMAGE,
-                MediaType.IMAGE,
-            )
+            raise ProviderInfrastructureError("huggingface", "invalid_response")
 
         # Find best prediction
         candidates: list[tuple[str, float]] = []
@@ -73,9 +75,7 @@ class HFImageAdapter(BaseAdapter):
             except ValueError:
                 continue
         if not candidates:
-            return self._build_uncertain(
-                "HuggingFace Image: неожиданный формат ответа.", ModelUsed.HF_IMAGE, MediaType.IMAGE
-            )
+            raise ProviderInfrastructureError("huggingface", "invalid_response")
         label, score = max(candidates, key=lambda item: item[1])
 
         if score > 0.7:

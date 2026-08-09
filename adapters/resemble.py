@@ -9,8 +9,9 @@ from adapters.base import BaseAdapter
 from api.schemas import AnalysisResult
 from core.config import settings
 from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ExternalAPIError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.validation import normalize_confidence
+from src.provider_protection import admit_provider_operation
 
 # Improved type safety
 # Thread-safe operation
@@ -54,35 +55,34 @@ class ResembleAdapter(BaseAdapter):
             wav_data = _convert_ogg_to_wav(data)
 
         try:
+            await admit_provider_operation("resemble")
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(
                     self.URL,
                     headers={"Authorization": f"Token {settings.resemble_api_key}"},
                     files={"audio_file": ("audio.wav", wav_data, "audio/wav")},
                 )
-        except httpx.TimeoutException:
-            return self._build_uncertain(
-                "Resemble Detect: таймаут запроса.",
-                ModelUsed.RESEMBLE,
-                MediaType.AUDIO,
-            )
+        except httpx.TimeoutException as exc:
+            raise ProviderInfrastructureError("resemble", "timeout") from exc
+        except httpx.TransportError as exc:
+            raise ProviderInfrastructureError("resemble", "transport") from exc
 
         if response.status_code == 429:
             raise ExternalAPIError("resemble", "rate_limit")
         if response.status_code >= 500:
-            raise ExternalAPIError("resemble", "server_error")
+            raise ProviderInfrastructureError("resemble", "unavailable")
         if response.status_code >= 400:
             raise ExternalAPIError("resemble", "request_error")
         try:
             body = response.json()
         except ValueError as exc:
-            raise ExternalAPIError("resemble", "invalid_response") from exc
+            raise ProviderInfrastructureError("resemble", "invalid_response") from exc
         if not isinstance(body, dict) or body.get("success") is not True:
-            raise ExternalAPIError("resemble", "invalid_response")
+            raise ProviderInfrastructureError("resemble", "invalid_response")
         try:
             score = normalize_confidence(body.get("score"))
         except ValueError as exc:
-            raise ExternalAPIError("resemble", "invalid_response") from exc
+            raise ProviderInfrastructureError("resemble", "invalid_response") from exc
 
         if score >= 0.75:
             verdict = Verdict.FAKE

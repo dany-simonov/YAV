@@ -99,6 +99,12 @@ class AppwriteTablesRateLimitStore:
             return max(1, int((window.end - self.now).total_seconds()))
         raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
 
+    async def guard_provider(self, provider: str) -> None:
+        env_name = f"PROVIDER_{provider.upper()}_PER_MINUTE"
+        retry_after = await self.consume("provider_minute", provider, "minute", self.limit(env_name, 60))
+        if retry_after:
+            raise RateLimitError("provider_temporarily_unavailable", "Сервис анализа временно перегружен. Попробуйте позже.", 503)
+
     async def trusted_plan(self, user_id: str) -> str:
         """Read the server-owned profile; request content never influences plan."""
         url = f"{self.endpoint}/tablesdb/{self.database}/tables/{os.getenv('APPWRITE_USERS_TABLE_ID', 'users')}/rows/{user_id}"
@@ -139,18 +145,25 @@ class AppwriteTablesRateLimitStore:
                     transaction = await client.post(transactions, headers=headers, json={"ttl": 30})
                     if transaction.status_code not in (200, 201):
                         break
-                    transaction_id = transaction.json().get("$id")
+                    try:
+                        transaction_body = transaction.json()
+                    except (TypeError, ValueError):
+                        break
+                    transaction_id = transaction_body.get("$id") if isinstance(transaction_body, dict) else None
                     if not isinstance(transaction_id, str):
                         break
                     if existing.status_code == 404:
                         staged = await client.post(rows, headers=headers, json={"rowId": quota_id, "data": {"dimension": dimension, "subject": user_id, "window_start": window.key, "window_end": window.end.isoformat(), "count": 1}, "permissions": [], "transactionId": transaction_id})
                     else:
                         staged = await client.patch(f"{rows}/{quota_id}/count/increment", headers=headers, json={"value": 1, "max": limit, "transactionId": transaction_id})
-                    if staged.status_code in (400, 409):
+                    try:
+                        staged_body = staged.json()
+                    except (TypeError, ValueError):
+                        staged_body = None
+                    error_type = staged_body.get("type") if isinstance(staged_body, dict) else None
+                    if staged.status_code == 400 and error_type == "row_max_exceeded":
                         await client.patch(f"{transactions}/{transaction_id}", headers=headers, json={"rollback": True})
-                        if existing.status_code == 200:
-                            raise RateLimitError(code, detail, 429, max(1, int((window.end - self.now).total_seconds())))
-                        continue
+                        raise RateLimitError(code, detail, 429, max(1, int((window.end - self.now).total_seconds())))
                     if staged.status_code != 200 and staged.status_code != 201:
                         break
                     created = await client.post(reservations, headers=headers, json={"rowId": reservation.id, "data": {"user_id": user_id, "quota_dimension": dimension, "window_start": window.key, "state": "reserved"}, "permissions": [], "transactionId": transaction_id})

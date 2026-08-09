@@ -100,6 +100,36 @@ def test_main_passes_dynamic_api_key_from_request_headers():
     assert "analysis_result media_type=image" in context.log.call_args.args[0]
 
 
+def test_main_uses_only_runtime_client_ip_for_admission():
+    context = _context(
+        {"text": "x" * 50},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+            "X-Appwrite-Client-Ip": "2001:db8::1",
+            "X-Forwarded-For": "198.51.100.99",
+            "X-Real-IP": "198.51.100.98",
+        },
+    )
+    result = {"media_type": "text", "verdict": "UNCERTAIN", "confidence": 0.5, "model_used": "sapling", "processing_ms": 10}
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())) as execute_mock, patch(
+        "src.main._run_coro_sync", return_value=result
+    ):
+        main(context)
+
+    assert execute_mock.call_args.args[5] == "2001:db8::1"
+
+
+def test_body_client_ip_is_rejected_before_execution():
+    context = _context({"text": "x" * 50, "clientIp": "198.51.100.99"})
+    with patch("src.main._execute_request", new=MagicMock()) as execute_mock:
+        response = main(context)
+    assert response[1] == 400
+    assert response[0]["code"] == "invalid_request"
+    execute_mock.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_download_uses_runtime_user_jwt_and_not_dynamic_key(monkeypatch):
     monkeypatch.setenv("APPWRITE_FUNCTION_API_ENDPOINT", "https://appwrite.example/v1")

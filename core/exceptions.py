@@ -20,6 +20,14 @@ class ExternalAPIError(Exception):
         super().__init__(f"{service}: {detail}")
 
 
+class ProviderInfrastructureError(ExternalAPIError):
+    """Typed technical failure that permits a reserved quota refund."""
+
+    def __init__(self, service: str, kind: str) -> None:
+        self.kind = kind
+        super().__init__(service, kind)
+
+
 class FileTooLarge(Exception):
     """Raised when the uploaded file exceeds the size limit."""
 

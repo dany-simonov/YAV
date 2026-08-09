@@ -64,6 +64,8 @@ def _provider_for_model(model: str) -> str | None:
         return "sapling"
     if normalized.startswith("hf_"):
         return "huggingface"
+    if normalized.startswith("aiornot"):
+        return "aiornot"
     if normalized.startswith(("gpt-", "gpt_", "command-")) or "g4f" in normalized:
         return "g4f"
     return None

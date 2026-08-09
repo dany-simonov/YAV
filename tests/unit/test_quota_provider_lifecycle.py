@@ -260,6 +260,33 @@ async def test_direct_video_success_consumes_quota_without_legacy_pipeline():
 
 
 @pytest.mark.asyncio
+async def test_direct_video_technical_failure_then_legacy_success_consumes_quota_once():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def video_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.VIDEO, b"validated-video")
+
+    legacy_result = AnalysisResult(
+        verdict=Verdict.UNCERTAIN,
+        confidence=0.5,
+        model_used=ModelUsed.SIGHTENGINE_VIDEO,
+        explanation="safe",
+        media_type=MediaType.VIDEO,
+    )
+    with patch("src.main.MediaRouter.route", new=video_route), patch(
+        "router.media_router.SightengineVideoAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout")),
+    ), patch(
+        "router.media_router.VideoPipeline.analyze", new=AsyncMock(return_value=legacy_result)
+    ) as legacy:
+        await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+
+    assert store.transitions == ["consumed"]
+    legacy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_direct_video_and_legacy_technical_failures_refund_once():
     store = _QuotaStore()
     real_route = MediaRouter.route

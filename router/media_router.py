@@ -96,7 +96,10 @@ class MediaRouter:
             case MediaType.IMAGE:
                 try:
                     return await SightengineAdapter().analyze(file_bytes)
-                except ExternalAPIError:
+                # A typed provider failure is a technical failure of the
+                # Sightengine primary and must take the same HF fallback path
+                # as its intentional provider-level 4xx fallback semantics.
+                except (ExternalAPIError, ProviderInfrastructureError):
                     return await HFImageAdapter().analyze(file_bytes)
 
             case MediaType.AUDIO:

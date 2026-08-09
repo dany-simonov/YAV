@@ -57,6 +57,13 @@ def test_analysis_result_mapping_handles_invalid_confidence(invalid):
     assert row["authenticity_index"] == 0
 
 
+@pytest.mark.parametrize("model", ["aiornot_text", "aiornot_audio"])
+def test_analysis_result_mapping_persists_aiornot_model_under_canonical_provider(model):
+    row = map_analysis_to_check_row({"model_used": model}, "authenticated-user")
+    assert row["provider"] == "aiornot"
+    assert row["model"] == model
+
+
 def test_details_serialization_handles_enum_like_values():
     enum_like = MagicMock()
     enum_like.value = "safe-value"

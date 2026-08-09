@@ -24,6 +24,31 @@ MAX_VIDEO_WIDTH = 1_920
 MAX_VIDEO_HEIGHT = 1_080
 MAX_VIDEO_FRAMES = 60
 
+_ISO_BMFF_AUDIO_BRANDS = {b"m4a ", b"m4b ", b"m4p ", b"f4a "}
+_ISO_BMFF_VIDEO_BRANDS = {
+    b"isom",
+    b"iso2",
+    b"iso3",
+    b"iso4",
+    b"iso5",
+    b"iso6",
+    b"iso7",
+    b"iso8",
+    b"iso9",
+    b"avc1",
+    b"cmfc",
+    b"cmfs",
+    b"dash",
+    b"f4v ",
+    b"m4v ",
+    b"mj2s",
+    b"mp41",
+    b"mp42",
+    b"msdh",
+    b"msix",
+    b"qt  ",
+}
+_ISO_BMFF_PROBE_FORMATS = {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"}
 
 @dataclass(frozen=True)
 class MediaInfo:
@@ -33,6 +58,46 @@ class MediaInfo:
     height: int | None = None
     channels: int | None = None
     sample_rate: int | None = None
+
+
+def _detect_iso_base_media_signature(data: bytes) -> MediaType | None:
+    """Recognize a structurally valid leading ISO Base Media ``ftyp`` box.
+
+    ``ftyp`` is a box type at offset 4, not a file magic value at offset 0.
+    Check the complete declared first box and known major/compatible brands so a
+    coincidental ``ftyp`` substring cannot identify arbitrary bytes as media.
+    """
+    if len(data) < 16 or data[4:8] != b"ftyp":
+        return None
+
+    box_size = int.from_bytes(data[:4], "big")
+    header_size = 8
+    if box_size == 1:
+        if len(data) < 24:
+            return None
+        box_size = int.from_bytes(data[8:16], "big")
+        header_size = 16
+    if box_size < header_size + 8 or box_size > len(data) or (box_size - header_size - 8) % 4:
+        return None
+
+    major_brand_offset = header_size
+    brands = {
+        data[major_brand_offset : major_brand_offset + 4].lower(),
+        *(
+            data[offset : offset + 4].lower()
+            for offset in range(major_brand_offset + 8, box_size, 4)
+        ),
+    }
+    major_brand = data[major_brand_offset : major_brand_offset + 4].lower()
+    if major_brand in _ISO_BMFF_AUDIO_BRANDS:
+        return MediaType.AUDIO
+    if major_brand in _ISO_BMFF_VIDEO_BRANDS:
+        return MediaType.VIDEO
+    if brands & _ISO_BMFF_VIDEO_BRANDS:
+        return MediaType.VIDEO
+    if brands & _ISO_BMFF_AUDIO_BRANDS:
+        return MediaType.AUDIO
+    return None
 
 
 def detect_signature(data: bytes) -> MediaType:
@@ -48,12 +113,9 @@ def detect_signature(data: bytes) -> MediaType:
         return MediaType.AUDIO
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"AVI ":
         return MediaType.VIDEO
-    if len(data) >= 12 and data[4:8] == b"ftyp":
-        brand = data[8:12].lower()
-        if brand in {b"m4a ", b"m4b ", b"m4p "}:
-            return MediaType.AUDIO
-        if brand in {b"isom", b"iso2", b"avc1", b"mp41", b"mp42", b"qt  "}:
-            return MediaType.VIDEO
+    iso_base_media_type = _detect_iso_base_media_signature(data)
+    if iso_base_media_type is not None:
+        return iso_base_media_type
     raise SecurityValidationError("unsupported_media_type", "Неподдерживаемый формат файла.", 415)
 
 
@@ -128,6 +190,18 @@ def _require_codec(stream: dict[str, Any], allowed: set[str]) -> None:
         raise SecurityValidationError("unsupported_media_type", "Неподдерживаемый формат файла.", 415)
 
 
+def _require_container_format(probe: dict[str, Any], allowed: set[str]) -> None:
+    format_data = probe.get("format")
+    if not isinstance(format_data, dict):
+        raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
+    format_name = format_data.get("format_name")
+    if not isinstance(format_name, str):
+        raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
+    formats = {item.strip().lower() for item in format_name.split(",")}
+    if not formats & allowed:
+        raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
+
+
 def _validate_image_decode(data: bytes) -> None:
     command = [
         "ffmpeg",
@@ -184,6 +258,11 @@ def validate_media_bytes(data: bytes, expected: MediaType | None = None) -> Medi
     if not isinstance(format_data, dict):
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
     duration = _as_duration(format_data.get("duration"))
+
+    if _detect_iso_base_media_signature(data) is not None:
+        _require_container_format(probe, _ISO_BMFF_PROBE_FORMATS)
+    elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"AVI ":
+        _require_container_format(probe, {"avi"})
 
     if actual == MediaType.AUDIO:
         stream = _first_stream(probe, "audio")

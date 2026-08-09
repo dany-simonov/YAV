@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 import threading
@@ -209,6 +210,21 @@ def _log_analysis_result(context: Any, result: dict[str, Any], media_type: Media
         pass
 
 
+def _media_diagnostic_logger(context: Any):
+    """Return the runtime's safe one-line diagnostic logging boundary."""
+    log = getattr(context, "log", None)
+    if not callable(log):
+        return None
+
+    def _log(message: str) -> None:
+        try:
+            log(message)
+        except Exception:
+            pass
+
+    return _log
+
+
 async def _get_file_metadata(file_id: str, bucket_id: str, user_jwt: str) -> dict[str, Any]:
     """Read Storage metadata with the invoking user's JWT before download."""
     endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", "").rstrip("/")
@@ -272,7 +288,9 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
 hybrid_analyzer = HybridTextAnalyzer()
 
 
-async def _analyze(request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str) -> dict[str, Any]:
+async def _analyze(
+    request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None
+) -> dict[str, Any]:
     router = MediaRouter()
     started = time.perf_counter()
 
@@ -290,9 +308,18 @@ async def _analyze(request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: s
             or "uploads"
         )
         metadata = await _get_file_metadata(request.file_id, bucket_id, user_jwt)
+        if diagnostic_log:
+            diagnostic_log("media_validation stage=metadata result=ok")
         file_bytes = await _download_file_bytes(request.file_id, bucket_id, user_jwt)
+        if diagnostic_log:
+            diagnostic_log("media_validation stage=download result=ok")
+            diagnostic_log(
+                "media_runtime "
+                f"ffprobe={'present' if shutil.which('ffprobe') else 'missing'} "
+                f"ffmpeg={'present' if shutil.which('ffmpeg') else 'missing'}"
+            )
         expected = MediaType(request.media_type) if request.media_type else None
-        media_info = await asyncio.to_thread(validate_media_bytes, file_bytes, expected)
+        media_info = await asyncio.to_thread(validate_media_bytes, file_bytes, expected, diagnostic_log)
         if _metadata_media_type(metadata) != media_info.media_type:
             raise SecurityValidationError(
                 "media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415
@@ -310,7 +337,8 @@ async def _analyze(request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: s
 
 
 async def _execute_request(
-    payload: dict[str, Any] | ValidatedRequest, api_key: str, user_id: str, user_jwt: str
+    payload: dict[str, Any] | ValidatedRequest, api_key: str, user_id: str, user_jwt: str,
+    diagnostic_log: Any = None,
 ) -> dict[str, Any]:
     """Authorize the execution, ensure its profile, and persist trusted results."""
     if not api_key:
@@ -330,7 +358,7 @@ async def _execute_request(
 
     if not isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest)):
         raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
-    result = await _analyze(request, user_jwt)
+    result = await _analyze(request, user_jwt, diagnostic_log)
     check_id = await persist_check_result(
         result,
         user_id,
@@ -376,7 +404,9 @@ def main(context: Any):
         )
         user_id = _extract_request_header(context.req, "x-appwrite-user-id")
         user_jwt = _extract_request_header(context.req, "x-appwrite-user-jwt")
-        result = _run_coro_sync(_execute_request(request, api_key, user_id, user_jwt))
+        result = _run_coro_sync(
+            _execute_request(request, api_key, user_id, user_jwt, _media_diagnostic_logger(context))
+        )
         if request.action != "ensure_profile":
             try:
                 media_type = MediaType(str(result.get("media_type", "text")))

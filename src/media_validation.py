@@ -6,7 +6,7 @@ import json
 import math
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from core.enums import MediaType
 from src.validation import MAX_FILE_BYTES, SecurityValidationError
@@ -49,6 +49,13 @@ _ISO_BMFF_VIDEO_BRANDS = {
     b"qt  ",
 }
 _ISO_BMFF_PROBE_FORMATS = {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"}
+
+DiagnosticLog = Callable[[str], None]
+
+
+def _diagnose(diagnostic_log: DiagnosticLog | None, message: str) -> None:
+    if diagnostic_log is not None:
+        diagnostic_log(message)
 
 @dataclass(frozen=True)
 class MediaInfo:
@@ -119,7 +126,7 @@ def detect_signature(data: bytes) -> MediaType:
     raise SecurityValidationError("unsupported_media_type", "Неподдерживаемый формат файла.", 415)
 
 
-def _run_probe(data: bytes) -> dict[str, Any]:
+def _run_probe(data: bytes, diagnostic_log: DiagnosticLog | None = None) -> dict[str, Any]:
     command = [
         "ffprobe",
         "-v",
@@ -132,6 +139,7 @@ def _run_probe(data: bytes) -> dict[str, Any]:
         "-i",
         "pipe:0",
     ]
+    _diagnose(diagnostic_log, "media_validation stage=ffprobe result=start")
     try:
         completed = subprocess.run(
             command,
@@ -141,16 +149,24 @@ def _run_probe(data: bytes) -> dict[str, Any]:
             timeout=PROBE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError as exc:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=binary_missing")
+        raise SecurityValidationError("invalid_media", "Не удалось проверить медиафайл.", 422) from exc
+    except subprocess.TimeoutExpired as exc:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=timeout")
         raise SecurityValidationError("invalid_media", "Не удалось проверить медиафайл.", 422) from exc
     if completed.returncode != 0 or len(completed.stdout) > 64 * 1024:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=nonzero_exit")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
     try:
         result = json.loads(completed.stdout)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=invalid_json")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422) from exc
     if not isinstance(result, dict):
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=invalid_json")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
+    _diagnose(diagnostic_log, "media_validation stage=ffprobe result=ok")
     return result
 
 
@@ -164,23 +180,32 @@ def _as_positive_int(value: Any) -> int:
     return parsed
 
 
-def _as_duration(value: Any) -> float:
+def _as_duration(value: Any, diagnostic_log: DiagnosticLog | None = None) -> float:
+    if value is None:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=missing_duration")
+        raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
     try:
         duration = float(value)
     except (TypeError, ValueError) as exc:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=invalid_duration")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422) from exc
     if not math.isfinite(duration) or duration < 0:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=invalid_duration")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
     return duration
 
 
-def _first_stream(probe: dict[str, Any], stream_type: str) -> dict[str, Any]:
+def _first_stream(
+    probe: dict[str, Any], stream_type: str, diagnostic_log: DiagnosticLog | None = None
+) -> dict[str, Any]:
     streams = probe.get("streams")
     if not isinstance(streams, list):
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=no_stream")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
     for stream in streams:
         if isinstance(stream, dict) and stream.get("codec_type") == stream_type:
             return stream
+    _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=no_stream")
     raise SecurityValidationError("invalid_media", "Файл не содержит ожидаемый медиа-поток.", 422)
 
 
@@ -190,19 +215,24 @@ def _require_codec(stream: dict[str, Any], allowed: set[str]) -> None:
         raise SecurityValidationError("unsupported_media_type", "Неподдерживаемый формат файла.", 415)
 
 
-def _require_container_format(probe: dict[str, Any], allowed: set[str]) -> None:
+def _require_container_format(
+    probe: dict[str, Any], allowed: set[str], diagnostic_log: DiagnosticLog | None = None
+) -> None:
     format_data = probe.get("format")
     if not isinstance(format_data, dict):
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=unsupported_container")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
     format_name = format_data.get("format_name")
     if not isinstance(format_name, str):
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=unsupported_container")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
     formats = {item.strip().lower() for item in format_name.split(",")}
     if not formats & allowed:
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=unsupported_container")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
 
 
-def _validate_image_decode(data: bytes) -> None:
+def _validate_image_decode(data: bytes, diagnostic_log: DiagnosticLog | None = None) -> None:
     command = [
         "ffmpeg",
         "-v",
@@ -216,6 +246,7 @@ def _validate_image_decode(data: bytes) -> None:
         "null",
         "-",
     ]
+    _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=start")
     try:
         completed = subprocess.run(
             command,
@@ -225,47 +256,58 @@ def _validate_image_decode(data: bytes) -> None:
             timeout=DECODE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError as exc:
+        _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=failed reason=binary_missing")
+        raise SecurityValidationError("invalid_media", "Не удалось проверить изображение.", 422) from exc
+    except subprocess.TimeoutExpired as exc:
+        _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=failed reason=timeout")
         raise SecurityValidationError("invalid_media", "Не удалось проверить изображение.", 422) from exc
     if completed.returncode != 0:
+        _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=failed reason=decoder_failure")
         raise SecurityValidationError("invalid_media", "Изображение повреждено или некорректно.", 422)
+    _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=ok")
 
 
-def validate_media_bytes(data: bytes, expected: MediaType | None = None) -> MediaInfo:
+def validate_media_bytes(
+    data: bytes, expected: MediaType | None = None, diagnostic_log: DiagnosticLog | None = None
+) -> MediaInfo:
     if not data:
         raise SecurityValidationError("invalid_media", "Файл пустой.", 422)
     if len(data) > MAX_FILE_BYTES:
         raise SecurityValidationError("file_too_large", "Файл превышает лимит в 20 MiB.", 413)
 
     actual = detect_signature(data)
+    _diagnose(diagnostic_log, f"media_validation stage=signature result=ok detected={actual.value}")
     if expected is not None and expected != actual:
         raise SecurityValidationError(
             "media_type_mismatch", "Содержимое файла не соответствует заявленному формату.", 415
         )
 
-    probe = _run_probe(data)
+    probe = _run_probe(data, diagnostic_log)
     if actual == MediaType.IMAGE:
-        stream = _first_stream(probe, "video")
+        stream = _first_stream(probe, "video", diagnostic_log)
         _require_codec(stream, {"mjpeg", "png", "webp"})
         width = _as_positive_int(stream.get("width"))
         height = _as_positive_int(stream.get("height"))
         if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
             raise SecurityValidationError("media_limits_exceeded", "Размер изображения превышает лимит.", 422)
-        _validate_image_decode(data)
+        _validate_image_decode(data, diagnostic_log)
+        _diagnose(diagnostic_log, "media_validation stage=limits result=ok")
         return MediaInfo(actual, width=width, height=height)
 
     format_data = probe.get("format")
     if not isinstance(format_data, dict):
+        _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=unknown_probe_failure")
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
-    duration = _as_duration(format_data.get("duration"))
+    duration = _as_duration(format_data.get("duration"), diagnostic_log)
 
     if _detect_iso_base_media_signature(data) is not None:
-        _require_container_format(probe, _ISO_BMFF_PROBE_FORMATS)
+        _require_container_format(probe, _ISO_BMFF_PROBE_FORMATS, diagnostic_log)
     elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"AVI ":
-        _require_container_format(probe, {"avi"})
+        _require_container_format(probe, {"avi"}, diagnostic_log)
 
     if actual == MediaType.AUDIO:
-        stream = _first_stream(probe, "audio")
+        stream = _first_stream(probe, "audio", diagnostic_log)
         _require_codec(
             stream,
             {"mp3", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_u8", "opus", "vorbis", "aac", "alac"},
@@ -274,12 +316,14 @@ def validate_media_bytes(data: bytes, expected: MediaType | None = None) -> Medi
         sample_rate = _as_positive_int(stream.get("sample_rate"))
         if duration > MAX_AUDIO_DURATION_SECONDS or channels > MAX_AUDIO_CHANNELS or sample_rate > MAX_AUDIO_SAMPLE_RATE:
             raise SecurityValidationError("media_limits_exceeded", "Параметры аудио превышают лимит.", 422)
+        _diagnose(diagnostic_log, "media_validation stage=limits result=ok")
         return MediaInfo(actual, duration=duration, channels=channels, sample_rate=sample_rate)
 
-    stream = _first_stream(probe, "video")
+    stream = _first_stream(probe, "video", diagnostic_log)
     _require_codec(stream, {"h264", "hevc", "mpeg4", "mjpeg"})
     width = _as_positive_int(stream.get("width"))
     height = _as_positive_int(stream.get("height"))
     if duration > MAX_VIDEO_DURATION_SECONDS or width > MAX_VIDEO_WIDTH or height > MAX_VIDEO_HEIGHT:
         raise SecurityValidationError("media_limits_exceeded", "Параметры видео превышают лимит.", 422)
+    _diagnose(diagnostic_log, "media_validation stage=limits result=ok")
     return MediaInfo(actual, duration=duration, width=width, height=height)

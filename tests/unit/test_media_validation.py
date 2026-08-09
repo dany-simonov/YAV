@@ -1,9 +1,11 @@
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from core.enums import MediaType
-from src.media_validation import detect_signature, validate_media_bytes
+from src.media_validation import _run_probe, detect_signature, validate_media_bytes
 from src.validation import SecurityValidationError
 
 
@@ -63,6 +65,36 @@ def test_iso_base_media_reaches_ffprobe_after_structural_signature_validation():
     with patch("src.media_validation._run_probe", return_value=_video_probe()) as probe:
         assert validate_media_bytes(_ftyp(b"iso6", (b"mp42",)), MediaType.VIDEO).media_type == MediaType.VIDEO
     probe.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "completed", "reason"),
+    [
+        (FileNotFoundError(), None, "binary_missing"),
+        (subprocess.TimeoutExpired("ffprobe", 5), None, "timeout"),
+        (None, SimpleNamespace(returncode=1, stdout=b""), "nonzero_exit"),
+        (None, SimpleNamespace(returncode=0, stdout=b"not-json"), "invalid_json"),
+    ],
+)
+def test_probe_failures_emit_safe_diagnostic_codes(side_effect, completed, reason):
+    logs = []
+    with patch("src.media_validation.subprocess.run", side_effect=side_effect, return_value=completed):
+        with pytest.raises(SecurityValidationError) as raised:
+            _run_probe(b"bytes containing file-id jwt filename and stderr", logs.append)
+    assert raised.value.code == "invalid_media"
+    assert logs[-1] == f"media_validation stage=ffprobe result=failed reason={reason}"
+    assert all(secret not in " ".join(logs) for secret in ("file-id", "jwt", "filename", "stderr"))
+
+
+def test_happy_video_validation_emits_safe_stage_logs():
+    logs = []
+    with patch("src.media_validation._run_probe", return_value=_video_probe()) as probe:
+        assert validate_media_bytes(_ftyp(b"iso6", (b"mp42",)), MediaType.VIDEO, logs.append).media_type == MediaType.VIDEO
+    probe.assert_called_once()
+    assert logs == [
+        "media_validation stage=signature result=ok detected=video",
+        "media_validation stage=limits result=ok",
+    ]
 
 
 @pytest.mark.parametrize(

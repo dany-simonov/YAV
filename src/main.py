@@ -35,6 +35,7 @@ from src.appwrite_store import (  # noqa: E402
     persist_check_result,
 )
 from src.media_validation import validate_media_bytes  # noqa: E402
+from src.rate_limit import AppwriteTablesRateLimitStore, RateLimitError, enforce_admission  # noqa: E402
 from src.validation import (  # noqa: E402
     FileAnalyzeRequest,
     SecurityValidationError,
@@ -289,18 +290,31 @@ hybrid_analyzer = HybridTextAnalyzer()
 
 
 async def _analyze(
-    request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None
+    request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
+    quota_store: AppwriteTablesRateLimitStore | None = None, user_id: str = ""
 ) -> dict[str, Any]:
     router = MediaRouter()
     started = time.perf_counter()
+
+    async def _with_quota(operation: Any):
+        if quota_store is None:
+            return await operation()
+        reservation = await quota_store.reserve_quota(user_id)
+        try:
+            result = await operation()
+        except Exception:
+            await quota_store.transition_quota(reservation, "refunded")
+            raise
+        await quota_store.transition_quota(reservation, "consumed")
+        return result
 
     if isinstance(request, TextAnalyzeRequest):
         text = request.text
         mode = request.mode or request.analysis_type
         if mode:
-            result = await hybrid_analyzer.analyze(text)
+            result = await _with_quota(lambda: hybrid_analyzer.analyze(text))
         else:
-            result = await router.route(MediaType.TEXT, b"", text)
+            result = await _with_quota(lambda: router.route(MediaType.TEXT, b"", text))
     else:
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
@@ -324,7 +338,7 @@ async def _analyze(
             raise SecurityValidationError(
                 "media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415
             )
-        result = await router.route(media_info.media_type, file_bytes, "")
+        result = await _with_quota(lambda: router.route(media_info.media_type, file_bytes, ""))
 
     processing_ms = int((time.perf_counter() - started) * 1000)
     if isinstance(result, dict):
@@ -338,7 +352,7 @@ async def _analyze(
 
 async def _execute_request(
     payload: dict[str, Any] | ValidatedRequest, api_key: str, user_id: str, user_jwt: str,
-    diagnostic_log: Any = None,
+    diagnostic_log: Any = None, client_ip: str = "",
 ) -> dict[str, Any]:
     """Authorize the execution, ensure its profile, and persist trusted results."""
     if not api_key:
@@ -358,7 +372,9 @@ async def _execute_request(
 
     if not isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest)):
         raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
-    result = await _analyze(request, user_jwt, diagnostic_log)
+    rate_store = AppwriteTablesRateLimitStore(api_key)
+    await enforce_admission(rate_store, user_id, client_ip)
+    result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
     check_id = await persist_check_result(
         result,
         user_id,
@@ -405,7 +421,8 @@ def main(context: Any):
         user_id = _extract_request_header(context.req, "x-appwrite-user-id")
         user_jwt = _extract_request_header(context.req, "x-appwrite-user-jwt")
         result = _run_coro_sync(
-            _execute_request(request, api_key, user_id, user_jwt, _media_diagnostic_logger(context))
+            _execute_request(request, api_key, user_id, user_jwt, _media_diagnostic_logger(context),
+                             _extract_request_header(context.req, "x-appwrite-client-ip"))
         )
         if request.action != "ensure_profile":
             try:
@@ -425,6 +442,11 @@ def main(context: Any):
         )
     except SecurityValidationError as exc:
         return _response_json(context, {"detail": exc.detail, "code": exc.code}, exc.status_code)
+    except RateLimitError as exc:
+        payload = {"detail": exc.detail, "code": exc.code}
+        if exc.retry_after is not None:
+            payload["retry_after"] = exc.retry_after
+        return _response_json(context, payload, exc.status_code)
     except Exception:
         return _response_json(
             context,

@@ -182,7 +182,10 @@ async def test_execute_request_uses_runtime_identity_not_legacy_user_id():
     ), patch("src.main._analyze", new=AsyncMock(return_value=result)), patch(
         "src.main.persist_check_result", new=AsyncMock(return_value="check-1")
     ) as persist_mock:
-        response = await _execute_request(payload, "dynamic-key", "runtime-user", "runtime-jwt")
+        with patch("src.main.AppwriteTablesRateLimitStore"), patch(
+            "src.main.enforce_admission", new=AsyncMock()
+        ):
+            response = await _execute_request(payload, "dynamic-key", "runtime-user", "runtime-jwt")
 
     assert response["check_id"] == "check-1"
     assert persist_mock.await_args.args[1] == "runtime-user"

@@ -234,3 +234,46 @@ async def test_sightengine_and_hf_technical_failures_refund_once():
         with pytest.raises(ProviderInfrastructureError):
             await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
     assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_direct_video_success_consumes_quota_without_legacy_pipeline():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def video_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.VIDEO, b"validated-video")
+
+    direct_result = AnalysisResult(
+        verdict=Verdict.FAKE,
+        confidence=0.9,
+        model_used=ModelUsed.SIGHTENGINE_VIDEO_DIRECT,
+        explanation="safe",
+        media_type=MediaType.VIDEO,
+    )
+    with patch("src.main.MediaRouter.route", new=video_route), patch(
+        "router.media_router.SightengineVideoAdapter.analyze", new=AsyncMock(return_value=direct_result)
+    ), patch("router.media_router.VideoPipeline.analyze", new=AsyncMock()) as legacy:
+        await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["consumed"]
+    legacy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_video_and_legacy_technical_failures_refund_once():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def video_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.VIDEO, b"validated-video")
+
+    with patch("src.main.MediaRouter.route", new=video_route), patch(
+        "router.media_router.SightengineVideoAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "unavailable")),
+    ), patch(
+        "router.media_router.VideoPipeline.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("legacy", "timeout")),
+    ):
+        with pytest.raises(ProviderInfrastructureError):
+            await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["refunded"]

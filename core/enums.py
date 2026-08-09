@@ -20,6 +20,7 @@ class MediaType(str, Enum):
 class ModelUsed(str, Enum):
     SIGHTENGINE = "sightengine"
     SIGHTENGINE_VIDEO = "sightengine_video_pipeline"
+    SIGHTENGINE_VIDEO_DIRECT = "sightengine_video_direct"
     RESEMBLE = "resemble_detect"
     SAPLING = "sapling"
     HF_IMAGE = "hf_image_inference"

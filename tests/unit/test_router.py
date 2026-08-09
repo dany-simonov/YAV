@@ -202,7 +202,7 @@ class TestRoute:
         assert result.verdict == Verdict.REAL
 
     @pytest.mark.asyncio
-    async def test_video_routes_to_video_pipeline(self):
+    async def test_video_routes_to_legacy_pipeline_after_direct_technical_failure(self):
         video_result = AnalysisResult(
             verdict=Verdict.FAKE,
             confidence=0.70,
@@ -212,7 +212,10 @@ class TestRoute:
             processing_ms=8000,
         )
         mock_analyze = AsyncMock(return_value=video_result)
-        with patch("router.media_router.VideoPipeline.analyze", mock_analyze):
+        with patch(
+            "router.media_router.SightengineVideoAdapter.analyze",
+            new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "unavailable")),
+        ), patch("router.media_router.VideoPipeline.analyze", mock_analyze):
             result = await MediaRouter().route(MediaType.VIDEO, b"video_bytes")
         mock_analyze.assert_awaited_once()
         assert result.model_used == ModelUsed.SIGHTENGINE_VIDEO

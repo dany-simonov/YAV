@@ -21,10 +21,10 @@ function ProductPreview(){return <div className="soft-card rounded-[22px] p-3 sm
       <div className="absolute right-[12%] bottom-[16%] w-[22%] h-[24%] border border-blue-300/30"/>
 
     </div>
-    <div className="p-2 sm:p-3 flex flex-col"><p className="eyebrow mb-4">Общий вывод</p><div className="flex items-center gap-2 text-sm text-mv-uncertain"><StatusDot/>Требуется проверка</div><div className="text-[52px] leading-none tracking-[-.06em] font-semibold mt-3 mb-7">76<span className="text-2xl text-mv-text-muted">%</span></div>
-      <div className="space-y-4 text-xs"><div><div className="flex justify-between mb-2"><span>AI-генерация</span><span>24%</span></div><div className="h-1 bg-black/[.06] rounded-full"><div className="h-full w-[24%] bg-mv-uncertain rounded-full"/></div></div>
-      <div className="flex justify-between border-t border-black/[.06] pt-3"><span className="text-mv-text-secondary">Метаданные</span><span className="flex items-center gap-2"><StatusDot tone="green"/>Сохранены</span></div><div className="flex justify-between border-t border-black/[.06] pt-3"><span className="text-mv-text-secondary">Редактирование</span><span className="flex items-center gap-2"><StatusDot/>Есть следы</span></div></div>
-      <button className="btn-light !min-h-[40px] mt-auto">Открыть отчёт</button></div>
+    <div className="p-2 sm:p-3 flex flex-col"><p className="eyebrow mb-4">Общий вывод</p><div className="flex items-center gap-2 text-sm text-mv-fake"><StatusDot tone="red"/>Высокая вероятность AI-генерации</div><div className="text-[52px] leading-none tracking-[-.06em] font-semibold mt-3">94<span className="text-2xl text-mv-text-muted">%</span></div><p className="mt-2 mb-7 text-xs text-mv-text-secondary">вероятность AI-генерации</p>
+      <div className="space-y-4 text-xs"><div><div className="flex justify-between mb-2"><span>AI-генерация</span><strong>94%</strong></div><div className="h-1 bg-black/[.06] rounded-full"><div className="h-full w-[94%] bg-mv-fake rounded-full"/></div></div>
+      <div className="flex justify-between border-t border-black/[.06] pt-3"><span className="text-mv-text-secondary">Уверенность модели</span><strong>97%</strong></div><div className="flex justify-between border-t border-black/[.06] pt-3"><span className="text-mv-text-secondary">Метаданные</span><span className="flex items-center gap-2"><StatusDot tone="green"/>Сохранены</span></div><div className="flex justify-between border-t border-black/[.06] pt-3"><span className="text-mv-text-secondary">Редактирование</span><span className="flex items-center gap-2"><StatusDot/>Есть следы</span></div></div>
+      </div>
   </div></div>}
 
 const process=[
@@ -63,11 +63,11 @@ export function Home(){const [open,setOpen]=useState(0);return <div className="p
     </div></article>)}</div></section>
 
   <section id="features" className="container pb-20 lg:pb-32"><div className="grid md:grid-cols-2 gap-8 mb-14"><h2 className="section-title">Каждый вывод<br/>можно объяснить</h2><p className="text-mv-text-secondary leading-7 max-w-md md:ml-auto">Демонстрационные значения показывают структуру результата, а не фактический анализ конкретного файла.</p></div><div className="soft-card p-4 lg:p-6 grid lg:grid-cols-[1.1fr_.9fr] gap-7">
-    <div className="min-h-[420px] rounded-[15px] bg-[#11151a] relative overflow-hidden grid-texture">
+	    <div className="aspect-[3/2] self-center rounded-[15px] bg-[#11151a] relative overflow-hidden grid-texture">
       <img
       src="/assets/img/iipicture.png"
       alt="Пример анализа"
-      className="absolute inset-0 w-full h-full object-coverна rounded-[12px]">
+      className="absolute inset-0 w-full h-full object-contain rounded-[12px]">
       </img>
       <div className="absolute left-[20%] top-[18%] w-[48%] h-[58%] border border-blue-400/50"/><div className="absolute right-[12%] bottom-[14%] w-[18%] h-[28%] border border-blue-400/30"/></div>
     <div className="p-3 lg:p-8 flex flex-col"><p className="eyebrow mb-6">Пример анализа</p><h3 className="text-2xl lg:text-3xl font-semibold tracking-[-.035em] leading-tight">Есть признаки локального изменения</h3><p className="text-sm text-mv-text-secondary leading-6 mt-4 mb-8">Вывод вероятностный. Проверьте выделенные области и происхождение файла перед решением.</p>{[

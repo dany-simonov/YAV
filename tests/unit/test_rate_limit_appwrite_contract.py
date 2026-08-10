@@ -40,6 +40,9 @@ async def test_first_quota_reservation_uses_staged_rows_and_commit(monkeypatch):
     transaction_call = client.post.call_args_list[0]
     assert transaction_call.args[0].endswith("/tablesdb/transactions")
     assert "X-Appwrite-Key" in transaction_call.kwargs["headers"]
+    assert transaction_call.kwargs["json"] == {"ttl": 60}
+    assert isinstance(transaction_call.kwargs["json"]["ttl"], int)
+    assert transaction_call.kwargs["json"]["ttl"] > 0
     quota_call = client.post.call_args_list[1]
     assert quota_call.args[0].endswith("/tables/rate_limits/rows")
     assert quota_call.kwargs["json"]["data"]["count"] == 1
@@ -60,7 +63,9 @@ async def test_first_quota_reservation_uses_staged_rows_and_commit(monkeypatch):
     assert len(reservation_payload["data"]["window_start"]) <= 16
     assert len(reservation_payload["data"]["state"]) <= 16
     assert reservation_payload["transactionId"] == "tx-1"
-    assert client.patch.call_args.kwargs["json"] == {"commit": True}
+    commit_call = client.patch.call_args
+    assert commit_call.args[0].endswith("/tablesdb/transactions/tx-1")
+    assert commit_call.kwargs["json"] == {"commit": True}
 
 
 @pytest.mark.asyncio
@@ -73,6 +78,37 @@ async def test_missing_transaction_id_fails_closed(monkeypatch):
         with pytest.raises(RateLimitError) as raised:
             await _store(monkeypatch).reserve_quota("trusted-user")
     assert raised.value.code == "rate_limit_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_empty_transaction_id_fails_closed(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[_response(200, {"plan": "free"}), _response(404)])
+    client.post = AsyncMock(return_value=_response(201, {"$id": ""}))
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client):
+        with pytest.raises(RateLimitError) as raised:
+            await _store(monkeypatch).reserve_quota("trusted-user")
+    assert raised.value.code == "rate_limit_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_transaction_create_400_is_safe_and_diagnosable(monkeypatch, caplog):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[_response(200, {"plan": "free"}), _response(404)])
+    client.post = AsyncMock(return_value=_response(400, {"type": "general_argument_invalid", "code": 400}))
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await _store(monkeypatch).reserve_quota("trusted-user")
+    assert raised.value.code == "rate_limit_unavailable"
+    assert client.post.await_args.kwargs["json"] == {"ttl": 60}
+    assert "operation=quota.transaction.create" in caplog.text
+    assert "status_code=400" in caplog.text
+    assert "appwrite_type=general_argument_invalid" in caplog.text
+    assert "appwrite_code=400" in caplog.text
+    assert "trusted-user" not in caplog.text
+    assert "server-key" not in caplog.text
+    assert "test-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -117,6 +153,9 @@ async def test_quota_reservation_create_failure_logs_safe_structure(monkeypatch,
     assert "trusted-user" not in caplog.text
     assert "server-key" not in caplog.text
     assert "test-secret" not in caplog.text
+    rollback_call = client.patch.await_args
+    assert rollback_call.args[0].endswith("/tablesdb/transactions/tx-1")
+    assert rollback_call.kwargs["json"] == {"rollback": True}
 
 
 @pytest.mark.asyncio
@@ -131,6 +170,7 @@ async def test_only_structured_row_max_maps_to_daily_quota(monkeypatch):
             await _store(monkeypatch).reserve_quota("trusted-user")
     assert raised.value.code == "daily_quota_exceeded"
     assert raised.value.retry_after and raised.value.retry_after > 0
+    assert client.patch.await_args_list[0].kwargs["json"] == {"value": 1, "max": 3, "transactionId": "tx-1"}
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,8 @@ def _window(now: datetime, period: str) -> Window:
 
 
 class AppwriteTablesRateLimitStore:
+    TRANSACTION_TTL_SECONDS = 60
+
     def __init__(self, api_key: str, *, now: datetime | None = None) -> None:
         self.enabled = os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
         self.endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", "").rstrip("/")
@@ -221,7 +223,9 @@ class AppwriteTablesRateLimitStore:
                     if existing.status_code not in (200, 404):
                         self._quota_unavailable("quota.counter.read", response=existing, quota_dimension=dimension, row_id=quota_id, data=quota_data)
                         break
-                    transaction = await client.post(transactions, headers=headers, json={"ttl": 30})
+                    transaction = await client.post(
+                        transactions, headers=headers, json={"ttl": self.TRANSACTION_TTL_SECONDS},
+                    )
                     if transaction.status_code not in (200, 201):
                         self._quota_unavailable("quota.transaction.create", response=transaction, quota_dimension=dimension)
                         break
@@ -230,7 +234,7 @@ class AppwriteTablesRateLimitStore:
                     except (TypeError, ValueError):
                         break
                     transaction_id = transaction_body.get("$id") if isinstance(transaction_body, dict) else None
-                    if not isinstance(transaction_id, str):
+                    if not isinstance(transaction_id, str) or not transaction_id:
                         self._quota_unavailable("quota.transaction.create", response=transaction, quota_dimension=dimension)
                         break
                     if existing.status_code == 404:
@@ -278,7 +282,9 @@ class AppwriteTablesRateLimitStore:
         transactions = f"{self.endpoint}/tablesdb/transactions"
         async with httpx.AsyncClient(timeout=10.0) as client:
             for _ in range(3):
-                transaction = await client.post(transactions, headers=headers, json={"ttl": 30})
+                transaction = await client.post(
+                    transactions, headers=headers, json={"ttl": self.TRANSACTION_TTL_SECONDS},
+                )
                 if transaction.status_code not in (200, 201):
                     break
                 transaction_id = transaction.json().get("$id")

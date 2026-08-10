@@ -1,4 +1,5 @@
 """Focused BE-04 fixed-window and fail-closed configuration tests."""
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -40,3 +41,26 @@ def test_utc_daily_and_monthly_windows_are_deterministic(monkeypatch):
     _store(monkeypatch, now)
     assert _window(now, "day").key == "2026-08-09"
     assert _window(now, "month").key == "2026-08"
+
+
+def test_counter_row_ids_are_appwrite_safe_deterministic_and_nonidentifying(monkeypatch):
+    store = _store(monkeypatch)
+    raw_ip = "192.0.2.1"
+    subject = store.ip_subject(raw_ip)
+    row_id = store._row_id("ip_minute", subject, "2026-08-09T12:00")
+
+    assert len(row_id) <= 36
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,35}", row_id)
+    assert row_id == store._row_id("ip_minute", subject, "2026-08-09T12:00")
+    assert raw_ip not in row_id
+    assert len({
+        row_id,
+        store._row_id("user_minute", "trusted-user", "2026-08-09T12:00"),
+        store._row_id("user_hour", "trusted-user", "2026-08-09T12"),
+        store._row_id("provider_minute", "resemble", "2026-08-09T12:00"),
+    }) == 4
+    assert len({
+        row_id,
+        store._row_id("ip_minute", "another-subject", "2026-08-09T12:00"),
+        store._row_id("ip_minute", subject, "2026-08-09T12:01"),
+    }) == 3

@@ -1,4 +1,5 @@
 """HTTP request-shape checks for the TablesDB quota transaction client."""
+import re
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -167,3 +168,57 @@ async def test_abuse_counter_backend_failure_is_fail_closed(monkeypatch):
         with pytest.raises(RateLimitError) as raised:
             await enforce_admission(store, "trusted-user", "192.0.2.1")
     assert raised.value.code == "rate_limit_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_admission_create_uses_runtime_key_and_cloud_schema_shape(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(201))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client):
+        await store.consume("ip_minute", store.ip_subject("192.0.2.1"), "minute", 10)
+
+    call = client.post.await_args
+    assert call.args[0] == "https://appwrite.example/v1/tablesdb/database/tables/rate_limits/rows"
+    assert call.kwargs["headers"] == {"X-Appwrite-Project": "project", "X-Appwrite-Key": "server-key"}
+    payload = call.kwargs["json"]
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,35}", payload["rowId"])
+    assert payload["data"]["dimension"] == "ip_minute"
+    assert len(payload["data"]["subject"]) == 48
+    assert "192.0.2.1" not in payload["rowId"] and "192.0.2.1" not in payload["data"]["subject"]
+    assert payload["data"]["window_start"] == "2026-08-09T00:00"
+    assert len(payload["data"]["window_start"]) <= 16
+    assert datetime.fromisoformat(payload["data"]["window_end"]).tzinfo is not None
+    assert payload["data"]["count"] == 1 and isinstance(payload["data"]["count"], int)
+
+
+@pytest.mark.asyncio
+async def test_admission_create_failure_logs_only_safe_appwrite_metadata(monkeypatch, caplog):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(400, {"type": "row_invalid_structure", "code": 400}))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await store.consume("ip_minute", store.ip_subject("192.0.2.1"), "minute", 10)
+    assert raised.value.code == "rate_limit_unavailable"
+    assert "operation=rate_limits.create" in caplog.text
+    assert "status_code=400" in caplog.text
+    assert "appwrite_type=row_invalid_structure" in caplog.text
+    assert "appwrite_code=400" in caplog.text
+    assert "server-key" not in caplog.text
+    assert "test-secret" not in caplog.text
+    assert "192.0.2.1" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unstructured_increment_400_is_diagnostic_unavailable_not_false_limit(monkeypatch, caplog):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(409))
+    client.patch = AsyncMock(return_value=_response(400, {"type": "row_invalid_structure", "code": 400}))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await store.consume("ip_minute", store.ip_subject("192.0.2.1"), "minute", 10)
+    assert raised.value.code == "rate_limit_unavailable"
+    assert "operation=rate_limits.increment" in caplog.text

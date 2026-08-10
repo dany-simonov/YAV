@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -13,6 +14,9 @@ from typing import Any
 import httpx
 
 from src.validation import SecurityValidationError
+
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimitError(Exception):
@@ -63,7 +67,33 @@ class AppwriteTablesRateLimitStore:
         if not self.enabled and os.getenv("APP_ENV", "production").lower() not in {"test", "development"}:
             raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
         if self.enabled and (not self.endpoint or not self.project or not self.secret):
+            logger.warning(
+                "rate_limit_persistence_failed operation=%s status_code=%s appwrite_type=%s appwrite_code=%s",
+                "rate_limits.configuration", None, "configuration_missing", None,
+            )
             raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+
+    @staticmethod
+    def _unavailable(
+        operation: str, *, response: Any | None = None, exc: BaseException | None = None,
+    ) -> RateLimitError:
+        """Log bounded Appwrite failure metadata without request or secret material."""
+        status_code = getattr(response, "status_code", None)
+        error_type = type(exc).__name__ if exc is not None else type(response).__name__ if response is not None else None
+        appwrite_code: Any = None
+        if response is not None:
+            try:
+                body = response.json()
+            except (TypeError, ValueError):
+                body = None
+            if isinstance(body, dict):
+                error_type = body.get("type") if isinstance(body.get("type"), str) else error_type
+                appwrite_code = body.get("code") if isinstance(body.get("code"), (int, str)) else None
+        logger.warning(
+            "rate_limit_persistence_failed operation=%s status_code=%s appwrite_type=%s appwrite_code=%s",
+            operation, status_code, error_type, appwrite_code,
+        )
+        return RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
 
     @staticmethod
     def limit(name: str, default: int) -> int:
@@ -82,22 +112,32 @@ class AppwriteTablesRateLimitStore:
         if not self.enabled:
             return 0
         window = _window(self.now, period)
-        row_id = hashlib.sha256(f"{dimension}:{subject}:{window.key}".encode()).hexdigest()[:36]
+        row_id = self._row_id(dimension, subject, window.key)
         url = f"{self.endpoint}/tablesdb/{self.database}/tables/{self.table}/rows"
         headers = {"X-Appwrite-Project": self.project, "X-Appwrite-Key": self.api_key}
         payload = {"rowId": row_id, "data": {"dimension": dimension, "subject": subject, "window_start": window.key, "window_end": window.end.isoformat(), "count": 1}, "permissions": []}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            created = await client.post(url, headers=headers, json=payload)
-            if created.status_code in (200, 201):
-                return 0
-            if created.status_code != 409:
-                raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
-            incremented = await client.patch(f"{url}/{row_id}/count/increment", headers=headers, json={"value": 1, "max": limit})
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                created = await client.post(url, headers=headers, json=payload)
+                if created.status_code in (200, 201):
+                    return 0
+                if created.status_code != 409:
+                    raise self._unavailable("rate_limits.create", response=created)
+                incremented = await client.patch(f"{url}/{row_id}/count/increment", headers=headers, json={"value": 1, "max": limit})
+        except httpx.HTTPError as exc:
+            raise self._unavailable("rate_limits.create_or_increment", exc=exc) from exc
         if incremented.status_code == 200:
             return 0
-        if incremented.status_code in (400, 409):
+        if incremented.status_code == 409:
             return max(1, int((window.end - self.now).total_seconds()))
-        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+        if incremented.status_code == 400:
+            try:
+                error_type = incremented.json().get("type")
+            except (AttributeError, TypeError, ValueError):
+                error_type = None
+            if error_type == "row_max_exceeded":
+                return max(1, int((window.end - self.now).total_seconds()))
+        raise self._unavailable("rate_limits.increment", response=incremented)
 
     async def guard_provider(self, provider: str) -> None:
         env_name = f"PROVIDER_{provider.upper()}_PER_MINUTE"

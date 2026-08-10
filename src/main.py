@@ -31,6 +31,7 @@ from core.analyzer import HybridTextAnalyzer  # noqa: E402
 from core.exceptions import ProviderInfrastructureError  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
+    ChecksPersistenceError,
     ensure_user_profile,
     get_authenticated_account,
     persist_check_result,
@@ -228,6 +229,27 @@ def _media_diagnostic_logger(context: Any):
     return _log
 
 
+def _log_internal_error(context: Any, exc: BaseException) -> None:
+    """Emit bounded runtime diagnostics without rendering exception text or request data."""
+    log = getattr(context, "log", None)
+    if not callable(log):
+        return
+    if isinstance(exc, ChecksPersistenceError):
+        message = (
+            f"internal_error operation={exc.operation} exception_class={type(exc).__name__} "
+            f"status_code={exc.status_code} appwrite_type={exc.appwrite_type} "
+            f"appwrite_code={exc.appwrite_code} appwrite_message={exc.appwrite_message} "
+            f"data_keys={exc.data_keys} field_types={exc.field_types} "
+            f"string_lengths={exc.string_lengths}"
+        )
+    else:
+        message = f"internal_error operation=unclassified exception_class={type(exc).__name__}"
+    try:
+        log(message)
+    except Exception:
+        pass
+
+
 async def _get_file_metadata(file_id: str, bucket_id: str, user_jwt: str) -> dict[str, Any]:
     """Read Storage metadata with the invoking user's JWT before download."""
     endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", "").rstrip("/")
@@ -358,7 +380,7 @@ async def _analyze(
 
     # Keep legacy Function responses byte-for-byte field-compatible until a
     # provider is migrated to BE-06 canonical semantics.
-    body = result.model_dump(exclude_none=True)
+    body = result.model_dump(mode="json", exclude_none=True)
     body["processing_ms"] = processing_ms
     return body
 
@@ -469,7 +491,8 @@ def main(context: Any):
             },
             503,
         )
-    except Exception:
+    except Exception as exc:
+        _log_internal_error(context, exc)
         return _response_json(
             context,
             {"detail": "Внутренняя ошибка сервиса.", "code": "internal_error"},

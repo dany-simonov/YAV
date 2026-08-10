@@ -1,5 +1,6 @@
 """Quota terminal-state integration for completed and failed provider chains."""
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -195,10 +196,13 @@ async def test_aiornot_completed_result_consumes_quota_once():
     with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock(return_value=completed)) as aiornot, patch(
         "router.media_router.SaplingAdapter.analyze", new=AsyncMock()
     ) as sapling:
-        await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+        result = await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
     assert store.transitions == ["consumed"]
     aiornot.assert_awaited_once()
     sapling.assert_not_awaited()
+    assert result["model_used"] == "aiornot_text"
+    assert result["verdict"] == "FAKE"
+    assert json.loads(json.dumps(result)) == result
 
 
 @pytest.mark.asyncio

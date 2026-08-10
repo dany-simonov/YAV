@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.appwrite_store import (
+    ChecksPersistenceError,
     ensure_user_profile,
     get_authenticated_account,
     map_analysis_to_check_row,
@@ -408,3 +409,65 @@ async def test_check_creation_uses_exact_owner_permissions():
         'read("user:user-1")',
         'delete("user:user-1")',
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 500])
+async def test_check_create_failure_exposes_only_safe_structural_diagnostics(status):
+    private_text = "private input text"
+    response = _response("post", status, {
+        "type": "row_invalid_structure", "code": status,
+        "message": f"Invalid row\r\n{private_text} user-1 dynamic-key Bearer jwt-token",
+    })
+    client = _client_with(response)
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        with pytest.raises(ChecksPersistenceError) as raised:
+            await persist_check_result(
+                _canonical_result(explanation=private_text), "user-1", "source", "dynamic-key"
+            )
+    error = raised.value
+    assert error.operation == "checks.create"
+    assert error.status_code == status
+    assert error.appwrite_type == "row_invalid_structure"
+    assert error.appwrite_code == status
+    assert error.data_keys == (
+        "ai_probability,authenticity_index,decision_confidence,details,explanation,media_type,"
+        "model,processing_ms,provider,semantics_version,source_label,status,user_id,verdict"
+    )
+    assert "\r" not in error.appwrite_message and "\n" not in error.appwrite_message
+    assert len(error.appwrite_message) <= 300
+    for sensitive_value in (private_text, "user-1", "dynamic-key", "jwt-token"):
+        assert sensitive_value not in error.appwrite_message
+
+
+@pytest.mark.asyncio
+async def test_completed_canonical_text_result_persists_json_string_details():
+    client = _client_with(
+        _response("post", 201, {"$id": "check-1"}),
+        _response("patch", 200),
+        _response("patch", 200),
+    )
+    result = _canonical_result(
+        model_used="aiornot_text",
+        provider_evidence={
+            "provider": "aiornot", "model": "text_sync", "raw_score": 0.8,
+            "score_kind": "ai_probability", "predicted_label": "FAKE",
+            "safe_details": {"is_detected": True},
+        },
+    )
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        await persist_check_result(result, "user-1", "source", "dynamic-key")
+    data = client.post.await_args.kwargs["json"]["data"]
+    assert set(data) == {
+        "user_id", "media_type", "status", "verdict", "semantics_version", "ai_probability",
+        "decision_confidence", "authenticity_index", "provider", "model", "explanation",
+        "source_label", "processing_ms", "details",
+    }
+    assert isinstance(data["semantics_version"], int) and not isinstance(data["semantics_version"], bool)
+    assert isinstance(data["ai_probability"], float)
+    assert data["decision_confidence"] is None
+    assert isinstance(data["authenticity_index"], int) and not isinstance(data["authenticity_index"], bool)
+    assert all(isinstance(data[field], str) for field in ("media_type", "status", "verdict", "provider", "model"))
+    assert isinstance(data["details"], str)
+    assert isinstance(json.loads(data["details"]), dict)
+    assert data["decision_confidence"] is None

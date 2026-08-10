@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -28,6 +29,67 @@ DEFAULT_PROJECT_ID = "6a67d79d000fcca992f3"
 DEFAULT_DATABASE_ID = "yav"
 DEFAULT_USERS_TABLE_ID = "users"
 DEFAULT_CHECKS_TABLE_ID = "checks"
+
+
+def _appwrite_failure_metadata(response: Any | None, exc: BaseException | None = None) -> tuple[Any, Any, Any]:
+    status_code = getattr(response, "status_code", None)
+    error_type = type(exc).__name__ if exc is not None else type(response).__name__ if response is not None else None
+    appwrite_code: Any = None
+    if response is not None:
+        try:
+            body = response.json()
+        except (TypeError, ValueError):
+            body = None
+        if isinstance(body, dict):
+            error_type = body.get("type") if isinstance(body.get("type"), str) else error_type
+            appwrite_code = body.get("code") if isinstance(body.get("code"), (int, str)) else None
+    return status_code, error_type, appwrite_code
+
+
+def _safe_appwrite_message(response: Any | None, sensitive_values: tuple[str, ...]) -> str | None:
+    """Extract only bounded validation text, never a response body or credentials."""
+    if response is None:
+        return None
+    try:
+        body = response.json()
+    except (TypeError, ValueError):
+        return None
+    message = body.get("message") if isinstance(body, dict) else None
+    if not isinstance(message, str):
+        return None
+    sanitized = re.sub(r"[\r\n]+", " ", message)
+    for value in sensitive_values:
+        if value:
+            sanitized = sanitized.replace(value, "<redacted>")
+    sanitized = re.sub(
+        r"(?i)(?:x-appwrite-[a-z0-9-]+|authorization)\s*[:=]\s*\S+|bearer\s+\S+",
+        "<redacted-sensitive>",
+        sanitized,
+    )
+    return sanitized[:300]
+
+
+class ChecksPersistenceError(RuntimeError):
+    """Safe metadata carrier for Function-side checks persistence diagnostics."""
+
+    def __init__(
+        self, operation: str, *, response: Any | None = None, exc: BaseException | None = None,
+        data: dict[str, Any] | None = None, user_id: str = "", api_key: str = "",
+    ) -> None:
+        self.operation = operation
+        self.exception_class = type(exc).__name__ if exc is not None else None
+        self.status_code, self.appwrite_type, self.appwrite_code = _appwrite_failure_metadata(response, exc)
+        values = data or {}
+        self.data_keys = ",".join(sorted(values))
+        self.field_types = ",".join(
+            f"{key}:{type(value).__name__}" for key, value in sorted(values.items())
+        )
+        self.string_lengths = ",".join(
+            f"{key}:{len(value)}" for key, value in sorted(values.items()) if isinstance(value, str)
+        )
+        sensitive_values = (user_id, api_key, *(value for value in values.values() if isinstance(value, str)))
+        self.appwrite_message = _safe_appwrite_message(response, sensitive_values)
+        super().__init__(operation)
 
 
 def _resource_config() -> tuple[str, str, str, str, str]:
@@ -332,33 +394,51 @@ async def persist_check_result(
     encoded_user = quote(user_id, safe="")
     now = datetime.now(timezone.utc).isoformat()
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        created = await client.post(
-            checks_url,
-            headers=headers,
-            json={
-                "rowId": check_id,
-                "data": map_analysis_to_check_row(result, user_id, source_label),
-                "permissions": _user_permissions(user_id, allow_delete=True),
-            },
-        )
-        if created.status_code not in (200, 201):
-            raise RuntimeError(f"Check history write failed ({created.status_code})")
+    try:
+        check_data = map_analysis_to_check_row(result, user_id, source_label)
+    except Exception as exc:
+        raise ChecksPersistenceError("checks.payload.map", exc=exc, user_id=user_id, api_key=api_key) from exc
 
-        incremented = await client.patch(
-            f"{users_url}/{encoded_user}/checks_count/increment",
-            headers=headers,
-            json={"value": 1},
-        )
-        if incremented.status_code != 200:
-            raise RuntimeError(f"Profile checks_count update failed ({incremented.status_code})")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            created = await client.post(
+                checks_url,
+                headers=headers,
+                json={
+                    "rowId": check_id,
+                    "data": check_data,
+                    "permissions": _user_permissions(user_id, allow_delete=True),
+                },
+            )
+            if created.status_code not in (200, 201):
+                raise ChecksPersistenceError(
+                    "checks.create", response=created, data=check_data, user_id=user_id, api_key=api_key,
+                )
 
-        updated = await client.patch(
-            f"{users_url}/{encoded_user}",
-            headers=headers,
-            json={"data": {"last_check_at": now}},
-        )
-        if updated.status_code != 200:
-            raise RuntimeError(f"Profile last_check_at update failed ({updated.status_code})")
+            incremented = await client.patch(
+                f"{users_url}/{encoded_user}/checks_count/increment",
+                headers=headers,
+                json={"value": 1},
+            )
+            if incremented.status_code != 200:
+                raise ChecksPersistenceError(
+                    "profile.checks_count.increment", response=incremented,
+                    user_id=user_id, api_key=api_key,
+                )
+
+            updated = await client.patch(
+                f"{users_url}/{encoded_user}",
+                headers=headers,
+                json={"data": {"last_check_at": now}},
+            )
+            if updated.status_code != 200:
+                raise ChecksPersistenceError(
+                    "profile.last_check_at.update", response=updated,
+                    user_id=user_id, api_key=api_key,
+                )
+    except httpx.HTTPError as exc:
+        raise ChecksPersistenceError(
+            "checks.persistence.transport", exc=exc, data=check_data, user_id=user_id, api_key=api_key,
+        ) from exc
 
     return check_id

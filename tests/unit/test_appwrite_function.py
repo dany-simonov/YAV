@@ -13,6 +13,7 @@ from src.main import (
     _metadata_media_type,
     main,
 )
+from src.appwrite_store import ChecksPersistenceError
 from src.validation import SecurityValidationError
 
 
@@ -119,6 +120,34 @@ def test_main_uses_only_runtime_client_ip_for_admission():
         main(context)
 
     assert execute_mock.call_args.args[5] == "2001:db8::1"
+
+
+def test_main_internal_error_logs_safe_checks_operation_metadata():
+    context = _context(
+        {"text": "x" * 50},
+        {"X-Appwrite-Key": "runtime-key", "X-Appwrite-User-Id": "runtime-user", "X-Appwrite-User-Jwt": "runtime-jwt"},
+    )
+    response = MagicMock(status_code=400)
+    response.json.return_value = {
+        "type": "row_invalid_structure", "code": 400,
+        "message": "invalid runtime-user runtime-key Bearer runtime-jwt",
+    }
+    error = ChecksPersistenceError(
+        "checks.create", response=response,
+        data={"explanation": "private input", "details": "private details"},
+        user_id="runtime-user", api_key="runtime-key",
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        payload, status = main(context)
+    assert (payload, status) == ({"detail": "Внутренняя ошибка сервиса.", "code": "internal_error"}, 500)
+    logged = context.log.call_args.args[0]
+    assert "operation=checks.create" in logged
+    assert "status_code=400" in logged
+    assert "appwrite_type=row_invalid_structure" in logged
+    for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private input", "private details"):
+        assert sensitive_value not in logged
 
 
 def test_body_client_ip_is_rejected_before_execution():

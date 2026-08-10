@@ -63,14 +63,19 @@ export function Home(){const [open,setOpen]=useState(0);return <div className="p
     </div></article>)}</div></section>
 
   <section id="features" className="container pb-20 lg:pb-32"><div className="grid md:grid-cols-2 gap-8 mb-14"><h2 className="section-title">Каждый вывод<br/>можно объяснить</h2><p className="text-mv-text-secondary leading-7 max-w-md md:ml-auto">Демонстрационные значения показывают структуру результата, а не фактический анализ конкретного файла.</p></div><div className="soft-card p-4 lg:p-6 grid lg:grid-cols-[1.1fr_.9fr] gap-7">
-    <div className="min-h-[420px] rounded-[15px] bg-[#11151a] relative overflow-hidden grid-texture"><div className="absolute left-[20%] top-[18%] w-[48%] h-[58%] border border-blue-400/50"/><div className="absolute right-[12%] bottom-[14%] w-[18%] h-[28%] border border-blue-400/30"/></div>
+    <div className="min-h-[420px] rounded-[15px] bg-[#11151a] relative overflow-hidden grid-texture">
+      <img
+      src="/assets/img/iipicture.png"
+      alt="Пример анализа"
+      className="absolute inset-0 w-full h-full object-coverна rounded-[12px]">
+      </img>
+      <div className="absolute left-[20%] top-[18%] w-[48%] h-[58%] border border-blue-400/50"/><div className="absolute right-[12%] bottom-[14%] w-[18%] h-[28%] border border-blue-400/30"/></div>
     <div className="p-3 lg:p-8 flex flex-col"><p className="eyebrow mb-6">Пример анализа</p><h3 className="text-2xl lg:text-3xl font-semibold tracking-[-.035em] leading-tight">Есть признаки локального изменения</h3><p className="text-sm text-mv-text-secondary leading-6 mt-4 mb-8">Вывод вероятностный. Проверьте выделенные области и происхождение файла перед решением.</p>{[
       ['Вероятность AI-генерации','Низкая','green','Сильные признаки полной генерации не обнаружены.'],
       ['Целостность метаданных','Неполная','amber','Часть полей отсутствует после повторного сохранения.'],
       ['Области вмешательства','2 области','red','Локальные несоответствия структуры требуют ручной оценки.'],
     ].map(x=><div key={x[0]} className="py-4 border-t border-black/[.07] text-sm"><div className="flex justify-between gap-5"><span className="font-medium">{x[0]}</span><span className="flex items-center gap-2 shrink-0"><StatusDot tone={x[2] as any}/><strong>{x[1]}</strong></span></div><p className="mt-2 text-xs leading-5 text-mv-text-secondary pr-6">{x[3]}</p></div>)}<Link to="/dashboard/check" className="btn-black mt-5 self-start">Изучить результат</Link></div>
   </div></section>
-
   <section className="relative pb-20 lg:pb-32">
     <div className="absolute inset-x-0 top-0 bottom-20 lg:bottom-32 pointer-events-none opacity-50" style={{backgroundImage:'linear-gradient(rgba(0,0,0,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,0,0,.025) 1px,transparent 1px)',backgroundSize:'44px 44px'}}/>
     <div className="container relative py-8 lg:py-14">

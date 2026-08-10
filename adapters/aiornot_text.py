@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import httpx
 
 from adapters.base import BaseAdapter
@@ -20,6 +22,51 @@ class AIOrNotTextAdapter(BaseAdapter):
     URL = "https://api.aiornot.com/v2/text/sync"
     MIN_CHARACTERS = 250
     MIN_WORDS = 64
+
+    @staticmethod
+    def _safe_error_message(response: httpx.Response, text: str) -> str | None:
+        """Extract one bounded diagnostic field without retaining response data.
+
+        Error bodies are never propagated.  This accepts only one primitive
+        field and rejects a message that appears to echo the submitted text.
+        """
+        try:
+            body = response.json()
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(body, dict):
+            return None
+
+        error = body.get("error")
+        candidates = (
+            error.get("code") if isinstance(error, dict) else None,
+            body.get("detail"),
+            body.get("message"),
+        )
+        value = next((candidate for candidate in candidates if isinstance(candidate, str)), None)
+        if value is None:
+            return None
+
+        # A full or substantial echoed input is not useful as a diagnostic and
+        # must never reach logs.  Short texts are also checked in full.
+        markers = [text]
+        if len(text) > 32:
+            midpoint = len(text) // 2
+            markers.extend((text[:32], text[midpoint:midpoint + 32], text[-32:]))
+        if any(marker and marker in value for marker in markers):
+            return None
+
+        sanitized = value.replace("\r", " ").replace("\n", " ").strip()
+        if settings.aiornot_api_key:
+            sanitized = sanitized.replace(settings.aiornot_api_key, "[REDACTED]")
+        sanitized = re.sub(
+            r"(?i)\b(authorization|x-appwrite(?:-[a-z0-9_-]+)?|api[-_ ]?key)\s*[:=]\s*"
+            r"(?:bearer\s+)?[^\s,;]+",
+            r"\1=[REDACTED]",
+            sanitized,
+        )
+        sanitized = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", sanitized)
+        return sanitized[:300] or None
 
     @classmethod
     def is_eligible(cls, data: bytes | str) -> bool:
@@ -52,7 +99,12 @@ class AIOrNotTextAdapter(BaseAdapter):
         if response.status_code == 429:
             raise ProviderInfrastructureError("aiornot", "unavailable")
         if response.status_code >= 400:
-            raise ExternalAPIError("aiornot", "request_error")
+            raise ExternalAPIError(
+                "aiornot",
+                "request_error",
+                status_code=response.status_code,
+                provider_message=self._safe_error_message(response, text),
+            )
         try:
             body = response.json()
             report = body.get("report") if isinstance(body, dict) else None

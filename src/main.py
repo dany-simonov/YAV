@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -269,11 +270,29 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
     error_code = exc.detail if exc.detail in known_codes else "unknown"
     status = getattr(exc, "status_code", None)
     safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "none"
+    provider_message = getattr(exc, "provider_message", None)
+    if provider == "unknown" or error_code == "unknown":
+        provider_message = None
+    if isinstance(provider_message, str):
+        provider_message = provider_message.replace("\r", " ").replace("\n", " ").strip()
+        provider_message = re.sub(
+            r"(?i)\b(authorization|x-appwrite(?:-[a-z0-9_-]+)?|api[-_ ]?key)\s*[:=]\s*"
+            r"(?:bearer\s+)?[^\s,;]+",
+            r"\1=[REDACTED]",
+            provider_message,
+        )
+        provider_message = re.sub(
+            r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", provider_message
+        )[:300]
+    else:
+        provider_message = ""
     message = (
         "provider_external_api_error operation=provider.external_api_error "
         f"provider={provider} safe_error_code={error_code} "
         f"status_code={safe_status} exception_class={type(exc).__name__}"
     )
+    if provider_message:
+        message += f" provider_message={provider_message}"
     try:
         log(message)
     except Exception:

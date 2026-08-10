@@ -8,6 +8,15 @@ import pytest
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 
 
+def test_external_api_error_new_diagnostics_are_optional_and_backward_compatible():
+    legacy = ExternalAPIError("sapling", "request_error")
+    enriched = ExternalAPIError("aiornot", "request_error", status_code=422, provider_message="safe")
+    assert (legacy.service, legacy.detail, legacy.status_code, legacy.provider_message) == (
+        "sapling", "request_error", None, None
+    )
+    assert (enriched.status_code, enriched.provider_message) == (422, "safe")
+
+
 def _client(*, response=None, error=None):
     instance = AsyncMock()
     instance.post = AsyncMock(return_value=response, side_effect=error)

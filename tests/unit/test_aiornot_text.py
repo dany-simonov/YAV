@@ -86,12 +86,51 @@ async def test_5xx_is_typed_unavailable(status):
 
 
 @pytest.mark.asyncio
-async def test_4xx_is_not_misclassified_as_infrastructure_failure():
-    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=_response(422))):
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_ordinary_4xx_preserves_status_without_becoming_infrastructure_failure(status):
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=_response(status))):
         with pytest.raises(ExternalAPIError) as raised:
             await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
     assert not isinstance(raised.value, ProviderInfrastructureError)
     assert raised.value.detail == "request_error"
+    assert raised.value.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_4xx_provider_message_is_bounded_and_redacts_sensitive_values():
+    raw_token = "provider-token-should-not-log"
+    raw_key = "test_aiornot_key"
+    body = {
+        "message": (
+            f"Authorization: Bearer {raw_token}\r\n"
+            f"AIORNOT_API_KEY={raw_key}; invalid credentials"
+        )
+    }
+    with patch(
+        "adapters.aiornot_text.httpx.AsyncClient",
+        return_value=_client(response=_response(401, body)),
+    ):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    message = raised.value.provider_message
+    assert message is not None
+    assert len(message) <= 300
+    assert "\r" not in message and "\n" not in message
+    assert raw_token not in message
+    assert raw_key not in message
+    assert "Authorization=[REDACTED]" in message
+    assert "AIORNOT_API_KEY=[REDACTED]" in message
+
+
+@pytest.mark.asyncio
+async def test_4xx_does_not_retain_provider_message_that_echoes_analyzed_text():
+    with patch(
+        "adapters.aiornot_text.httpx.AsyncClient",
+        return_value=_client(response=_response(400, {"detail": f"invalid text: {ELIGIBLE_TEXT}"})),
+    ):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    assert raised.value.provider_message is None
 
 
 @pytest.mark.asyncio

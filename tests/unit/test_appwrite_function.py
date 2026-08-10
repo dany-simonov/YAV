@@ -160,7 +160,9 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
             "X-Appwrite-User-Jwt": "runtime-jwt",
         },
     )
-    error = ExternalAPIError("aiornot", "request_error")
+    error = ExternalAPIError(
+        "aiornot", "request_error", status_code=401, provider_message="invalid credentials"
+    )
     with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
         "src.main._run_coro_sync", side_effect=error
     ):
@@ -174,14 +176,20 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
     assert "operation=provider.external_api_error" in logged
     assert "provider=aiornot" in logged
     assert "safe_error_code=request_error" in logged
+    assert "status_code=401" in logged
     assert "exception_class=ExternalAPIError" in logged
+    assert "provider_message=invalid credentials" in logged
     for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private analysis input"):
         assert sensitive_value not in logged
 
 
 def test_external_api_error_log_never_renders_untrusted_service_or_detail():
     context = _context({"text": "x" * 50})
-    error = ExternalAPIError("aiornot\r\nBearer runtime-key", "request_error secret-body")
+    error = ExternalAPIError(
+        "aiornot\r\nBearer runtime-key",
+        "request_error secret-body",
+        provider_message="Authorization: Bearer runtime-key\nsecret-body",
+    )
     with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
         "src.main._run_coro_sync", side_effect=error
     ):
@@ -194,6 +202,7 @@ def test_external_api_error_log_never_renders_untrusted_service_or_detail():
     assert "runtime-key" not in logged
     assert "secret-body" not in logged
     assert "\n" not in logged
+    assert "provider_message=" not in logged
 
 
 def test_body_client_ip_is_rejected_before_execution():

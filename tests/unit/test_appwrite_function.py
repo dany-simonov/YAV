@@ -216,6 +216,45 @@ def test_external_api_error_log_never_renders_untrusted_service_or_detail():
     assert "provider_message=" not in logged
 
 
+def test_aiornot_short_plain_text_provider_message_is_logged_with_structure():
+    context = _context({"text": "private analysis input " * 20})
+    error = ExternalAPIError(
+        "aiornot",
+        "request_error",
+        status_code=400,
+        provider_message="some harmless provider error",
+        content_type="text/plain",
+        response_length=28,
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        _, status = main(context)
+    assert status == 503
+    logged = context.log.call_args.args[0]
+    assert "status_code=400" in logged
+    assert "content_type=text/plain" in logged
+    assert "response_length=28" in logged
+    assert "provider_message=some harmless provider error" in logged
+    assert "private analysis input" not in logged
+
+
+def test_external_api_error_log_omits_provider_message_for_another_provider():
+    context = _context({"text": "x" * 50})
+    error = ExternalAPIError(
+        "sapling", "request_error", status_code=400, provider_message="arbitrary plain response"
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        _, status = main(context)
+    assert status == 503
+    logged = context.log.call_args.args[0]
+    assert "provider=sapling" in logged
+    assert "arbitrary plain response" not in logged
+    assert "provider_message=" not in logged
+
+
 def test_body_client_ip_is_rejected_before_execution():
     context = _context({"text": "x" * 50, "clientIp": "198.51.100.99"})
     with patch("src.main._execute_request", new=MagicMock()) as execute_mock:

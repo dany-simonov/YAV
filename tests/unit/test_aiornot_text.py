@@ -193,6 +193,57 @@ async def test_non_json_4xx_records_metadata_without_reading_body_into_diagnosti
 
 
 @pytest.mark.asyncio
+async def test_short_plain_text_4xx_retains_harmless_provider_reason():
+    reason = "some harmless provider error"
+    response = httpx.Response(400, text=reason, headers={"content-type": "text/plain; charset=utf-8"})
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    assert raised.value.provider_message == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "secret"),
+    [
+        ("API key test_aiornot_key is invalid", "test_aiornot_key"),
+        ("Authorization: Bearer provider-token-should-not-log", "provider-token-should-not-log"),
+    ],
+)
+async def test_short_plain_text_4xx_redacts_keys_and_bearer_tokens(reason, secret):
+    response = httpx.Response(400, text=reason, headers={"content-type": "text/plain"})
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    assert raised.value.provider_message is not None
+    assert secret not in raised.value.provider_message
+    assert "[REDACTED]" in raised.value.provider_message
+
+
+@pytest.mark.asyncio
+async def test_plain_text_4xx_omits_echoed_submitted_text():
+    response = httpx.Response(
+        400,
+        text=f"invalid input: {ELIGIBLE_TEXT}",
+        headers={"content-type": "text/plain"},
+    )
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    assert raised.value.provider_message is None
+
+
+@pytest.mark.asyncio
+async def test_plain_text_4xx_over_300_bytes_is_omitted():
+    response = httpx.Response(400, content=b"x" * 301, headers={"content-type": "text/plain"})
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    assert raised.value.response_length == 301
+    assert raised.value.provider_message is None
+
+
+@pytest.mark.asyncio
 async def test_429_is_typed_temporary_unavailability_without_raw_error_leak():
     raw_error = "provider throttled request=internal"
     with patch(

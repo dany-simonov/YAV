@@ -26,13 +26,50 @@ class AIOrNotTextAdapter(BaseAdapter):
     _SAFE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
     @classmethod
+    def _sanitize_error_message(cls, value: str, text: str) -> str | None:
+        """Return a bounded provider reason only when it contains no request data."""
+        normalized_text = " ".join(text.split()).casefold()
+        normalized_value = " ".join(value.split()).casefold()
+        words = normalized_text.split()
+        markers = {normalized_text}
+        if len(words) >= 6:
+            markers.update(" ".join(words[index:index + 6]) for index in range(len(words) - 5))
+        if any(len(marker) >= 24 and marker in normalized_value for marker in markers):
+            return None
+
+        sanitized = value.replace("\r", " ").replace("\n", " ").strip()
+        if settings.aiornot_api_key:
+            sanitized = sanitized.replace(settings.aiornot_api_key, "[REDACTED]")
+        sanitized = re.sub(
+            r"(?i)\b(authorization|x-appwrite(?:-[a-z0-9_-]+)?|api[-_ ]?key)\s*[:=]\s*"
+            r"(?:bearer\s+)?[^\s,;]+",
+            r"\1=[REDACTED]",
+            sanitized,
+        )
+        sanitized = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", sanitized)
+        sanitized = re.sub(
+            r"(?i)\b(?:sk|pk|api)[-_][a-z0-9_-]{12,}\b", "[REDACTED]", sanitized
+        )
+
+        # After explicit redactions, reject rather than risk logging an
+        # unlabelled credential or a secret in an unfamiliar response format.
+        if re.search(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", sanitized):
+            return None
+        if re.search(r"(?i)\b(?:token|secret|password)\s*[:=]\s*[^\s,;]{8,}", sanitized):
+            return None
+        if re.search(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{40,}(?![A-Za-z0-9_-])", sanitized):
+            return None
+        return sanitized[:300] or None
+
+    @classmethod
     def _safe_error_diagnostics(
         cls, response: httpx.Response, text: str
     ) -> tuple[str | None, int, tuple[str, ...], tuple[str, ...], str | None]:
         """Extract one bounded diagnostic field without retaining response data.
 
-        Non-JSON bodies are never read into logs. JSON diagnostics contain only
-        conservative key/path names and one allowlisted primitive string.
+        JSON diagnostics contain only conservative key/path names and one
+        allowlisted primitive string. A short text/plain 4xx reason is accepted
+        through the same sanitizer; every other non-JSON body is ignored.
         """
         raw_content_type = response.headers.get("content-type", "")
         base_content_type = raw_content_type.split(";", 1)[0].strip().lower()
@@ -43,6 +80,9 @@ class AIOrNotTextAdapter(BaseAdapter):
         )
         response_length = len(response.content)
         is_json = content_type == "application/json" or content_type.endswith("+json")
+        if content_type == "text/plain" and response_length <= 300:
+            value = response.content.decode("utf-8", errors="replace")
+            return content_type, response_length, (), (), cls._sanitize_error_message(value, text)
         if not is_json:
             return content_type, response_length, (), (), None
 
@@ -72,26 +112,13 @@ class AIOrNotTextAdapter(BaseAdapter):
         if value is None:
             return content_type, response_length, response_keys, response_paths, None
 
-        normalized_text = " ".join(text.split()).casefold()
-        normalized_value = " ".join(value.split()).casefold()
-        words = normalized_text.split()
-        markers = {normalized_text}
-        if len(words) >= 6:
-            markers.update(" ".join(words[index:index + 6]) for index in range(len(words) - 5))
-        if any(len(marker) >= 24 and marker in normalized_value for marker in markers):
-            return content_type, response_length, response_keys, response_paths, None
-
-        sanitized = value.replace("\r", " ").replace("\n", " ").strip()
-        if settings.aiornot_api_key:
-            sanitized = sanitized.replace(settings.aiornot_api_key, "[REDACTED]")
-        sanitized = re.sub(
-            r"(?i)\b(authorization|x-appwrite(?:-[a-z0-9_-]+)?|api[-_ ]?key)\s*[:=]\s*"
-            r"(?:bearer\s+)?[^\s,;]+",
-            r"\1=[REDACTED]",
-            sanitized,
+        return (
+            content_type,
+            response_length,
+            response_keys,
+            response_paths,
+            cls._sanitize_error_message(value, text),
         )
-        sanitized = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", sanitized)
-        return content_type, response_length, response_keys, response_paths, sanitized[:300] or None
 
     @classmethod
     def is_eligible(cls, data: bytes | str) -> bool:

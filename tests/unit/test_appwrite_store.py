@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.appwrite_store import (
     ensure_user_profile,
@@ -31,6 +32,30 @@ def _response(method: str, status: int, body: dict | None = None):
     return response
 
 
+def _canonical_result(**overrides):
+    result = {
+        "verdict": "FAKE",
+        "confidence": 0.8,
+        "model_used": "sightengine",
+        "explanation": "safe summary",
+        "media_type": "image",
+        "processing_ms": 123,
+        "semantics_version": 2,
+        "ai_probability": 0.8,
+        "authenticity_index": 20,
+        "provider_evidence": {
+            "provider": "sightengine",
+            "model": "genai",
+            "raw_score": 0.8,
+            "score_kind": "ai_probability",
+            "predicted_label": "FAKE",
+            "safe_details": {"score_field": "type.ai_generated"},
+        },
+    }
+    result.update(overrides)
+    return result
+
+
 def test_analysis_result_mapping_preserves_legacy_authenticity_behavior():
     result = {
         "verdict": "FAKE",
@@ -51,17 +76,231 @@ def test_analysis_result_mapping_preserves_legacy_authenticity_behavior():
     assert json.loads(row["details"]) == {"fact_checks": [{"status": "ok"}]}
 
 
+def test_ai_probability_v2_persists_canonical_fields_without_double_inversion():
+    row = map_analysis_to_check_row(_canonical_result(), "authenticated-user")
+
+    assert row["semantics_version"] == 2
+    assert row["ai_probability"] == 0.8
+    assert row["decision_confidence"] is None
+    assert row["authenticity_index"] == 20
+    assert row["authenticity_index"] != 80
+
+
+def test_class_confidence_v2_persists_decision_semantics_and_canonical_provider_model():
+    result = _canonical_result(
+        verdict="REAL",
+        confidence=0.91,
+        model_used="hf_image_inference",
+        ai_probability=None,
+        decision_confidence=0.91,
+        authenticity_index=91,
+        provider_evidence={
+            "provider": "huggingface",
+            "model": "dima806/deepfake-vs-real-image-detection",
+            "raw_score": 0.91,
+            "score_kind": "class_confidence",
+            "predicted_label": "REAL",
+            "safe_details": {"score_field": "top_label_score"},
+        },
+    )
+
+    row = map_analysis_to_check_row(result, "authenticated-user")
+
+    assert row["ai_probability"] is None
+    assert row["decision_confidence"] == 0.91
+    assert row["authenticity_index"] == 91
+    assert row["provider"] == "huggingface"
+    assert row["model"] == "dima806/deepfake-vs-real-image-detection"
+
+
+def test_uncertain_class_confidence_keeps_authenticity_index_null():
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            verdict="UNCERTAIN",
+            ai_probability=None,
+            decision_confidence=0.5,
+            authenticity_index=None,
+            provider_evidence={
+                "provider": "huggingface",
+                "model": "classifier",
+                "raw_score": 0.5,
+                "score_kind": "class_confidence",
+                "predicted_label": "FAKE",
+            },
+        ),
+        "authenticated-user",
+    )
+    assert row["decision_confidence"] == 0.5
+    assert row["authenticity_index"] is None
+
+
+def test_aggregated_signal_does_not_invent_probability_confidence_or_index():
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            model_used="resemble_detect",
+            ai_probability=None,
+            decision_confidence=None,
+            authenticity_index=None,
+            provider_evidence={
+                "provider": "resemble",
+                "model": "detect_v1",
+                "raw_score": 0.8,
+                "score_kind": "aggregated_signal",
+                "predicted_label": "FAKE",
+            },
+        ),
+        "authenticated-user",
+    )
+    assert row["ai_probability"] is None
+    assert row["decision_confidence"] is None
+    assert row["authenticity_index"] is None
+
+
+def test_legacy_result_without_semantics_version_remains_v1():
+    row = map_analysis_to_check_row(
+        {"verdict": "FAKE", "confidence": 0.8, "model_used": "sapling"},
+        "authenticated-user",
+    )
+    assert row["semantics_version"] is None
+    assert row["ai_probability"] is None
+    assert row["decision_confidence"] is None
+    assert row["authenticity_index"] == 20
+
+
+def test_v2_evidence_is_bounded_to_versioned_curated_details():
+    raw_marker = "raw-provider-secret"
+    result = _canonical_result(
+        raw_provider_response={"authorization": raw_marker},
+        provider_evidence={
+            **_canonical_result()["provider_evidence"],
+            "unexpected_raw_payload": raw_marker,
+        },
+    )
+    details = json.loads(map_analysis_to_check_row(result, "authenticated-user")["details"])
+
+    assert set(details) == {"provider_evidence_v2"}
+    assert details["provider_evidence_v2"]["safe_details"] == {
+        "score_field": "type.ai_generated"
+    }
+    assert raw_marker not in json.dumps(details)
+
+
+def test_audio_component_evidence_persists_safe_scores_without_a_universal_probability():
+    result = _canonical_result(
+        verdict="UNCERTAIN",
+        model_used="resemble_detect",
+        ai_probability=None,
+        decision_confidence=None,
+        authenticity_index=None,
+        provider_evidence=None,
+        component_evidence=[
+            {
+                "verdict": "UNCERTAIN",
+                "evidence": {
+                    "provider": "resemble",
+                    "model": "detect_v1",
+                    "raw_score": 0.1,
+                    "score_kind": "aggregated_signal",
+                    "predicted_label": "UNCERTAIN",
+                    "safe_details": {"score_field": "score"},
+                    "raw_response": "must-not-persist",
+                },
+            },
+            {
+                "verdict": "UNCERTAIN",
+                "evidence": {
+                    "provider": "huggingface",
+                    "model": "audio-deepfake-classifier",
+                    "raw_score": 0.6,
+                    "score_kind": "class_confidence",
+                    "predicted_label": "spoof",
+                    "safe_details": {"score_field": "top_label_score"},
+                },
+            },
+        ],
+    )
+    row = map_analysis_to_check_row(result, "authenticated-user")
+    components = json.loads(row["details"])["provider_evidence_v2"]["components"]
+
+    assert row["ai_probability"] is None
+    assert row["decision_confidence"] is None
+    assert row["authenticity_index"] is None
+    assert components == [
+        {
+            "provider": "resemble",
+            "model": "detect_v1",
+            "verdict": "UNCERTAIN",
+            "score_kind": "aggregated_signal",
+            "score": 0.1,
+            "predicted_label": "UNCERTAIN",
+            "safe_details": {"score_field": "score"},
+        },
+        {
+            "provider": "huggingface",
+            "model": "audio-deepfake-classifier",
+            "verdict": "UNCERTAIN",
+            "score_kind": "class_confidence",
+            "score": 0.6,
+            "predicted_label": "spoof",
+            "safe_details": {"score_field": "top_label_score"},
+        },
+    ]
+    assert "must-not-persist" not in row["details"]
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("semantics_version", 1),
+        ("semantics_version", True),
+        ("ai_probability", float("nan")),
+        ("ai_probability", 1.1),
+        ("ai_probability", "0.5"),
+        ("decision_confidence", float("inf")),
+        ("decision_confidence", -0.1),
+        ("authenticity_index", 50.5),
+        ("authenticity_index", True),
+        ("authenticity_index", 101),
+    ],
+)
+def test_invalid_canonical_values_never_reach_appwrite_mapping(field, invalid):
+    with pytest.raises(ValidationError):
+        map_analysis_to_check_row(_canonical_result(**{field: invalid}), "authenticated-user")
+
+
+@pytest.mark.parametrize(
+    ("private_key", "private_value"),
+    [
+        ("authorization", "Bearer secret"),
+        ("api-key", "secret"),
+        ("user_text", "private text"),
+        ("file_bytes", "encoded bytes"),
+        ("otherwise_safe", b"raw bytes"),
+    ],
+)
+def test_private_provider_evidence_is_rejected_by_existing_contract(
+    private_key, private_value
+):
+    evidence = {
+        **_canonical_result()["provider_evidence"],
+        "safe_details": {private_key: private_value},
+    }
+    with pytest.raises(ValidationError):
+        map_analysis_to_check_row(
+            _canonical_result(provider_evidence=evidence), "authenticated-user"
+        )
+
+
 @pytest.mark.parametrize("invalid", [None, "not-a-number", float("nan"), float("inf")])
 def test_analysis_result_mapping_handles_invalid_confidence(invalid):
     row = map_analysis_to_check_row({"confidence": invalid}, "authenticated-user")
     assert row["authenticity_index"] == 0
 
 
-@pytest.mark.parametrize("model", ["aiornot_text", "aiornot_audio"])
-def test_analysis_result_mapping_persists_aiornot_model_under_canonical_provider(model):
-    row = map_analysis_to_check_row({"model_used": model}, "authenticated-user")
+def test_analysis_result_mapping_persists_aiornot_text_under_canonical_provider():
+    row = map_analysis_to_check_row({"model_used": "aiornot_text"}, "authenticated-user")
     assert row["provider"] == "aiornot"
-    assert row["model"] == model
+    assert row["model"] == "aiornot_text"
 
 
 def test_details_serialization_handles_enum_like_values():

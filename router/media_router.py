@@ -11,7 +11,7 @@ from adapters.sapling import SaplingAdapter
 from adapters.sightengine import SightengineAdapter
 from adapters.sightengine_video import SightengineVideoAdapter
 from adapters.video_pipeline import VideoPipeline
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ComponentEvidence
 from core.enums import MediaType, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError, UnsupportedMediaType
 
@@ -52,15 +52,25 @@ EXTENSION_MAP: dict[str, MediaType] = {
 
 
 def _merge_results(primary: AnalysisResult, fallback: AnalysisResult) -> AnalysisResult:
-    """Merge two UNCERTAIN results into one combined result."""
+    """Resolve two UNCERTAIN audio results without blending incompatible scores."""
     if fallback.verdict != Verdict.UNCERTAIN:
         return fallback
+
+    components = [
+        ComponentEvidence(verdict=result.verdict, evidence=result.provider_evidence)
+        for result in (primary, fallback)
+        if result.provider_evidence is not None
+    ]
     return AnalysisResult(
         verdict=Verdict.UNCERTAIN,
-        confidence=round((primary.confidence + fallback.confidence) / 2, 4),
+        # AnalysisResult keeps the legacy float field mandatory.  0.5 is the
+        # established UNCERTAIN sentinel, not a combined provider score.
+        confidence=0.5,
         model_used=primary.model_used,
         explanation=f"{primary.explanation}\n---\nFallback: {fallback.explanation}",
         media_type=primary.media_type,
+        semantics_version=2,
+        component_evidence=components or None,
     )
 
 

@@ -4,12 +4,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from adapters.aiornot_audio import AIOrNotAudioAdapter
 from adapters.hf_audio import HFAudioAdapter
 from adapters.hf_image import HFImageAdapter
 from adapters.resemble import ResembleAdapter
 from adapters.video_pipeline import VideoPipeline
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ProviderEvidence
 from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from router.media_router import MediaRouter
 
@@ -91,21 +90,6 @@ async def test_resemble_legacy_score_is_an_aggregated_signal_not_ai_probability(
     assert raw_marker not in result.model_dump_json()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("provider_verdict", "score", "verdict", "index"),
-    [("ai", 0.95, Verdict.FAKE, 5), ("human", 0.95, Verdict.REAL, 95), ("uncertain", 0.5, Verdict.UNCERTAIN, None)],
-)
-async def test_aiornot_voice_uses_provider_verdict_class_confidence(provider_verdict, score, verdict, index):
-    raw_marker = "aiornot-voice-raw-payload"
-    body = {"report": {"verdict": provider_verdict, "confidence": score}, "raw": raw_marker}
-    with patch("adapters.aiornot_audio.httpx.AsyncClient", return_value=_client(body)):
-        result = await AIOrNotAudioAdapter().analyze(b"audio")
-    _assert_class_confidence(result, score, verdict, provider_verdict, index)
-    assert "вероятность синтетической речи" not in result.explanation
-    assert raw_marker not in result.model_dump_json()
-
-
 def _frame_result(verdict: Verdict, confidence: float) -> AnalysisResult:
     return AnalysisResult(
         verdict=verdict,
@@ -153,30 +137,58 @@ async def test_legacy_video_exposes_only_aggregate_signal_and_keeps_legacy_confi
 
 
 @pytest.mark.asyncio
-async def test_audio_uncertain_merge_remains_legacy_v1_without_false_canonical_score_blending():
+async def test_audio_uncertain_merge_is_canonical_without_blending_incompatible_scores():
+    raw_marker = "raw-audio-provider-payload"
     primary = AnalysisResult(
         verdict=Verdict.UNCERTAIN,
-        confidence=0.2,
+        confidence=0.1,
         model_used=ModelUsed.RESEMBLE,
         explanation="primary",
         media_type=MediaType.AUDIO,
         semantics_version=2,
+        provider_evidence=ProviderEvidence(
+            provider="resemble",
+            model="detect_v1",
+            raw_score=0.1,
+            score_kind=ScoreKind.AGGREGATED_SIGNAL,
+            predicted_label="UNCERTAIN",
+            safe_details={"score_field": "score"},
+            raw_payload=raw_marker,
+        ),
     )
     fallback = AnalysisResult(
         verdict=Verdict.UNCERTAIN,
-        confidence=0.8,
+        confidence=0.6,
         model_used=ModelUsed.HF_AUDIO,
         explanation="fallback",
         media_type=MediaType.AUDIO,
         semantics_version=2,
+        provider_evidence=ProviderEvidence(
+            provider="huggingface",
+            model="audio-deepfake-classifier",
+            raw_score=0.6,
+            score_kind=ScoreKind.CLASS_CONFIDENCE,
+            predicted_label="spoof",
+            safe_details={"score_field": "top_label_score"},
+            raw_payload=raw_marker,
+        ),
     )
     with patch("router.media_router.ResembleAdapter.analyze", new=AsyncMock(return_value=primary)), patch(
         "router.media_router.HFAudioAdapter.analyze", new=AsyncMock(return_value=fallback)
     ):
         result = await MediaRouter().route(MediaType.AUDIO, b"audio")
-    assert result.confidence == 0.5  # unchanged legacy merge behavior
-    assert result.semantics_version is None
+    assert result.confidence == 0.5  # established UNCERTAIN sentinel, not (0.1 + 0.6) / 2
+    assert result.semantics_version == 2
     assert result.ai_probability is None
     assert result.decision_confidence is None
     assert result.authenticity_index is None
     assert result.provider_evidence is None
+    assert [(component.evidence.provider, component.verdict) for component in result.component_evidence] == [
+        ("resemble", Verdict.UNCERTAIN),
+        ("huggingface", Verdict.UNCERTAIN),
+    ]
+    assert [component.evidence.score_kind for component in result.component_evidence] == [
+        ScoreKind.AGGREGATED_SIGNAL,
+        ScoreKind.CLASS_CONFIDENCE,
+    ]
+    assert raw_marker not in result.model_dump_json()

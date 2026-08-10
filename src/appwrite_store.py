@@ -11,6 +11,9 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+from api.schemas import AnalysisResult, HybridAnalysisResponse
+from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
+from core.result_normalization import authenticity_index_from_ai_probability
 from src.validation import (
     MAX_DETAILS_BYTES,
     MAX_EXPLANATION,
@@ -100,15 +103,123 @@ def serialize_check_details(result: dict[str, Any]) -> str:
     return encoded
 
 
+def _serialize_canonical_details(result: AnalysisResult) -> str:
+    """Serialize only contract-validated, curated v2 provider evidence."""
+    evidence = result.provider_evidence
+    details: dict[str, Any] = {}
+    evidence_details = evidence.model_dump(mode="json") if evidence is not None else {}
+    if result.component_evidence:
+        evidence_details["components"] = [
+            {
+                "provider": component.evidence.provider,
+                "model": component.evidence.model,
+                "verdict": component.verdict.value,
+                "score_kind": component.evidence.score_kind.value,
+                "score": component.evidence.raw_score,
+                "predicted_label": component.evidence.predicted_label,
+                "safe_details": component.evidence.safe_details,
+            }
+            for component in result.component_evidence
+        ]
+    if evidence_details:
+        details["provider_evidence_v2"] = evidence_details
+    encoded = json.dumps(details, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    if len(encoded.encode("utf-8")) > MAX_DETAILS_BYTES:
+        return '{"truncated":true}'
+    return encoded
+
+
+def _map_hybrid_v2_to_check_row(
+    result: dict[str, Any], user_id: str, source_label: str
+) -> dict[str, Any]:
+    """Persist Hybrid factual findings separately from Sapling AI detection."""
+    hybrid = HybridAnalysisResponse.model_validate(result)
+    evidence = hybrid.provider_evidence
+    if evidence is None or evidence.provider != "sapling" or evidence.model != "aidetect":
+        raise ValueError("Hybrid v2 requires canonical Sapling provider evidence")
+    if evidence.score_kind != ScoreKind.AI_PROBABILITY:
+        raise ValueError("Hybrid v2 Sapling evidence must be an AI probability")
+
+    # Reuse the canonical BE-06 result contract for all persisted AI fields.
+    ai_component = AnalysisResult(
+        verdict=Verdict(hybrid.ai_verdict),
+        confidence=hybrid.ai_confidence,
+        model_used=ModelUsed.SAPLING,
+        explanation=hybrid.ai_explanation or "",
+        media_type=MediaType.TEXT,
+        processing_ms=hybrid.processing_ms,
+        semantics_version=hybrid.semantics_version,
+        ai_probability=hybrid.ai_probability,
+        decision_confidence=hybrid.decision_confidence,
+        authenticity_index=hybrid.authenticity_index,
+        provider_evidence=evidence,
+    )
+    if ai_component.ai_probability != evidence.raw_score:
+        raise ValueError("Hybrid v2 AI probability must equal Sapling score")
+    if ai_component.authenticity_index != authenticity_index_from_ai_probability(
+        evidence.raw_score
+    ):
+        raise ValueError("Hybrid v2 authenticity index must equal Sapling AI probability")
+
+    details = {
+        "provider_evidence_v2": evidence.model_dump(mode="json"),
+        "fact_check_evidence_v2": hybrid.fact_check_evidence.model_dump(mode="json")
+        if hybrid.fact_check_evidence
+        else None,
+    }
+    encoded_details = json.dumps(details, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    if len(encoded_details.encode("utf-8")) > MAX_DETAILS_BYTES:
+        encoded_details = '{"truncated":true}'
+
+    return {
+        "user_id": user_id,
+        "media_type": MediaType.TEXT.value,
+        "status": "completed",
+        # Preserve the existing deterministic fact-check verdict rather than
+        # silently replacing it with Sapling's AI-generation verdict.
+        "verdict": hybrid.verdict[:24],
+        "semantics_version": ai_component.semantics_version,
+        "ai_probability": ai_component.ai_probability,
+        "decision_confidence": ai_component.decision_confidence,
+        "authenticity_index": ai_component.authenticity_index,
+        "provider": evidence.provider[:MAX_PROVIDER],
+        "model": evidence.model[:MAX_MODEL],
+        "explanation": ai_component.explanation[:MAX_EXPLANATION] or None,
+        "source_label": str(source_label)[:MAX_SOURCE_LABEL] or None,
+        "processing_ms": max(0, hybrid.processing_ms),
+        "details": encoded_details,
+    }
+
+
 def map_analysis_to_check_row(
     result: dict[str, Any], user_id: str, source_label: str = ""
 ) -> dict[str, Any]:
     """Map an analysis response to the trusted checks table schema."""
-    model = str(_value(result.get("model_used")) or "")[:MAX_MODEL]
-    verdict = str(_value(result.get("ai_verdict") or result.get("verdict")) or "UNCERTAIN")
-    media_type = str(_value(result.get("media_type")) or "text")
-    explanation = result.get("explanation")
-    provider = _provider_for_model(model)
+    semantics_version = result.get("semantics_version")
+    if semantics_version is not None and "ai_verdict" in result:
+        return _map_hybrid_v2_to_check_row(result, user_id, source_label)
+    canonical = AnalysisResult.model_validate(result) if semantics_version is not None else None
+    if canonical is not None:
+        evidence = canonical.provider_evidence
+        model = (evidence.model if evidence else canonical.model_used.value)[:MAX_MODEL]
+        provider = evidence.provider if evidence else _provider_for_model(canonical.model_used.value)
+        verdict = canonical.verdict.value
+        media_type = canonical.media_type.value
+        explanation = canonical.explanation
+        ai_probability = canonical.ai_probability
+        decision_confidence = canonical.decision_confidence
+        authenticity_index = canonical.authenticity_index
+        details = _serialize_canonical_details(canonical)
+    else:
+        model = str(_value(result.get("model_used")) or "")[:MAX_MODEL]
+        provider = _provider_for_model(model)
+        verdict = str(_value(result.get("ai_verdict") or result.get("verdict")) or "UNCERTAIN")
+        media_type = str(_value(result.get("media_type")) or "text")
+        explanation = result.get("explanation")
+        ai_probability = None
+        decision_confidence = None
+        authenticity_index = _legacy_authenticity_index(result)
+        details = serialize_check_details(result)
     try:
         processing_ms = int(result.get("processing_ms") or 0)
     except (TypeError, ValueError):
@@ -119,13 +230,16 @@ def map_analysis_to_check_row(
         "media_type": media_type[:16],
         "status": "completed",
         "verdict": verdict[:24],
-        "authenticity_index": _legacy_authenticity_index(result),
+        "semantics_version": canonical.semantics_version if canonical else None,
+        "ai_probability": ai_probability,
+        "decision_confidence": decision_confidence,
+        "authenticity_index": authenticity_index,
         "provider": provider[:MAX_PROVIDER] if provider else None,
         "model": model or None,
         "explanation": str(explanation)[:MAX_EXPLANATION] if explanation is not None else None,
         "source_label": str(source_label)[:MAX_SOURCE_LABEL] or None,
         "processing_ms": max(0, processing_ms),
-        "details": serialize_check_details(result),
+        "details": details,
     }
 
 

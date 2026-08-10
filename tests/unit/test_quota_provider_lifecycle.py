@@ -53,6 +53,44 @@ async def test_completed_result_finalizes_quota_exactly_once(verdict):
 
 
 @pytest.mark.asyncio
+async def test_completed_hybrid_result_consumes_quota_once():
+    store = _QuotaStore()
+    hybrid_result = {
+        "verdict": "clean",
+        "ai_verdict": "REAL",
+        "ai_confidence": 0.1,
+        "fact_checks": [],
+        "tokens": [],
+    }
+    with patch("src.main.hybrid_analyzer.analyze", new=AsyncMock(return_value=hybrid_result)):
+        result = await _analyze(
+            TextAnalyzeRequest(text="x" * 200, mode="hybrid_text"),
+            "jwt",
+            quota_store=store,
+            user_id="user",
+        )
+    assert result["verdict"] == "clean"
+    assert store.transitions == ["consumed"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_hybrid_technical_failure_refunds_quota_once():
+    store = _QuotaStore()
+    with patch(
+        "src.main.hybrid_analyzer.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("sapling", "timeout")),
+    ):
+        with pytest.raises(ProviderInfrastructureError):
+            await _analyze(
+                TextAnalyzeRequest(text="x" * 200, mode="hybrid_text"),
+                "jwt",
+                quota_store=store,
+                user_id="user",
+            )
+    assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("verdict", [Verdict.REAL, Verdict.UNCERTAIN])
 async def test_successful_fallback_finalizes_without_refund(verdict):
     store = _QuotaStore()
@@ -233,6 +271,54 @@ async def test_sightengine_and_hf_technical_failures_refund_once():
     ):
         with pytest.raises(ProviderInfrastructureError):
             await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+    assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_audio_technical_fallback_success_consumes_quota_once():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def audio_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.AUDIO, b"audio")
+
+    fallback_result = AnalysisResult(
+        verdict=Verdict.REAL,
+        confidence=0.9,
+        model_used=ModelUsed.HF_AUDIO,
+        explanation="safe",
+        media_type=MediaType.AUDIO,
+    )
+    with patch("src.main.MediaRouter.route", new=audio_route), patch(
+        "router.media_router.ResembleAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("resemble", "timeout")),
+    ), patch(
+        "router.media_router.HFAudioAdapter.analyze", new=AsyncMock(return_value=fallback_result)
+    ) as hf:
+        await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+
+    assert store.transitions == ["consumed"]
+    hf.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_audio_terminal_technical_failures_refund_quota_once():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def audio_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.AUDIO, b"audio")
+
+    with patch("src.main.MediaRouter.route", new=audio_route), patch(
+        "router.media_router.ResembleAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("resemble", "timeout")),
+    ), patch(
+        "router.media_router.HFAudioAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("huggingface", "unavailable")),
+    ):
+        with pytest.raises(ProviderInfrastructureError):
+            await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+
     assert store.transitions == ["refunded"]
 
 

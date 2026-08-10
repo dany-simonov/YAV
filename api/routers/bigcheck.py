@@ -56,10 +56,11 @@ class BigCheckResponse(BaseModel):
 
 def _cross_analysis(results: list[AnalysisResult]) -> tuple[Verdict, float, str]:
     """
-    Cross-analysis logic:
-    - fake_count / total >= 0.5 → FAKE
-    - real_count / total >= 0.7 → REAL
-    - else → UNCERTAIN
+    Determine a cross-media verdict without combining incompatible scores.
+
+    A legacy ``overall_confidence`` field remains required by current
+    consumers.  It is a neutral unknown sentinel here, never a synthesized
+    provider probability or authenticity score.
 
     Returns (verdict, confidence, summary).
     """
@@ -71,25 +72,20 @@ def _cross_analysis(results: list[AnalysisResult]) -> tuple[Verdict, float, str]
     real_count = sum(1 for r in results if r.verdict == Verdict.REAL)
     uncertain_count = sum(1 for r in results if r.verdict == Verdict.UNCERTAIN)
 
-    avg_confidence = sum(r.confidence for r in results) / total
-
-    if fake_count / total >= 0.5:
+    if fake_count:
         verdict = Verdict.FAKE
-        confidence = avg_confidence
         summary = (
-            f"Кросс-анализ {total} файлов: {fake_count} из {total} определены как сгенерированные ИИ. "
-            f"Вероятность подделки высокая."
+            f"Кросс-анализ {total} файлов: найден как минимум один компонент с решающим "
+            f"вердиктом о синтетическом происхождении ({fake_count})."
         )
-    elif real_count / total >= 0.7:
+    elif real_count == total:
         verdict = Verdict.REAL
-        confidence = avg_confidence
         summary = (
-            f"Кросс-анализ {total} файлов: {real_count} из {total} определены как подлинные. "
-            f"Контент с высокой вероятностью создан человеком."
+            f"Кросс-анализ {total} файлов: все {real_count} завершённые компоненты "
+            f"получили решающий вердикт о подлинности."
         )
     else:
         verdict = Verdict.UNCERTAIN
-        confidence = avg_confidence
         parts = []
         if real_count > 0:
             parts.append(f"{real_count} подлинных")
@@ -102,7 +98,7 @@ def _cross_analysis(results: list[AnalysisResult]) -> tuple[Verdict, float, str]
             f"Однозначный вердикт вынести невозможно."
         )
 
-    return verdict, round(confidence, 4), summary
+    return verdict, 0.5, summary
 
 
 @router.post("", response_model=BigCheckResponse)
@@ -243,11 +239,9 @@ async def bigcheck(
     # 5. Cross-analysis
     overall_verdict, overall_confidence, summary = _cross_analysis(individual_results)
 
-    # Calculate authenticity index
-    if overall_verdict == Verdict.FAKE:
-        authenticity_index = round((1 - overall_confidence) * 100)
-    else:
-        authenticity_index = round(overall_confidence * 100)
+    # This legacy field has no universal meaning across mixed score kinds.
+    # Keep its numeric API shape with the same neutral unknown sentinel.
+    authenticity_index = 50
 
     total_ms = int((time.monotonic() - total_start) * 1000)
 

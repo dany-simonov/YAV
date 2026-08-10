@@ -56,11 +56,7 @@ class HFImageAdapter(BaseAdapter):
                     logger.info("HF Image model loading, retry in %ds...", COLD_START_DELAY)
                     await asyncio.sleep(COLD_START_DELAY)
                     continue
-                return self._build_uncertain(
-                    "HuggingFace Image: модель загружается, попробуйте позже.",
-                    ModelUsed.HF_IMAGE,
-                    MediaType.IMAGE,
-                )
+                raise ProviderInfrastructureError("huggingface", "model_loading")
             break
 
         if not isinstance(body, list) or not body or len(body) > 100:

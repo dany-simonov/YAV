@@ -1,7 +1,7 @@
 """Pydantic schemas for API requests/responses."""
 
 import math
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
@@ -34,21 +34,48 @@ class ProviderEvidence(BaseModel):
     def validate_raw_score(cls, value: float) -> float:
         return _finite_unit_interval(value, "raw_score")  # type: ignore[return-value]
 
-    @field_validator("safe_details")
+    @field_validator("safe_details", mode="before")
     @classmethod
     def validate_safe_details(
         cls, value: dict[str, str | int | float | bool | None]
     ) -> dict[str, str | int | float | bool | None]:
+        forbidden_keys = {
+            "api_key",
+            "apikey",
+            "authorization",
+            "file_bytes",
+            "full_text",
+            "private_content",
+            "provider_response",
+            "raw_payload",
+            "raw_response",
+            "response_body",
+            "source_content",
+            "token",
+            "token_dump",
+            "user_text",
+        }
         if len(value) > 16:
             raise ValueError("safe_details has too many fields")
         for key, item in value.items():
             if not isinstance(key, str) or not key or len(key) > 64:
                 raise ValueError("safe_details has an invalid key")
+            if key.lower().replace("-", "_") in forbidden_keys:
+                raise ValueError("safe_details contains private provider data")
+            if item is not None and not isinstance(item, (str, int, float, bool)):
+                raise ValueError("safe_details values must be primitives")
             if isinstance(item, str) and len(item) > 256:
                 raise ValueError("safe_details string is too long")
             if isinstance(item, float) and not math.isfinite(item):
                 raise ValueError("safe_details float must be finite")
         return value
+
+
+class ComponentEvidence(BaseModel):
+    """A completed provider contribution to a non-score-blended result."""
+
+    verdict: Verdict
+    evidence: ProviderEvidence
 
 
 class AnalysisResult(BaseModel):
@@ -67,11 +94,19 @@ class AnalysisResult(BaseModel):
     decision_confidence: float | None = None
     authenticity_index: StrictInt | None = Field(default=None, ge=0, le=100)
     provider_evidence: ProviderEvidence | None = None
+    component_evidence: list[ComponentEvidence] | None = Field(default=None, max_length=2)
 
     @field_validator("ai_probability", "decision_confidence", mode="before")
     @classmethod
     def validate_canonical_probability(cls, value: float | None, info: Any) -> float | None:
         return _finite_unit_interval(value, info.field_name)
+
+    @field_validator("semantics_version")
+    @classmethod
+    def validate_semantics_version(cls, value: int | None) -> int | None:
+        if value is not None and value != 2:
+            raise ValueError("unsupported semantics_version")
+        return value
 
 
 class FactCheckItem(BaseModel):
@@ -87,7 +122,28 @@ class HybridToken(BaseModel):
     details: dict | None = None
 
 
+class FactCheckEvidenceItem(BaseModel):
+    """Bounded fact-check finding suitable for persisted v2 evidence."""
+
+    claim: str = Field(min_length=1, max_length=240)
+    status: str = Field(min_length=1, max_length=32)
+    summary: str = Field(default="", max_length=600)
+    source_url: str = Field(default="", max_length=2_048)
+
+
+class FactCheckEvidence(BaseModel):
+    """Curated g4f findings, never prompts, raw output, or tokenized input."""
+
+    version: Literal[2] = 2
+    provider: Literal["g4f"] = "g4f"
+    model: str = Field(min_length=1, max_length=128)
+    state: Literal["completed", "unavailable"]
+    findings: list[FactCheckEvidenceItem] = Field(default_factory=list, max_length=20)
+
+
 class HybridAnalysisResponse(BaseModel):
+    """Legacy Hybrid fields plus additive BE-06 canonical AI-detection fields."""
+
     verdict: str
     ai_verdict: str
     ai_confidence: float
@@ -95,6 +151,25 @@ class HybridAnalysisResponse(BaseModel):
     processing_ms: int
     fact_checks: list[FactCheckItem]
     tokens: list[HybridToken]
+    semantics_version: StrictInt | None = Field(default=None, ge=1)
+    ai_probability: float | None = None
+    decision_confidence: float | None = None
+    authenticity_index: StrictInt | None = Field(default=None, ge=0, le=100)
+    provider_evidence: ProviderEvidence | None = None
+    fact_check_evidence: FactCheckEvidence | None = None
+    ai_explanation: str | None = Field(default=None, max_length=2_000)
+
+    @field_validator("ai_probability", "decision_confidence", mode="before")
+    @classmethod
+    def validate_canonical_probability(cls, value: float | None, info: Any) -> float | None:
+        return _finite_unit_interval(value, info.field_name)
+
+    @field_validator("semantics_version")
+    @classmethod
+    def validate_semantics_version(cls, value: int | None) -> int | None:
+        if value is not None and value != 2:
+            raise ValueError("unsupported semantics_version")
+        return value
 
 
 class AnalysisRequest(BaseModel):

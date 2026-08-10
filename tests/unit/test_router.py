@@ -167,6 +167,23 @@ class TestRoute:
         assert result.verdict == Verdict.REAL
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", [Verdict.REAL, Verdict.FAKE])
+    async def test_audio_keeps_decisive_resemble_result_without_hf_merge(self, verdict):
+        primary = AnalysisResult(
+            verdict=verdict,
+            confidence=0.9,
+            model_used=ModelUsed.RESEMBLE,
+            explanation="decisive",
+            media_type=MediaType.AUDIO,
+        )
+        with patch(
+            "router.media_router.ResembleAdapter.analyze", new=AsyncMock(return_value=primary)
+        ), patch("router.media_router.HFAudioAdapter.analyze", new=AsyncMock()) as hf:
+            result = await MediaRouter().route(MediaType.AUDIO, b"audio_bytes")
+        assert result is primary
+        hf.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_audio_calls_hf_fallback_when_resemble_uncertain(self):
         """When Resemble returns UNCERTAIN, HFAudio must be invoked as fallback."""
         hf_result = AnalysisResult(
@@ -200,6 +217,23 @@ class TestRoute:
 
         hf_analyze.assert_awaited_once()
         assert result.verdict == Verdict.REAL
+
+    @pytest.mark.asyncio
+    async def test_audio_falls_back_to_hf_on_technical_resemble_failure(self):
+        primary = AsyncMock(side_effect=ProviderInfrastructureError("resemble", "timeout"))
+        hf_result = AnalysisResult(
+            verdict=Verdict.FAKE,
+            confidence=0.9,
+            model_used=ModelUsed.HF_AUDIO,
+            explanation="safe fallback",
+            media_type=MediaType.AUDIO,
+        )
+        with patch("router.media_router.ResembleAdapter.analyze", primary), patch(
+            "router.media_router.HFAudioAdapter.analyze", new=AsyncMock(return_value=hf_result)
+        ) as hf:
+            result = await MediaRouter().route(MediaType.AUDIO, b"audio_bytes")
+        assert result is hf_result
+        hf.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_video_routes_to_legacy_pipeline_after_direct_technical_failure(self):

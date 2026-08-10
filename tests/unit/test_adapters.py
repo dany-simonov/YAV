@@ -346,16 +346,17 @@ class TestHFImageAdapter:
         assert result.verdict == Verdict.UNCERTAIN
 
     @pytest.mark.asyncio
-    async def test_cold_start_retries_then_uncertain(self):
-        """Model loading body causes retries; after MAX_RETRIES → UNCERTAIN."""
+    async def test_cold_start_retries_then_typed_infrastructure_error(self):
+        """Model loading body causes retries; exhaustion is technical failure."""
         from adapters.hf_image import HFImageAdapter
 
         cold_body = {"error": "Model is currently loading"}
 
         with patch("httpx.AsyncClient", return_value=_mock_client(cold_body)), \
              patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await HFImageAdapter().analyze(b"image_bytes")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFImageAdapter().analyze(b"image_bytes")
+        assert raised.value.kind == "model_loading"
 
     @pytest.mark.asyncio
     async def test_timeout_raises_typed_infrastructure_error(self):
@@ -414,8 +415,9 @@ class TestHFAudioAdapter:
 
         with patch("httpx.AsyncClient", return_value=_mock_client(cold_body)), \
              patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await HFAudioAdapter().analyze(b"WAV_audio")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFAudioAdapter().analyze(b"WAV_audio")
+        assert raised.value.kind == "model_loading"
 
     @pytest.mark.asyncio
     async def test_timeout_raises_typed_infrastructure_error(self):
@@ -430,6 +432,15 @@ class TestHFAudioAdapter:
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await HFAudioAdapter().analyze(b"WAV_audio")
         assert raised.value.kind == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_response_is_typed_infrastructure_error(self):
+        from adapters.hf_audio import HFAudioAdapter
+
+        with patch("httpx.AsyncClient", return_value=_mock_client({"unexpected": "shape"})):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFAudioAdapter().analyze(b"WAV_audio")
+        assert raised.value.kind == "invalid_response"
 
     @pytest.mark.asyncio
     async def test_ogg_input_triggers_ffmpeg_conversion(self):

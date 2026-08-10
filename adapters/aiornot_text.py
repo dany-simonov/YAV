@@ -139,11 +139,8 @@ class AIOrNotTextAdapter(BaseAdapter):
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(
                     self.URL,
-                    headers={
-                        "Authorization": f"Bearer {settings.aiornot_api_key}",
-                        "Content-Type": "application/x-www-form-urlencoded",
-                    },
-                    data={"text": text},
+                    headers={"Authorization": f"Bearer {settings.aiornot_api_key}"},
+                    files={"text": (None, text)},
                 )
         except httpx.TimeoutException as exc:
             raise ProviderInfrastructureError("aiornot", "timeout") from exc

@@ -1,6 +1,7 @@
 """Focused contract tests for the AI or Not Text adapter."""
 
-from urllib.parse import parse_qs
+from email.parser import BytesParser
+from email.policy import default
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -57,20 +58,17 @@ async def test_completed_responses_preserve_ai_probability(confidence, detected,
 
 
 @pytest.mark.asyncio
-async def test_request_uses_sync_endpoint_bearer_auth_and_form_text():
+async def test_request_uses_sync_endpoint_bearer_auth_and_multipart_text():
     client = _client(response=_response(200, _payload(0.95)))
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client):
         await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
     assert client.post.await_args.args[0] == AIOrNotTextAdapter.URL
-    assert client.post.await_args.kwargs["headers"] == {
-        "Authorization": "Bearer test_aiornot_key",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
-    assert client.post.await_args.kwargs["data"] == {"text": ELIGIBLE_TEXT}
+    assert client.post.await_args.kwargs["headers"] == {"Authorization": "Bearer test_aiornot_key"}
+    assert client.post.await_args.kwargs["files"] == {"text": (None, ELIGIBLE_TEXT)}
 
 
 @pytest.mark.asyncio
-async def test_smoke_sized_ascii_prose_is_one_urlencoded_text_field():
+async def test_smoke_sized_ascii_prose_is_one_multipart_text_field():
     sentence = (
         "A careful reviewer reads the whole passage before deciding how it was written, "
         "because ordinary prose contains varied phrasing and a consistent train of thought. "
@@ -84,10 +82,7 @@ async def test_smoke_sized_ascii_prose_is_one_urlencoded_text_field():
         captured["request"] = request
         return httpx.Response(200, json=_payload(0.25))
 
-    client = httpx.AsyncClient(
-        headers={"Content-Type": "multipart/form-data"},
-        transport=httpx.MockTransport(handler),
-    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client):
         await AIOrNotTextAdapter().analyze(smoke_text.encode("utf-8"))
 
@@ -95,11 +90,35 @@ async def test_smoke_sized_ascii_prose_is_one_urlencoded_text_field():
     assert request.method == "POST"
     assert str(request.url) == AIOrNotTextAdapter.URL
     assert request.url.query == b""
+    assert "authorization" in request.headers
     content_type = request.headers["content-type"]
-    assert content_type.startswith("application/x-www-form-urlencoded")
-    assert "multipart/form-data" not in content_type
-    assert "boundary=" not in content_type
-    assert parse_qs(request.content.decode("ascii"), keep_blank_values=True) == {"text": [smoke_text]}
+    assert content_type.startswith("multipart/form-data; boundary=")
+    assert "application/x-www-form-urlencoded" not in content_type
+    boundary = content_type.split("boundary=", 1)[1]
+    assert boundary
+    parsed = BytesParser(policy=default).parsebytes(
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + request.content
+    )
+    parts = list(parsed.iter_parts())
+    assert len(parts) == 1
+    assert parts[0].get_param("name", header="content-disposition") == "text"
+    assert parts[0].get_content() == smoke_text
+
+
+@pytest.mark.asyncio
+async def test_confirmed_live_response_preserves_canonical_probability_semantics():
+    confidence = 0.9762120842933656
+    body = {"report": {"ai_text": {"confidence": confidence, "is_detected": True}}}
+    with patch(
+        "adapters.aiornot_text.httpx.AsyncClient",
+        return_value=_client(response=_response(200, body)),
+    ):
+        result = await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    assert result.semantics_version == 2
+    assert result.ai_probability == confidence
+    assert result.authenticity_index == 2
+    assert result.provider_evidence is not None
+    assert result.provider_evidence.provider == "aiornot"
 
 
 @pytest.mark.asyncio

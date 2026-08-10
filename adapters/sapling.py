@@ -50,18 +50,22 @@ class SaplingAdapter(BaseAdapter):
         try:
             await admit_provider_operation("sapling")
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
-                response = await client.post(self.URL, json=payload)
+                response = await client.post(
+                    self.URL,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                )
         except httpx.TimeoutException as exc:
             raise ProviderInfrastructureError("sapling", "timeout") from exc
         except httpx.TransportError as exc:
             raise ProviderInfrastructureError("sapling", "transport") from exc
 
         if response.status_code == 429:
-            raise ExternalAPIError("sapling", "rate_limit")
+            raise ProviderInfrastructureError("sapling", "unavailable")
         if response.status_code >= 500:
             raise ProviderInfrastructureError("sapling", "unavailable")
         if response.status_code >= 400:
-            raise ExternalAPIError("sapling", "request_error")
+            raise ExternalAPIError("sapling", "request_error", status_code=response.status_code)
         try:
             body = response.json()
         except ValueError as exc:
@@ -87,13 +91,17 @@ class SaplingAdapter(BaseAdapter):
         top_sentence = ""
         top_score = 0.0
         for item in sentence_scores[:100]:
-            if not isinstance(item, list) or len(item) < 2:
+            if isinstance(item, dict):
+                raw_sentence, raw_score = item.get("sentence"), item.get("score")
+            elif isinstance(item, list) and len(item) >= 2:
+                raw_sentence, raw_score = item[0], item[1]
+            else:
                 continue
             try:
-                item_score = normalize_confidence(item[1])
+                item_score = normalize_confidence(raw_score)
             except ValueError:
                 continue
-            sentence = bounded_provider_string(item[0], 100)
+            sentence = bounded_provider_string(raw_sentence, 100)
             if sentence and item_score > top_score:
                 top_sentence = sentence
                 top_score = item_score

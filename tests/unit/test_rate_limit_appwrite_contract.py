@@ -97,18 +97,28 @@ async def test_transaction_create_400_is_safe_and_diagnosable(monkeypatch, caplo
     client = MagicMock()
     client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
     client.get = AsyncMock(side_effect=[_response(200, {"plan": "free"}), _response(404)])
-    client.post = AsyncMock(return_value=_response(400, {"type": "general_argument_invalid", "code": 400}))
+    client.post = AsyncMock(return_value=_response(400, {
+        "type": "general_argument_invalid", "code": 400,
+        "message": "Invalid ttl\r\ntrusted-user server-key test-secret "
+                   "X-Appwrite-Key: leaked-key Bearer jwt-token " + "x" * 400,
+    }))
     with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
         await _store(monkeypatch).reserve_quota("trusted-user")
     assert raised.value.code == "rate_limit_unavailable"
     assert client.post.await_args.kwargs["json"] == {"ttl": 60}
-    assert "operation=quota.transaction.create" in caplog.text
-    assert "status_code=400" in caplog.text
-    assert "appwrite_type=general_argument_invalid" in caplog.text
-    assert "appwrite_code=400" in caplog.text
-    assert "trusted-user" not in caplog.text
-    assert "server-key" not in caplog.text
-    assert "test-secret" not in caplog.text
+    transaction_log = next(
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("quota_transaction_create_failed")
+    )
+    assert "operation=quota.transaction.create" in transaction_log
+    assert "status_code=400" in transaction_log
+    assert "appwrite_type=general_argument_invalid" in transaction_log
+    assert "appwrite_code=400" in transaction_log
+    assert "appwrite_message=Invalid ttl <redacted> <redacted> <redacted>" in transaction_log
+    assert "\r" not in transaction_log and "\n" not in transaction_log
+    assert len(transaction_log.split("appwrite_message=", 1)[1]) <= 300
+    for sensitive_value in ("trusted-user", "server-key", "test-secret", "leaked-key", "jwt-token", "X-Appwrite-Key"):
+        assert sensitive_value not in transaction_log
 
 
 @pytest.mark.asyncio

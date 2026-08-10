@@ -6,6 +6,7 @@ import hmac
 import ipaddress
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -126,6 +127,47 @@ class AppwriteTablesRateLimitStore:
         return RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
 
     @staticmethod
+    def _sanitize_transaction_error_message(message: Any, sensitive_values: tuple[str, ...]) -> str | None:
+        """Retain only a bounded diagnostic message, without credentials or request identity."""
+        if not isinstance(message, str):
+            return None
+        sanitized = re.sub(r"[\r\n]+", " ", message)
+        for value in sensitive_values:
+            if value:
+                sanitized = sanitized.replace(value, "<redacted>")
+        sanitized = re.sub(
+            r"(?i)(?:x-appwrite-[a-z0-9-]+|authorization)\s*[:=]\s*\S+|bearer\s+\S+",
+            "<redacted-sensitive>",
+            sanitized,
+        )
+        return sanitized[:300]
+
+    def _transaction_create_unavailable(
+        self, *, response: Any | None = None, exc: BaseException | None = None,
+        quota_dimension: str | None = None, user_id: str = "",
+    ) -> RateLimitError:
+        """Log only the bounded Appwrite validation message for transaction creation."""
+        status_code, error_type, appwrite_code = self._appwrite_failure_details(response, exc)
+        message: Any = None
+        if response is not None:
+            try:
+                body = response.json()
+            except (TypeError, ValueError):
+                body = None
+            if isinstance(body, dict):
+                message = body.get("message")
+        safe_message = self._sanitize_transaction_error_message(
+            message, (self.api_key, self.secret, user_id),
+        )
+        logger.warning(
+            "quota_transaction_create_failed operation=%s status_code=%s appwrite_type=%s "
+            "appwrite_code=%s quota_dimension=%s appwrite_message=%s",
+            "quota.transaction.create", status_code, error_type, appwrite_code,
+            quota_dimension, safe_message,
+        )
+        return RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+
+    @staticmethod
     def limit(name: str, default: int) -> int:
         try:
             value = int(os.getenv(name, str(default)))
@@ -227,15 +269,22 @@ class AppwriteTablesRateLimitStore:
                         transactions, headers=headers, json={"ttl": self.TRANSACTION_TTL_SECONDS},
                     )
                     if transaction.status_code not in (200, 201):
-                        self._quota_unavailable("quota.transaction.create", response=transaction, quota_dimension=dimension)
+                        self._transaction_create_unavailable(
+                            response=transaction, quota_dimension=dimension, user_id=user_id,
+                        )
                         break
                     try:
                         transaction_body = transaction.json()
                     except (TypeError, ValueError):
+                        self._transaction_create_unavailable(
+                            response=transaction, quota_dimension=dimension, user_id=user_id,
+                        )
                         break
                     transaction_id = transaction_body.get("$id") if isinstance(transaction_body, dict) else None
                     if not isinstance(transaction_id, str) or not transaction_id:
-                        self._quota_unavailable("quota.transaction.create", response=transaction, quota_dimension=dimension)
+                        self._transaction_create_unavailable(
+                            response=transaction, quota_dimension=dimension, user_id=user_id,
+                        )
                         break
                     if existing.status_code == 404:
                         staged = await client.post(rows, headers=headers, json={"rowId": quota_id, "data": quota_data, "permissions": [], "transactionId": transaction_id})

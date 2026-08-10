@@ -210,6 +210,114 @@ async def test_commit_conflict_retries_and_then_returns_one_reservation(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("plan", "existing"), [("free", False), ("free", True), ("premium", False), ("premium", True)])
+async def test_staged_quota_operations_target_correct_tables_and_commit_safely(monkeypatch, caplog, plan, existing):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[
+        _response(200, {"plan": plan}), _response(200 if existing else 404, {"count": 0} if existing else None),
+        *([_response(200, {"count": 0})] if existing else []),
+    ])
+    commit_failure = _response(400, {
+        "type": "attribute_limit_exceeded", "code": 400,
+        "message": "Attribute limit\r\ntrusted-user server-key test-secret Bearer jwt-token " + "x" * 400,
+    })
+    if existing:
+        client.post = AsyncMock(side_effect=[_response(201, {"$id": "tx-1"}), _response(201)])
+        client.patch = AsyncMock(side_effect=[_response(200), commit_failure, _response(200)])
+    else:
+        client.post = AsyncMock(side_effect=[_response(201, {"$id": "tx-1"}), _response(201), _response(201)])
+        client.patch = AsyncMock(return_value=commit_failure)
+
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await _store(monkeypatch).reserve_quota("trusted-user")
+
+    assert raised.value.code == "rate_limit_unavailable"
+    expected_dimension = "quota_monthly" if plan == "premium" else "quota_daily"
+    if existing:
+        increment = client.patch.await_args_list[0]
+        assert increment.args[0].endswith("/tables/rate_limits/rows/" + _store(monkeypatch)._row_id(
+            expected_dimension, "trusted-user", "2026-08" if plan == "premium" else "2026-08-09"
+        ) + "/count/increment")
+        assert increment.kwargs["json"] == {"value": 1, "max": 100 if plan == "premium" else 3, "transactionId": "tx-1"}
+        reservation_call = client.post.await_args_list[1]
+    else:
+        counter_call = client.post.await_args_list[1]
+        assert counter_call.args[0].endswith("/tables/rate_limits/rows")
+        assert set(counter_call.kwargs["json"]["data"]) == {"dimension", "subject", "window_start", "window_end", "count"}
+        assert isinstance(counter_call.kwargs["json"]["data"]["count"], int)
+        assert counter_call.kwargs["json"]["transactionId"] == "tx-1"
+        reservation_call = client.post.await_args_list[2]
+    assert reservation_call.args[0].endswith("/tables/quota_reservations/rows")
+    assert set(reservation_call.kwargs["json"]["data"]) == {"user_id", "quota_dimension", "window_start", "state"}
+    assert reservation_call.kwargs["json"]["data"]["quota_dimension"] == expected_dimension
+    assert reservation_call.kwargs["json"]["transactionId"] == "tx-1"
+    commit = client.patch.await_args_list[-2]
+    assert commit.args[0].endswith("/tablesdb/transactions/tx-1")
+    assert commit.kwargs["json"] == {"commit": True}
+    commit_log = next(record.getMessage() for record in caplog.records if "operation=quota.transaction.commit" in record.getMessage())
+    assert "appwrite_message=Attribute limit <redacted> <redacted> <redacted>" in commit_log
+    assert "\r" not in commit_log and "\n" not in commit_log
+    assert len(commit_log.split("appwrite_message=", 1)[1]) <= 300
+    for sensitive_value in ("trusted-user", "server-key", "test-secret", "jwt-token"):
+        assert sensitive_value not in commit_log
+    staged_log = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("quota_transaction_commit_staged"))
+    assert "operation_count=2" in staged_log
+    assert "trusted-user" not in staged_log
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_count", [0, 1, 2])
+async def test_free_existing_counter_below_limit_commits(current_count, monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[_response(200, {"plan": "free"}), _response(200, {"count": current_count})])
+    client.post = AsyncMock(side_effect=[_response(201, {"$id": "tx-1"}), _response(201)])
+    client.patch = AsyncMock(side_effect=[_response(200), _response(200)])
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client):
+        reservation = await _store(monkeypatch).reserve_quota("trusted-user")
+    assert reservation.state == "reserved"
+    assert client.patch.await_args_list[0].kwargs["json"] == {"value": 1, "max": 3, "transactionId": "tx-1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("plan", "limit", "code"), [
+    ("free", 3, "daily_quota_exceeded"),
+    ("premium", 100, "monthly_quota_exceeded"),
+])
+async def test_existing_counter_at_limit_commit_error_maps_to_plan_quota(monkeypatch, plan, limit, code):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[_response(200, {"plan": plan}), _response(200, {"count": limit})])
+    client.post = AsyncMock(side_effect=[_response(201, {"$id": "tx-1"}), _response(201)])
+    client.patch = AsyncMock(side_effect=[
+        _response(200), _response(400, {"type": "attribute_limit_exceeded", "code": 400}), _response(200),
+    ])
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await _store(monkeypatch).reserve_quota("trusted-user")
+    assert raised.value.code == code
+    assert raised.value.status_code == 429
+    assert client.patch.await_args_list[-1].kwargs["json"] == {"rollback": True}
+
+
+@pytest.mark.asyncio
+async def test_commit_boundary_race_reads_counter_and_maps_to_daily_quota(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[
+        _response(200, {"plan": "free"}), _response(200, {"count": 2}), _response(200, {"count": 3}),
+    ])
+    client.post = AsyncMock(side_effect=[_response(201, {"$id": "tx-1"}), _response(201)])
+    client.patch = AsyncMock(side_effect=[
+        _response(200), _response(400, {"type": "attribute_limit_exceeded", "code": 400}), _response(200),
+    ])
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await _store(monkeypatch).reserve_quota("trusted-user")
+    assert raised.value.code == "daily_quota_exceeded"
+    assert client.get.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_commit_timeout_fails_closed_without_retry(monkeypatch):
     client = MagicMock()
     client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)

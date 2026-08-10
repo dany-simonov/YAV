@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -167,6 +168,93 @@ class AppwriteTablesRateLimitStore:
         )
         return RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
 
+    def _transaction_commit_unavailable(
+        self, *, response: Any | None, quota_dimension: str, row_id: str, data: dict[str, Any],
+        user_id: str,
+    ) -> RateLimitError:
+        """Add only a bounded Appwrite validation message to commit diagnostics."""
+        status_code, error_type, appwrite_code = self._appwrite_failure_details(response)
+        message: Any = None
+        if response is not None:
+            try:
+                body = response.json()
+            except (TypeError, ValueError):
+                body = None
+            if isinstance(body, dict):
+                message = body.get("message")
+        safe_message = self._sanitize_transaction_error_message(
+            message, (self.api_key, self.secret, user_id, *(value for value in data.values() if isinstance(value, str))),
+        )
+        data_keys = ",".join(sorted(data))
+        field_types = ",".join(f"{key}:{type(value).__name__}" for key, value in sorted(data.items()))
+        string_lengths = ",".join(
+            f"{key}:{len(value)}" for key, value in sorted(data.items()) if isinstance(value, str)
+        )
+        logger.warning(
+            "quota_persistence_failed operation=%s status_code=%s appwrite_type=%s appwrite_code=%s "
+            "quota_dimension=%s row_id_length=%s data_keys=%s field_types=%s string_lengths=%s appwrite_message=%s",
+            "quota.transaction.commit", status_code, error_type, appwrite_code, quota_dimension,
+            len(row_id), data_keys, field_types, string_lengths, safe_message,
+        )
+        return RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+
+    @staticmethod
+    def _staged_operation_structure(action: str, table_id: str, row_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "action": action,
+            "table_id": table_id,
+            "row_id_length": len(row_id),
+            "data_keys": ",".join(sorted(data)),
+            "field_types": ",".join(f"{key}:{type(value).__name__}" for key, value in sorted(data.items())),
+            "string_lengths": ",".join(
+                f"{key}:{len(value)}" for key, value in sorted(data.items()) if isinstance(value, str)
+            ),
+            "transaction_id_placement": "top_level",
+        }
+
+    @staticmethod
+    def _counter_count(response: Any) -> int | None:
+        try:
+            value = response.json().get("count")
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+    @staticmethod
+    def _appwrite_error_type(response: Any) -> str | None:
+        try:
+            error_type = response.json().get("type")
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return error_type if isinstance(error_type, str) else None
+
+    async def _commit_confirms_quota_exhausted(
+        self, client: Any, *, response: Any, existing_counter: bool, pre_count: int | None,
+        staged_increment: bool, increment_max: int | None, limit: int, rows: str, quota_id: str,
+        headers: dict[str, str],
+    ) -> bool:
+        """Classify only a known quota-boundary commit failure, including a race read-back."""
+        if (
+            not existing_counter or not staged_increment or increment_max != limit
+            or self._appwrite_error_type(response) not in {"row_max_exceeded", "attribute_limit_exceeded"}
+        ):
+            return False
+        if pre_count is not None and pre_count >= limit:
+            return True
+        try:
+            current = await client.get(f"{rows}/{quota_id}", headers=headers)
+        except httpx.HTTPError:
+            return False
+        return current.status_code == 200 and (self._counter_count(current) or -1) >= limit
+
+    @staticmethod
+    async def _rollback_failed_transaction(client: Any, transactions: str, transaction_id: str, headers: dict[str, str]) -> None:
+        """Best-effort cleanup after a confirmed non-conflict commit rejection."""
+        try:
+            await client.patch(f"{transactions}/{transaction_id}", headers=headers, json={"rollback": True})
+        except httpx.HTTPError:
+            pass
+
     @staticmethod
     def limit(name: str, default: int) -> int:
         try:
@@ -261,10 +349,13 @@ class AppwriteTablesRateLimitStore:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 for _ in range(3):
+                    staged_operations: list[dict[str, Any]] = []
                     existing = await client.get(f"{rows}/{quota_id}", headers=headers)
                     if existing.status_code not in (200, 404):
                         self._quota_unavailable("quota.counter.read", response=existing, quota_dimension=dimension, row_id=quota_id, data=quota_data)
                         break
+                    existing_counter = existing.status_code == 200
+                    pre_count = self._counter_count(existing) if existing_counter else None
                     transaction = await client.post(
                         transactions, headers=headers, json={"ttl": self.TRANSACTION_TTL_SECONDS},
                     )
@@ -288,8 +379,11 @@ class AppwriteTablesRateLimitStore:
                         break
                     if existing.status_code == 404:
                         staged = await client.post(rows, headers=headers, json={"rowId": quota_id, "data": quota_data, "permissions": [], "transactionId": transaction_id})
+                        staged_operations.append(self._staged_operation_structure("create", self.table, quota_id, quota_data))
                     else:
-                        staged = await client.patch(f"{rows}/{quota_id}/count/increment", headers=headers, json={"value": 1, "max": limit, "transactionId": transaction_id})
+                        increment_data = {"value": 1, "max": limit}
+                        staged = await client.patch(f"{rows}/{quota_id}/count/increment", headers=headers, json={**increment_data, "transactionId": transaction_id})
+                        staged_operations.append(self._staged_operation_structure("increment:count", self.table, quota_id, increment_data))
                     try:
                         staged_body = staged.json()
                     except (TypeError, ValueError):
@@ -305,16 +399,34 @@ class AppwriteTablesRateLimitStore:
                         )
                         break
                     created = await client.post(reservations, headers=headers, json={"rowId": reservation.id, "data": reservation_data, "permissions": [], "transactionId": transaction_id})
+                    staged_operations.append(self._staged_operation_structure("create", self.reservations_table, reservation.id, reservation_data))
                     if created.status_code not in (200, 201):
                         self._quota_unavailable("quota.reservation.create", response=created, quota_dimension=dimension, row_id=reservation.id, data=reservation_data)
                         await client.patch(f"{transactions}/{transaction_id}", headers=headers, json={"rollback": True})
                         break
+                    logger.warning(
+                        "quota_transaction_commit_staged operation_count=%s operations=%s",
+                        len(staged_operations), json.dumps(staged_operations, separators=(",", ":")),
+                    )
                     committed = await client.patch(f"{transactions}/{transaction_id}", headers=headers, json={"commit": True})
                     if committed.status_code == 200:
                         return reservation
                     if committed.status_code == 409:
                         continue
-                    self._quota_unavailable("quota.transaction.commit", response=committed, quota_dimension=dimension, row_id=reservation.id, data=reservation_data)
+                    exhausted = await self._commit_confirms_quota_exhausted(
+                        client, response=committed, existing_counter=existing_counter, pre_count=pre_count,
+                        staged_increment=existing_counter, increment_max=limit if existing_counter else None,
+                        limit=limit, rows=rows, quota_id=quota_id, headers=headers,
+                    )
+                    await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                    if exhausted:
+                        raise RateLimitError(
+                            code, detail, 429, max(1, int((window.end - self.now).total_seconds()))
+                        )
+                    self._transaction_commit_unavailable(
+                        response=committed, quota_dimension=dimension, row_id=reservation.id,
+                        data=reservation_data, user_id=user_id,
+                    )
                     break
         except httpx.HTTPError as exc:
             raise self._quota_unavailable("quota.transport", exc=exc, quota_dimension=dimension, row_id=reservation.id, data=reservation_data) from exc

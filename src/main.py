@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 from core.enums import MediaType  # noqa: E402
 from core.analyzer import HybridTextAnalyzer  # noqa: E402
-from core.exceptions import ProviderInfrastructureError  # noqa: E402
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
     ChecksPersistenceError,
@@ -244,6 +244,36 @@ def _log_internal_error(context: Any, exc: BaseException) -> None:
         )
     else:
         message = f"internal_error operation=unclassified exception_class={type(exc).__name__}"
+    try:
+        log(message)
+    except Exception:
+        pass
+
+
+def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> None:
+    """Log a stable provider-error classification without exception text.
+
+    ``ExternalAPIError`` deliberately carries only adapter-selected service and
+    error-code values.  Keep the logging boundary defensive nevertheless: an
+    unexpected value is represented as ``unknown`` instead of being rendered
+    into Function logs, where it could otherwise contain provider response or
+    request data.
+    """
+    log = getattr(context, "log", None)
+    if not callable(log):
+        return
+
+    known_providers = {"aiornot", "sapling", "sightengine", "resemble", "huggingface"}
+    known_codes = {"request_error", "rate_limit"}
+    provider = exc.service if exc.service in known_providers else "unknown"
+    error_code = exc.detail if exc.detail in known_codes else "unknown"
+    status = getattr(exc, "status_code", None)
+    safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "none"
+    message = (
+        "provider_external_api_error operation=provider.external_api_error "
+        f"provider={provider} safe_error_code={error_code} "
+        f"status_code={safe_status} exception_class={type(exc).__name__}"
+    )
     try:
         log(message)
     except Exception:
@@ -488,6 +518,16 @@ def main(context: Any):
             {
                 "detail": "Сервис анализа временно недоступен. Попробуйте позже.",
                 "code": "provider_temporarily_unavailable",
+            },
+            503,
+        )
+    except ExternalAPIError as exc:
+        _log_provider_external_api_error(context, exc)
+        return _response_json(
+            context,
+            {
+                "detail": "Сервис анализа временно недоступен.",
+                "code": "provider_unavailable",
             },
             503,
         )

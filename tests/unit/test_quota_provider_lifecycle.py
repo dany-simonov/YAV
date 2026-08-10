@@ -7,7 +7,7 @@ import pytest
 
 from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ProviderInfrastructureError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from router.media_router import MediaRouter
 from src.main import _analyze
 from src.provider_protection import admit_provider_operation
@@ -114,6 +114,15 @@ async def test_all_technical_provider_failures_refund_exactly_once(kind):
     with pytest.raises(ProviderInfrastructureError):
         await _analyze_with_route(store, route)
     assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_ordinary_provider_error_consumes_quota_before_function_maps_it():
+    store = _QuotaStore()
+    route = AsyncMock(side_effect=ExternalAPIError("aiornot", "request_error"))
+    with pytest.raises(ExternalAPIError):
+        await _analyze_with_route(store, route)
+    assert store.transitions == ["consumed"]
 
 
 @pytest.mark.asyncio

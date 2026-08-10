@@ -326,3 +326,24 @@ class TestRoute:
             result = await MediaRouter().route(MediaType.TEXT, b"", text)
         sapling.assert_awaited_once()
         assert result.model_used == ModelUsed.SAPLING
+
+    @pytest.mark.asyncio
+    async def test_eligible_text_does_not_fallback_after_aiornot_ordinary_4xx(self):
+        text = " ".join(["word"] * 64)
+        with patch(
+            "router.media_router.AIOrNotTextAdapter.analyze",
+            new=AsyncMock(side_effect=ExternalAPIError("aiornot", "request_error")),
+        ), patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock()) as sapling:
+            with pytest.raises(ExternalAPIError):
+                await MediaRouter().route(MediaType.TEXT, b"", text)
+        sapling.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_short_text_propagates_sapling_ordinary_4xx(self):
+        with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock()) as aiornot, patch(
+            "router.media_router.SaplingAdapter.analyze",
+            new=AsyncMock(side_effect=ExternalAPIError("sapling", "request_error")),
+        ):
+            with pytest.raises(ExternalAPIError):
+                await MediaRouter().route(MediaType.TEXT, b"", "x" * 50)
+        aiornot.assert_not_awaited()

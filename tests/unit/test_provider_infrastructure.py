@@ -94,3 +94,13 @@ async def test_provider_4xx_is_not_misclassified_as_unavailable():
             await HFImageAdapter().analyze(b"image")
     assert not isinstance(raised.value, ProviderInfrastructureError)
     assert raised.value.detail == "request_error"
+
+
+@pytest.mark.asyncio
+async def test_sapling_ordinary_4xx_is_an_external_api_error():
+    from adapters.sapling import SaplingAdapter
+
+    with patch("httpx.AsyncClient", return_value=_client(response=_response(422))):
+        with pytest.raises(ExternalAPIError) as raised:
+            await SaplingAdapter().analyze(b"x" * 60)
+    assert (raised.value.service, raised.value.detail) == ("sapling", "request_error")

@@ -46,8 +46,20 @@ async def test_first_quota_reservation_uses_staged_rows_and_commit(monkeypatch):
     assert quota_call.kwargs["json"]["transactionId"] == "tx-1"
     reservation_call = client.post.call_args_list[2]
     assert reservation_call.args[0].endswith("/tables/quota_reservations/rows")
-    assert reservation_call.kwargs["json"]["data"]["state"] == "reserved"
-    assert reservation_call.kwargs["json"]["transactionId"] == "tx-1"
+    reservation_payload = reservation_call.kwargs["json"]
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,35}", reservation_payload["rowId"])
+    assert len(reservation_payload["rowId"]) == 32
+    assert reservation_payload["rowId"] == reservation.id
+    assert reservation_payload["data"] == {
+        "user_id": "trusted-user", "quota_dimension": "quota_daily",
+        "window_start": "2026-08-09", "state": "reserved",
+    }
+    assert set(reservation_payload["data"]) == {"user_id", "quota_dimension", "window_start", "state"}
+    assert len(reservation_payload["data"]["user_id"]) <= 36
+    assert len(reservation_payload["data"]["quota_dimension"]) <= 32
+    assert len(reservation_payload["data"]["window_start"]) <= 16
+    assert len(reservation_payload["data"]["state"]) <= 16
+    assert reservation_payload["transactionId"] == "tx-1"
     assert client.patch.call_args.kwargs["json"] == {"commit": True}
 
 
@@ -61,6 +73,50 @@ async def test_missing_transaction_id_fails_closed(monkeypatch):
         with pytest.raises(RateLimitError) as raised:
             await _store(monkeypatch).reserve_quota("trusted-user")
     assert raised.value.code == "rate_limit_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("plan", "dimension", "window"), [
+    ("free", "quota_daily", "2026-08-09"),
+    ("premium", "quota_monthly", "2026-08"),
+])
+async def test_plan_maps_to_bounded_quota_window_and_dimension(monkeypatch, plan, dimension, window):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[_response(200, {"plan": plan}), _response(404)])
+    client.post = AsyncMock(side_effect=[_response(201, {"$id": "tx-1"}), _response(201), _response(201)])
+    client.patch = AsyncMock(return_value=_response(200))
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client):
+        await _store(monkeypatch).reserve_quota("trusted-user")
+    reservation_data = client.post.call_args_list[2].kwargs["json"]["data"]
+    assert reservation_data["quota_dimension"] == dimension
+    assert reservation_data["window_start"] == window
+    assert len(window) <= 16
+
+
+@pytest.mark.asyncio
+async def test_quota_reservation_create_failure_logs_safe_structure(monkeypatch, caplog):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=[_response(200, {"plan": "free"}), _response(404)])
+    client.post = AsyncMock(side_effect=[
+        _response(201, {"$id": "tx-1"}), _response(201),
+        _response(400, {"type": "row_invalid_structure", "code": 400}),
+    ])
+    client.patch = AsyncMock(return_value=_response(200))
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await _store(monkeypatch).reserve_quota("trusted-user")
+    assert raised.value.code == "rate_limit_unavailable"
+    assert "operation=quota.reservation.create" in caplog.text
+    assert "status_code=400" in caplog.text
+    assert "appwrite_type=row_invalid_structure" in caplog.text
+    assert "appwrite_code=400" in caplog.text
+    assert "quota_dimension=quota_daily" in caplog.text
+    assert "row_id_length=32" in caplog.text
+    assert "data_keys=quota_dimension,state,user_id,window_start" in caplog.text
+    assert "trusted-user" not in caplog.text
+    assert "server-key" not in caplog.text
+    assert "test-secret" not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -74,10 +74,9 @@ class AppwriteTablesRateLimitStore:
             raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
 
     @staticmethod
-    def _unavailable(
-        operation: str, *, response: Any | None = None, exc: BaseException | None = None,
-    ) -> RateLimitError:
-        """Log bounded Appwrite failure metadata without request or secret material."""
+    def _appwrite_failure_details(
+        response: Any | None = None, exc: BaseException | None = None,
+    ) -> tuple[Any, Any, Any]:
         status_code = getattr(response, "status_code", None)
         error_type = type(exc).__name__ if exc is not None else type(response).__name__ if response is not None else None
         appwrite_code: Any = None
@@ -89,9 +88,38 @@ class AppwriteTablesRateLimitStore:
             if isinstance(body, dict):
                 error_type = body.get("type") if isinstance(body.get("type"), str) else error_type
                 appwrite_code = body.get("code") if isinstance(body.get("code"), (int, str)) else None
+        return status_code, error_type, appwrite_code
+
+    @classmethod
+    def _unavailable(
+        cls, operation: str, *, response: Any | None = None, exc: BaseException | None = None,
+    ) -> RateLimitError:
+        """Log bounded Appwrite failure metadata without request or secret material."""
+        status_code, error_type, appwrite_code = cls._appwrite_failure_details(response, exc)
         logger.warning(
             "rate_limit_persistence_failed operation=%s status_code=%s appwrite_type=%s appwrite_code=%s",
             operation, status_code, error_type, appwrite_code,
+        )
+        return RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+
+    @classmethod
+    def _quota_unavailable(
+        cls, operation: str, *, response: Any | None = None, exc: BaseException | None = None,
+        quota_dimension: str | None = None, row_id: str | None = None, data: dict[str, Any] | None = None,
+    ) -> RateLimitError:
+        """Emit only bounded quota persistence metadata; never log row values."""
+        status_code, error_type, appwrite_code = cls._appwrite_failure_details(response, exc)
+        values = data or {}
+        data_keys = ",".join(sorted(values))
+        field_types = ",".join(f"{key}:{type(value).__name__}" for key, value in sorted(values.items()))
+        string_lengths = ",".join(
+            f"{key}:{len(value)}" for key, value in sorted(values.items()) if isinstance(value, str)
+        )
+        logger.warning(
+            "quota_persistence_failed operation=%s status_code=%s appwrite_type=%s appwrite_code=%s "
+            "quota_dimension=%s row_id_length=%s data_keys=%s field_types=%s string_lengths=%s",
+            operation, status_code, error_type, appwrite_code, quota_dimension,
+            len(row_id) if row_id is not None else None, data_keys, field_types, string_lengths,
         )
         return RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
 
@@ -153,13 +181,13 @@ class AppwriteTablesRateLimitStore:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url, headers=headers)
         except httpx.HTTPError as exc:
-            raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503) from exc
+            raise self._quota_unavailable("quota.plan.read", exc=exc) from exc
         if response.status_code != 200:
-            raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+            raise self._quota_unavailable("quota.plan.read", response=response)
         try:
             plan = response.json().get("plan")
-        except (TypeError, ValueError):
-            raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+        except (AttributeError, TypeError, ValueError):
+            raise self._quota_unavailable("quota.plan.decode", response=response)
         return "premium" if plan == "premium" else "free"
 
     async def reserve_quota(self, user_id: str) -> "QuotaReservation":
@@ -176,14 +204,26 @@ class AppwriteTablesRateLimitStore:
         headers = {"X-Appwrite-Project": self.project, "X-Appwrite-Key": self.api_key}
         code = "monthly_quota_exceeded" if plan == "premium" else "daily_quota_exceeded"
         detail = "Месячный лимит проверок исчерпан." if plan == "premium" else "Дневной лимит проверок исчерпан."
+        quota_data = {"dimension": dimension, "subject": user_id, "window_start": window.key, "window_end": window.end.isoformat(), "count": 1}
+        reservation_data = {"user_id": user_id, "quota_dimension": dimension, "window_start": window.key, "state": "reserved"}
+        if (
+            not isinstance(user_id, str) or not user_id or len(user_id) > 36
+            or len(dimension) > 32 or len(window.key) > 16 or len("reserved") > 16
+        ):
+            raise self._quota_unavailable(
+                "quota.reservation.payload_validation", quota_dimension=dimension,
+                row_id=reservation.id, data=reservation_data,
+            )
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 for _ in range(3):
                     existing = await client.get(f"{rows}/{quota_id}", headers=headers)
                     if existing.status_code not in (200, 404):
+                        self._quota_unavailable("quota.counter.read", response=existing, quota_dimension=dimension, row_id=quota_id, data=quota_data)
                         break
                     transaction = await client.post(transactions, headers=headers, json={"ttl": 30})
                     if transaction.status_code not in (200, 201):
+                        self._quota_unavailable("quota.transaction.create", response=transaction, quota_dimension=dimension)
                         break
                     try:
                         transaction_body = transaction.json()
@@ -191,9 +231,10 @@ class AppwriteTablesRateLimitStore:
                         break
                     transaction_id = transaction_body.get("$id") if isinstance(transaction_body, dict) else None
                     if not isinstance(transaction_id, str):
+                        self._quota_unavailable("quota.transaction.create", response=transaction, quota_dimension=dimension)
                         break
                     if existing.status_code == 404:
-                        staged = await client.post(rows, headers=headers, json={"rowId": quota_id, "data": {"dimension": dimension, "subject": user_id, "window_start": window.key, "window_end": window.end.isoformat(), "count": 1}, "permissions": [], "transactionId": transaction_id})
+                        staged = await client.post(rows, headers=headers, json={"rowId": quota_id, "data": quota_data, "permissions": [], "transactionId": transaction_id})
                     else:
                         staged = await client.patch(f"{rows}/{quota_id}/count/increment", headers=headers, json={"value": 1, "max": limit, "transactionId": transaction_id})
                     try:
@@ -205,9 +246,14 @@ class AppwriteTablesRateLimitStore:
                         await client.patch(f"{transactions}/{transaction_id}", headers=headers, json={"rollback": True})
                         raise RateLimitError(code, detail, 429, max(1, int((window.end - self.now).total_seconds())))
                     if staged.status_code != 200 and staged.status_code != 201:
+                        self._quota_unavailable(
+                            "quota.counter.create" if existing.status_code == 404 else "quota.counter.increment",
+                            response=staged, quota_dimension=dimension, row_id=quota_id, data=quota_data,
+                        )
                         break
-                    created = await client.post(reservations, headers=headers, json={"rowId": reservation.id, "data": {"user_id": user_id, "quota_dimension": dimension, "window_start": window.key, "state": "reserved"}, "permissions": [], "transactionId": transaction_id})
+                    created = await client.post(reservations, headers=headers, json={"rowId": reservation.id, "data": reservation_data, "permissions": [], "transactionId": transaction_id})
                     if created.status_code not in (200, 201):
+                        self._quota_unavailable("quota.reservation.create", response=created, quota_dimension=dimension, row_id=reservation.id, data=reservation_data)
                         await client.patch(f"{transactions}/{transaction_id}", headers=headers, json={"rollback": True})
                         break
                     committed = await client.patch(f"{transactions}/{transaction_id}", headers=headers, json={"commit": True})
@@ -215,10 +261,11 @@ class AppwriteTablesRateLimitStore:
                         return reservation
                     if committed.status_code == 409:
                         continue
+                    self._quota_unavailable("quota.transaction.commit", response=committed, quota_dimension=dimension, row_id=reservation.id, data=reservation_data)
                     break
         except httpx.HTTPError as exc:
-            raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503) from exc
-        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+            raise self._quota_unavailable("quota.transport", exc=exc, quota_dimension=dimension, row_id=reservation.id, data=reservation_data) from exc
+        raise self._quota_unavailable("quota.reservation.incomplete", quota_dimension=dimension, row_id=reservation.id, data=reservation_data)
 
     def _row_id(self, dimension: str, subject: str, key: str) -> str:
         return hashlib.sha256(f"{dimension}:{subject}:{key}".encode()).hexdigest()[:36]

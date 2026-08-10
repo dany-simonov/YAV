@@ -64,3 +64,18 @@ def test_counter_row_ids_are_appwrite_safe_deterministic_and_nonidentifying(monk
         store._row_id("ip_minute", "another-subject", "2026-08-09T12:00"),
         store._row_id("ip_minute", subject, "2026-08-09T12:01"),
     }) == 3
+
+
+def test_quota_counter_row_id_is_safe_and_varies_by_quota_identity(monkeypatch):
+    store = _store(monkeypatch)
+    row_id = store._row_id("quota_daily", "user-a", "2026-08-09")
+
+    assert len(row_id) <= 36
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,35}", row_id)
+    assert row_id == store._row_id("quota_daily", "user-a", "2026-08-09")
+    assert len({
+        row_id,
+        store._row_id("quota_monthly", "user-a", "2026-08"),
+        store._row_id("quota_daily", "user-b", "2026-08-09"),
+        store._row_id("quota_daily", "user-a", "2026-08-10"),
+    }) == 4

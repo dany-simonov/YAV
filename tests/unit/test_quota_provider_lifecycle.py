@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from api.schemas import AnalysisResult
@@ -18,10 +19,12 @@ from src.validation import TextAnalyzeRequest
 class _QuotaStore:
     def __init__(self, guard=None) -> None:
         self.reservation = QuotaReservation("reservation", "user", "quota_daily", "2026-08-09", "reserved")
+        self.reserve_calls = 0
         self.transitions: list[str] = []
         self.guard_provider = guard or AsyncMock()
 
     async def reserve_quota(self, _user_id):
+        self.reserve_calls += 1
         return self.reservation
 
     async def transition_quota(self, reservation, target):
@@ -225,6 +228,50 @@ async def test_aiornot_technical_failure_then_sapling_success_consumes_quota_onc
         await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
     assert store.transitions == ["consumed"]
     sapling.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_boundary_failure_then_sapling_success_consumes_one_reservation():
+    store = _QuotaStore()
+    text = " ".join(["word"] * 64)
+    boundary_error = "Invalid `boundary` for `multipart/form-data` request"
+    response = httpx.Response(400, text=boundary_error, headers={"content-type": "text/plain"})
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client), patch(
+        "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=_result(Verdict.REAL))
+    ) as sapling:
+        result = await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+    assert store.reserve_calls == 1
+    assert store.transitions == ["consumed"]
+    sapling.assert_awaited_once()
+    assert result["model_used"] == "sapling"
+
+
+@pytest.mark.asyncio
+async def test_boundary_failure_then_technical_sapling_failure_refunds_one_reservation():
+    store = _QuotaStore()
+    text = " ".join(["word"] * 64)
+    response = httpx.Response(
+        400,
+        text="Invalid `boundary` for `multipart/form-data` request",
+        headers={"content-type": "text/plain"},
+    )
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=response)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client), patch(
+        "router.media_router.SaplingAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("sapling", "unavailable")),
+    ):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+    assert (raised.value.service, raised.value.kind) == ("sapling", "unavailable")
+    assert store.reserve_calls == 1
+    assert store.transitions == ["refunded"]
 
 
 @pytest.mark.asyncio

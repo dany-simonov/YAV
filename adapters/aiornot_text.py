@@ -22,6 +22,7 @@ class AIOrNotTextAdapter(BaseAdapter):
     URL = "https://api.aiornot.com/v2/text/sync"
     MIN_CHARACTERS = 250
     MIN_WORDS = 64
+    MULTIPART_BOUNDARY_ERROR = "Invalid `boundary` for `multipart/form-data` request"
 
     _SAFE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
@@ -157,6 +158,13 @@ class AIOrNotTextAdapter(BaseAdapter):
             content_type, response_length, response_keys, response_paths, provider_message = (
                 self._safe_error_diagnostics(response, text)
             )
+            normalized_message = " ".join(provider_message.split()) if provider_message else ""
+            if (
+                response.status_code == 400
+                and content_type == "text/plain"
+                and normalized_message == self.MULTIPART_BOUNDARY_ERROR
+            ):
+                raise ProviderInfrastructureError("aiornot", "unavailable")
             raise ExternalAPIError(
                 "aiornot",
                 "request_error",

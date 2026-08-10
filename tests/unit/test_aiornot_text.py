@@ -11,11 +11,12 @@ from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from router.media_router import MediaRouter
-from src.provider_protection import begin_provider_budget, end_provider_budget
+from src.provider_protection import admit_provider_operation, begin_provider_budget, end_provider_budget
 from src.rate_limit import RateLimitError
 
 
 ELIGIBLE_TEXT = " ".join(["слово"] * 64)
+BOUNDARY_ERROR = AIOrNotTextAdapter.MULTIPART_BOUNDARY_ERROR
 
 
 def _response(status_code: int, body: object = None):
@@ -250,6 +251,76 @@ async def test_plain_text_4xx_over_300_bytes_is_omitted():
             await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
     assert raised.value.response_length == 301
     assert raised.value.provider_message is None
+
+
+@pytest.mark.asyncio
+async def test_exact_plain_text_boundary_error_is_typed_technical_failure():
+    response = httpx.Response(400, text=BOUNDARY_ERROR, headers={"content-type": "text/plain"})
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    assert (raised.value.service, raised.value.kind) == ("aiornot", "unavailable")
+
+
+@pytest.mark.asyncio
+async def test_exact_boundary_error_falls_back_to_sapling_result():
+    response = httpx.Response(400, text=BOUNDARY_ERROR, headers={"content-type": "text/plain"})
+    sapling_result = AnalysisResult(
+        verdict=Verdict.REAL,
+        confidence=0.1,
+        model_used=ModelUsed.SAPLING,
+        explanation="safe",
+        media_type=MediaType.TEXT,
+    )
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)), patch(
+        "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=sapling_result)
+    ) as sapling:
+        result = await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
+    sapling.assert_awaited_once_with(ELIGIBLE_TEXT.encode())
+    assert result is sapling_result
+    assert result.model_used == ModelUsed.SAPLING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_other_aiornot_4xx_never_falls_back_to_sapling(status):
+    reason = "another provider validation error"
+    response = httpx.Response(status, text=reason, headers={"content-type": "text/plain"})
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)), patch(
+        "router.media_router.SaplingAdapter.analyze", new=AsyncMock()
+    ) as sapling:
+        with pytest.raises(ExternalAPIError):
+            await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
+    sapling.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_boundary_fallback_admits_both_provider_operations():
+    response = httpx.Response(400, text=BOUNDARY_ERROR, headers={"content-type": "text/plain"})
+    admitted: list[str] = []
+
+    async def guard(provider: str):
+        admitted.append(provider)
+
+    async def sapling_fallback(_adapter, _data: bytes):
+        await admit_provider_operation("sapling")
+        return AnalysisResult(
+            verdict=Verdict.REAL,
+            confidence=0.1,
+            model_used=ModelUsed.SAPLING,
+            explanation="safe",
+            media_type=MediaType.TEXT,
+        )
+
+    tokens = begin_provider_budget(guard)
+    try:
+        with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)), patch(
+            "router.media_router.SaplingAdapter.analyze", new=sapling_fallback
+        ):
+            await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
+    finally:
+        end_provider_budget(tokens)
+    assert admitted == ["aiornot", "sapling"]
 
 
 @pytest.mark.asyncio

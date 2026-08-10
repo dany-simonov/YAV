@@ -61,7 +61,10 @@ async def test_request_uses_sync_endpoint_bearer_auth_and_form_text():
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client):
         await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
     assert client.post.await_args.args[0] == AIOrNotTextAdapter.URL
-    assert client.post.await_args.kwargs["headers"] == {"Authorization": "Bearer test_aiornot_key"}
+    assert client.post.await_args.kwargs["headers"] == {
+        "Authorization": "Bearer test_aiornot_key",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
     assert client.post.await_args.kwargs["data"] == {"text": ELIGIBLE_TEXT}
 
 
@@ -80,7 +83,10 @@ async def test_smoke_sized_ascii_prose_is_one_urlencoded_text_field():
         captured["request"] = request
         return httpx.Response(200, json=_payload(0.25))
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx.AsyncClient(
+        headers={"Content-Type": "multipart/form-data"},
+        transport=httpx.MockTransport(handler),
+    )
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client):
         await AIOrNotTextAdapter().analyze(smoke_text.encode("utf-8"))
 
@@ -88,7 +94,10 @@ async def test_smoke_sized_ascii_prose_is_one_urlencoded_text_field():
     assert request.method == "POST"
     assert str(request.url) == AIOrNotTextAdapter.URL
     assert request.url.query == b""
-    assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+    content_type = request.headers["content-type"]
+    assert content_type.startswith("application/x-www-form-urlencoded")
+    assert "multipart/form-data" not in content_type
+    assert "boundary=" not in content_type
     assert parse_qs(request.content.decode("ascii"), keep_blank_values=True) == {"text": [smoke_text]}
 
 

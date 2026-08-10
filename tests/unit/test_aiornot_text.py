@@ -1,6 +1,7 @@
 """Focused contract tests for the AI or Not Text adapter."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -18,9 +19,9 @@ ELIGIBLE_TEXT = " ".join(["слово"] * 64)
 
 
 def _response(status_code: int, body: object = None):
-    response = MagicMock(status_code=status_code)
-    response.json.return_value = body
-    return response
+    if body is None:
+        return httpx.Response(status_code, content=b"", headers={"content-type": "text/plain"})
+    return httpx.Response(status_code, json=body)
 
 
 def _client(*, response=None, error=None):
@@ -62,6 +63,33 @@ async def test_request_uses_sync_endpoint_bearer_auth_and_form_text():
     assert client.post.await_args.args[0] == AIOrNotTextAdapter.URL
     assert client.post.await_args.kwargs["headers"] == {"Authorization": "Bearer test_aiornot_key"}
     assert client.post.await_args.kwargs["data"] == {"text": ELIGIBLE_TEXT}
+
+
+@pytest.mark.asyncio
+async def test_smoke_sized_ascii_prose_is_one_urlencoded_text_field():
+    sentence = (
+        "A careful reviewer reads the whole passage before deciding how it was written, "
+        "because ordinary prose contains varied phrasing and a consistent train of thought. "
+    )
+    smoke_text = (sentence * 6)[:843]
+    assert 830 <= len(smoke_text) <= 843
+    assert len(smoke_text.split()) > 64
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200, json=_payload(0.25))
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client):
+        await AIOrNotTextAdapter().analyze(smoke_text.encode("utf-8"))
+
+    request = captured["request"]
+    assert request.method == "POST"
+    assert str(request.url) == AIOrNotTextAdapter.URL
+    assert request.url.query == b""
+    assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert parse_qs(request.content.decode("ascii"), keep_blank_values=True) == {"text": [smoke_text]}
 
 
 @pytest.mark.asyncio
@@ -131,6 +159,37 @@ async def test_4xx_does_not_retain_provider_message_that_echoes_analyzed_text():
         with pytest.raises(ExternalAPIError) as raised:
             await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
     assert raised.value.provider_message is None
+
+
+@pytest.mark.asyncio
+async def test_json_4xx_retains_only_safe_structure_and_allowlisted_message():
+    body = {"error": {"message": "plan does not permit text analysis", "internal": "do-not-log"}, "trace": 1}
+    with patch(
+        "adapters.aiornot_text.httpx.AsyncClient",
+        return_value=_client(response=_response(400, body)),
+    ):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    error = raised.value
+    assert error.content_type == "application/json"
+    assert error.response_length > 0
+    assert error.response_keys == ("error", "trace")
+    assert error.response_paths == ("error.message",)
+    assert error.provider_message == "plan does not permit text analysis"
+    assert "internal" not in error.response_paths
+
+
+@pytest.mark.asyncio
+async def test_non_json_4xx_records_metadata_without_reading_body_into_diagnostics():
+    response = httpx.Response(400, text="private gateway body", headers={"content-type": "text/html; charset=utf-8"})
+    with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)):
+        with pytest.raises(ExternalAPIError) as raised:
+            await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
+    error = raised.value
+    assert (error.content_type, error.response_length) == ("text/html", len(response.content))
+    assert error.response_keys == ()
+    assert error.response_paths == ()
+    assert error.provider_message is None
 
 
 @pytest.mark.asyncio

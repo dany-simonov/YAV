@@ -23,38 +23,63 @@ class AIOrNotTextAdapter(BaseAdapter):
     MIN_CHARACTERS = 250
     MIN_WORDS = 64
 
-    @staticmethod
-    def _safe_error_message(response: httpx.Response, text: str) -> str | None:
+    _SAFE_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+
+    @classmethod
+    def _safe_error_diagnostics(
+        cls, response: httpx.Response, text: str
+    ) -> tuple[str | None, int, tuple[str, ...], tuple[str, ...], str | None]:
         """Extract one bounded diagnostic field without retaining response data.
 
-        Error bodies are never propagated.  This accepts only one primitive
-        field and rejects a message that appears to echo the submitted text.
+        Non-JSON bodies are never read into logs. JSON diagnostics contain only
+        conservative key/path names and one allowlisted primitive string.
         """
+        raw_content_type = response.headers.get("content-type", "")
+        base_content_type = raw_content_type.split(";", 1)[0].strip().lower()
+        content_type = (
+            base_content_type
+            if re.fullmatch(r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+", base_content_type)
+            else "unknown"
+        )
+        response_length = len(response.content)
+        is_json = content_type == "application/json" or content_type.endswith("+json")
+        if not is_json:
+            return content_type, response_length, (), (), None
+
         try:
             body = response.json()
         except (TypeError, ValueError):
-            return None
+            return content_type, response_length, (), (), None
         if not isinstance(body, dict):
-            return None
+            return content_type, response_length, (), (), None
 
+        response_keys = tuple(sorted(key for key in body if isinstance(key, str) and cls._SAFE_KEY.fullmatch(key)))
         error = body.get("error")
+        errors = body.get("errors")
+        first_error = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else None
         candidates = (
-            error.get("code") if isinstance(error, dict) else None,
-            body.get("detail"),
-            body.get("message"),
+            ("message", body.get("message")),
+            ("detail", body.get("detail")),
+            ("error", error),
+            ("error.message", error.get("message") if isinstance(error, dict) else None),
+            ("error.detail", error.get("detail") if isinstance(error, dict) else None),
+            ("error.code", error.get("code") if isinstance(error, dict) else None),
+            ("errors[0].message", first_error.get("message") if first_error else None),
+            ("errors[0].detail", first_error.get("detail") if first_error else None),
         )
-        value = next((candidate for candidate in candidates if isinstance(candidate, str)), None)
+        response_paths = tuple(path for path, value in candidates if isinstance(value, str))
+        value = next((candidate for _, candidate in candidates if isinstance(candidate, str)), None)
         if value is None:
-            return None
+            return content_type, response_length, response_keys, response_paths, None
 
-        # A full or substantial echoed input is not useful as a diagnostic and
-        # must never reach logs.  Short texts are also checked in full.
-        markers = [text]
-        if len(text) > 32:
-            midpoint = len(text) // 2
-            markers.extend((text[:32], text[midpoint:midpoint + 32], text[-32:]))
-        if any(marker and marker in value for marker in markers):
-            return None
+        normalized_text = " ".join(text.split()).casefold()
+        normalized_value = " ".join(value.split()).casefold()
+        words = normalized_text.split()
+        markers = {normalized_text}
+        if len(words) >= 6:
+            markers.update(" ".join(words[index:index + 6]) for index in range(len(words) - 5))
+        if any(len(marker) >= 24 and marker in normalized_value for marker in markers):
+            return content_type, response_length, response_keys, response_paths, None
 
         sanitized = value.replace("\r", " ").replace("\n", " ").strip()
         if settings.aiornot_api_key:
@@ -66,7 +91,7 @@ class AIOrNotTextAdapter(BaseAdapter):
             sanitized,
         )
         sanitized = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", sanitized)
-        return sanitized[:300] or None
+        return content_type, response_length, response_keys, response_paths, sanitized[:300] or None
 
     @classmethod
     def is_eligible(cls, data: bytes | str) -> bool:
@@ -99,11 +124,18 @@ class AIOrNotTextAdapter(BaseAdapter):
         if response.status_code == 429:
             raise ProviderInfrastructureError("aiornot", "unavailable")
         if response.status_code >= 400:
+            content_type, response_length, response_keys, response_paths, provider_message = (
+                self._safe_error_diagnostics(response, text)
+            )
             raise ExternalAPIError(
                 "aiornot",
                 "request_error",
                 status_code=response.status_code,
-                provider_message=self._safe_error_message(response, text),
+                provider_message=provider_message,
+                content_type=content_type,
+                response_length=response_length,
+                response_keys=response_keys,
+                response_paths=response_paths,
             )
         try:
             body = response.json()

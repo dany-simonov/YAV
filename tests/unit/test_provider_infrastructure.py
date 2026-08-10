@@ -15,6 +15,9 @@ def test_external_api_error_new_diagnostics_are_optional_and_backward_compatible
         "sapling", "request_error", None, None
     )
     assert (enriched.status_code, enriched.provider_message) == (422, "safe")
+    assert (legacy.content_type, legacy.response_length, legacy.response_keys, legacy.response_paths) == (
+        None, None, (), ()
+    )
 
 
 def _client(*, response=None, error=None):

@@ -291,6 +291,23 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
         f"provider={provider} safe_error_code={error_code} "
         f"status_code={safe_status} exception_class={type(exc).__name__}"
     )
+    if provider == "aiornot" and error_code == "request_error":
+        content_type = getattr(exc, "content_type", None)
+        if not isinstance(content_type, str) or not re.fullmatch(
+            r"[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+|unknown", content_type
+        ):
+            content_type = "unknown"
+        response_length = getattr(exc, "response_length", None)
+        if not isinstance(response_length, int) or response_length < 0:
+            response_length = "unknown"
+        message += f" content_type={content_type} response_length={response_length}"
+        for field_name in ("response_keys", "response_paths"):
+            values = getattr(exc, field_name, ())
+            if isinstance(values, tuple) and values and all(
+                isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,80}", value)
+                for value in values
+            ):
+                message += f" {field_name}={','.join(values)}"
     if provider_message:
         message += f" provider_message={provider_message}"
     try:

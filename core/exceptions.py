@@ -20,6 +20,11 @@ class ExternalAPIError(Exception):
         detail: str,
         status_code: int | None = None,
         provider_message: str | None = None,
+        *,
+        content_type: str | None = None,
+        response_length: int | None = None,
+        response_keys: tuple[str, ...] = (),
+        response_paths: tuple[str, ...] = (),
     ) -> None:
         self.service = service
         self.detail = detail
@@ -27,6 +32,10 @@ class ExternalAPIError(Exception):
         # two-argument call sites and their public error behavior stay intact.
         self.status_code = status_code
         self.provider_message = provider_message
+        self.content_type = content_type
+        self.response_length = response_length
+        self.response_keys = response_keys
+        self.response_paths = response_paths
         super().__init__(f"{service}: {detail}")
 
 

@@ -161,7 +161,14 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
         },
     )
     error = ExternalAPIError(
-        "aiornot", "request_error", status_code=401, provider_message="invalid credentials"
+        "aiornot",
+        "request_error",
+        status_code=401,
+        provider_message="invalid credentials",
+        content_type="application/json",
+        response_length=57,
+        response_keys=("detail", "status"),
+        response_paths=("detail",),
     )
     with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
         "src.main._run_coro_sync", side_effect=error
@@ -178,6 +185,10 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
     assert "safe_error_code=request_error" in logged
     assert "status_code=401" in logged
     assert "exception_class=ExternalAPIError" in logged
+    assert "content_type=application/json" in logged
+    assert "response_length=57" in logged
+    assert "response_keys=detail,status" in logged
+    assert "response_paths=detail" in logged
     assert "provider_message=invalid credentials" in logged
     for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private analysis input"):
         assert sensitive_value not in logged

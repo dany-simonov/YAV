@@ -1,7 +1,9 @@
 import subprocess
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from PIL import Image
 import pytest
 
 from core.enums import MediaType
@@ -9,8 +11,10 @@ from src.media_validation import _run_probe, detect_signature, validate_media_by
 from src.validation import SecurityValidationError
 
 
-def _image_probe(width=100, height=100):
-    return {"streams": [{"codec_type": "video", "codec_name": "mjpeg", "width": width, "height": height}]}
+def _image_bytes(image_format="PNG"):
+    output = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(output, format=image_format)
+    return output.getvalue()
 
 
 def _audio_probe(duration=1, channels=1, sample_rate=44_100):
@@ -26,10 +30,25 @@ def _ftyp(major_brand, compatible_brands=()):
     return box_size.to_bytes(4, "big") + b"ftyp" + major_brand + b"\0\0\0\0" + b"".join(compatible_brands)
 
 
-@pytest.mark.parametrize("data", [b"\xff\xd8\xff" + b"x", b"\x89PNG\r\n\x1a\n" + b"x", b"RIFFxxxxWEBP" + b"x"])
-def test_valid_image_signatures_are_verified(data):
-    with patch("src.media_validation._run_probe", return_value=_image_probe()), patch("src.media_validation._validate_image_decode"):
-        assert validate_media_bytes(data, MediaType.IMAGE).media_type == MediaType.IMAGE
+@pytest.mark.parametrize("image_format", ["JPEG", "PNG", "WEBP"])
+def test_valid_image_signatures_are_verified_without_ffprobe(image_format):
+    with patch("src.media_validation._run_probe") as probe:
+        result = validate_media_bytes(_image_bytes(image_format), MediaType.IMAGE)
+    probe.assert_not_called()
+    assert result.media_type == MediaType.IMAGE
+
+
+def test_missing_ffprobe_does_not_break_image_upload():
+    with patch("src.media_validation.subprocess.run", side_effect=FileNotFoundError()) as process:
+        result = validate_media_bytes(_image_bytes(), MediaType.IMAGE)
+    process.assert_not_called()
+    assert result.media_type == MediaType.IMAGE
+
+
+def test_audio_still_reaches_ffprobe():
+    with patch("src.media_validation._run_probe", return_value=_audio_probe()) as probe:
+        assert validate_media_bytes(b"OggS" + b"x", MediaType.AUDIO).media_type == MediaType.AUDIO
+    probe.assert_called_once()
 
 
 def test_media_type_spoof_is_rejected():
@@ -121,9 +140,13 @@ def test_avi_signature_remains_supported():
 
 
 def test_huge_image_dimensions_are_rejected():
-    with patch("src.media_validation._run_probe", return_value=_image_probe(9000, 9000)):
+    image = Image.new("1", (9000, 9000))
+    output = BytesIO()
+    image.save(output, format="PNG")
+    with patch("src.media_validation._run_probe") as probe:
         with pytest.raises(SecurityValidationError) as raised:
-            validate_media_bytes(b"\xff\xd8\xff" + b"x", MediaType.IMAGE)
+            validate_media_bytes(output.getvalue(), MediaType.IMAGE)
+    probe.assert_not_called()
     assert raised.value.code == "media_limits_exceeded"
 
 

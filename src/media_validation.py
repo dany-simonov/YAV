@@ -1,4 +1,4 @@
-"""Bounded media inspection using the existing FFmpeg runtime."""
+"""Bounded image decoding and FFprobe-based audio/video inspection."""
 
 from __future__ import annotations
 
@@ -6,14 +6,16 @@ import json
 import math
 import subprocess
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any, Callable
+
+from PIL import Image, UnidentifiedImageError
 
 from core.enums import MediaType
 from src.validation import MAX_FILE_BYTES, SecurityValidationError
 
 
 PROBE_TIMEOUT_SECONDS = 5
-DECODE_TIMEOUT_SECONDS = 8
 MAX_IMAGE_PIXELS = 16_000_000
 MAX_IMAGE_DIMENSION = 8_192
 MAX_AUDIO_DURATION_SECONDS = 300
@@ -232,40 +234,27 @@ def _require_container_format(
         raise SecurityValidationError("invalid_media", "Файл повреждён или некорректен.", 422)
 
 
-def _validate_image_decode(data: bytes, diagnostic_log: DiagnosticLog | None = None) -> None:
-    command = [
-        "ffmpeg",
-        "-v",
-        "error",
-        "-nostdin",
-        "-i",
-        "pipe:0",
-        "-frames:v",
-        "1",
-        "-f",
-        "null",
-        "-",
-    ]
-    _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=start")
+def _validate_image_decode(data: bytes, diagnostic_log: DiagnosticLog | None = None) -> tuple[int, int]:
+    """Decode a supported image in-process after enforcing pixel bounds."""
     try:
-        completed = subprocess.run(
-            command,
-            input=data,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=DECODE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=failed reason=binary_missing")
-        raise SecurityValidationError("invalid_media", "Не удалось проверить изображение.", 422) from exc
-    except subprocess.TimeoutExpired as exc:
-        _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=failed reason=timeout")
-        raise SecurityValidationError("invalid_media", "Не удалось проверить изображение.", 422) from exc
-    if completed.returncode != 0:
-        _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=failed reason=decoder_failure")
+        with Image.open(BytesIO(data)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"}:
+                raise SecurityValidationError("unsupported_media_type", "Неподдерживаемый формат файла.", 415)
+            width, height = image.size
+            if (
+                width <= 0
+                or height <= 0
+                or width > MAX_IMAGE_DIMENSION
+                or height > MAX_IMAGE_DIMENSION
+                or width * height > MAX_IMAGE_PIXELS
+            ):
+                raise SecurityValidationError("media_limits_exceeded", "Размер изображения превышает лимит.", 422)
+            image.load()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        _diagnose(diagnostic_log, "media_validation stage=image_decode result=failed")
         raise SecurityValidationError("invalid_media", "Изображение повреждено или некорректно.", 422)
-    _diagnose(diagnostic_log, "media_validation stage=ffmpeg result=ok")
+    _diagnose(diagnostic_log, "media_validation stage=image_decode result=ok")
+    return width, height
 
 
 def validate_media_bytes(
@@ -283,18 +272,12 @@ def validate_media_bytes(
             "media_type_mismatch", "Содержимое файла не соответствует заявленному формату.", 415
         )
 
-    probe = _run_probe(data, diagnostic_log)
     if actual == MediaType.IMAGE:
-        stream = _first_stream(probe, "video", diagnostic_log)
-        _require_codec(stream, {"mjpeg", "png", "webp"})
-        width = _as_positive_int(stream.get("width"))
-        height = _as_positive_int(stream.get("height"))
-        if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
-            raise SecurityValidationError("media_limits_exceeded", "Размер изображения превышает лимит.", 422)
-        _validate_image_decode(data, diagnostic_log)
+        width, height = _validate_image_decode(data, diagnostic_log)
         _diagnose(diagnostic_log, "media_validation stage=limits result=ok")
         return MediaInfo(actual, width=width, height=height)
 
+    probe = _run_probe(data, diagnostic_log)
     format_data = probe.get("format")
     if not isinstance(format_data, dict):
         _diagnose(diagnostic_log, "media_validation stage=ffprobe result=failed reason=unknown_probe_failure")

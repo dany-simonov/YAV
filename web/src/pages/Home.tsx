@@ -7,11 +7,19 @@ const StatusDot=({tone='amber'}:{tone?:'amber'|'green'|'red'})=><span className=
 function ProductPreview(){return <div className="soft-card rounded-[22px] p-3 sm:p-5 relative">
   <div className="h-8 flex items-center gap-1.5 border-b border-black/[.06] mb-4"><i className="w-1.5 h-1.5 rounded-full bg-black/20"/><i className="w-1.5 h-1.5 rounded-full bg-black/10"/><span className="ml-auto text-[10px] text-mv-text-muted uppercase tracking-wider">Отчёт / 2026</span></div>
   <div className="grid sm:grid-cols-[1.08fr_.92fr] gap-4">
+    
     <div className="min-h-[295px] rounded-[14px] bg-[#11151a] relative overflow-hidden p-5">
       <div className="absolute inset-0 opacity-20" style={{backgroundImage:'linear-gradient(rgba(90,150,220,.3) 1px,transparent 1px),linear-gradient(90deg,rgba(90,150,220,.3) 1px,transparent 1px)',backgroundSize:'36px 36px'}}/>
+      <img
+        src="/assets/img/puhosos.png"
+        alt="Пример обнаруженных изменений"
+        className="absolute inset-0 w-full h-full object-cover"
+        />
+      
+
       <div className="absolute left-[18%] top-[20%] w-[52%] h-[48%] border border-blue-400/50"><span className="absolute -top-4 left-0 text-[8px] text-blue-300">AREA 01</span></div>
       <div className="absolute right-[12%] bottom-[16%] w-[22%] h-[24%] border border-blue-300/30"/>
-      <div className="relative mt-auto h-full flex items-end"><span className="text-[10px] text-white/45 uppercase tracking-wider">Обнаружено 2 области</span></div>
+
     </div>
     <div className="p-2 sm:p-3 flex flex-col"><p className="eyebrow mb-4">Общий вывод</p><div className="flex items-center gap-2 text-sm text-mv-uncertain"><StatusDot/>Требуется проверка</div><div className="text-[52px] leading-none tracking-[-.06em] font-semibold mt-3 mb-7">76<span className="text-2xl text-mv-text-muted">%</span></div>
       <div className="space-y-4 text-xs"><div><div className="flex justify-between mb-2"><span>AI-генерация</span><span>24%</span></div><div className="h-1 bg-black/[.06] rounded-full"><div className="h-full w-[24%] bg-mv-uncertain rounded-full"/></div></div>

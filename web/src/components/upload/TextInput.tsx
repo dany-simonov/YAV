@@ -104,19 +104,15 @@ export function TextInput({
         )}
       </div>
 
-      {/* Tips */}
-      <div className="p-4 bg-mv-surface-2 rounded-lg border border-mv-border">
-        <h4 className="text-sm font-medium text-mv-text mb-2">💡 Советы для лучшего результата</h4>
-        <ul className="text-xs text-mv-text-muted space-y-1">
-          <li>• Используйте полные абзацы, а не отдельные предложения</li>
-          <li>• Не редактируйте текст перед проверкой</li>
-          {recommendedRange ? (
-            <li>• Оптимальный объем: {recommendedRange.min}-{recommendedRange.max} символов</li>
-          ) : (
-            <li>• Чем больше текста, тем выше точность анализа</li>
-          )}
-          <li>• Максимум: {maxLength.toLocaleString()} символов</li>
-        </ul>
+      {/* Minimal preparation hint */}
+      <div className="pt-4 border-t border-black/[.08] grid sm:grid-cols-[170px_1fr] gap-2 sm:gap-6">
+        <p className="eyebrow">Для точного анализа</p>
+        <p className="text-sm text-mv-text-secondary">
+          Полные абзацы · исходный текст ·{' '}
+          {recommendedRange
+            ? `${recommendedRange.min}–${recommendedRange.max} символов`
+            : `от ${minLength} символов`}
+        </p>
       </div>
     </div>
   );

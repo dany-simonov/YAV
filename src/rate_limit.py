@@ -228,6 +228,26 @@ class AppwriteTablesRateLimitStore:
             return None
         return error_type if isinstance(error_type, str) else None
 
+    async def _increment_confirms_counter_exhausted(
+        self, client: Any, *, response: Any, counter_url: str, headers: dict[str, str], limit: int,
+        dimension: str,
+    ) -> bool:
+        """Confirm only the bounded-increment column limit race as exhaustion."""
+        if self._appwrite_error_type(response) != "column_limit_exceeded":
+            return False
+        try:
+            current = await client.get(counter_url, headers=headers)
+        except httpx.HTTPError:
+            return False
+        count = self._counter_count(current) if current.status_code == 200 else None
+        if count is None or count < limit:
+            return False
+        logger.warning(
+            "rate_limit_boundary_confirmed operation=rate_limits.increment dimension=%s limit=%s count=%s",
+            dimension, limit, count,
+        )
+        return True
+
     async def _commit_confirms_quota_exhausted(
         self, client: Any, *, response: Any, existing_counter: bool, pre_count: int | None,
         staged_increment: bool, increment_max: int | None, limit: int, rows: str, quota_id: str,
@@ -283,20 +303,29 @@ class AppwriteTablesRateLimitStore:
                     return 0
                 if created.status_code != 409:
                     raise self._unavailable("rate_limits.create", response=created)
-                incremented = await client.patch(f"{url}/{row_id}/count/increment", headers=headers, json={"value": 1, "max": limit})
+                counter_url = f"{url}/{row_id}"
+                incremented = await client.patch(
+                    f"{counter_url}/count/increment", headers=headers, json={"value": 1, "max": limit}
+                )
+                if incremented.status_code == 200:
+                    return 0
+                if incremented.status_code == 409:
+                    return max(1, int((window.end - self.now).total_seconds()))
+                if incremented.status_code == 400:
+                    error_type = self._appwrite_error_type(incremented)
+                    if error_type == "row_max_exceeded":
+                        return max(1, int((window.end - self.now).total_seconds()))
+                    if await self._increment_confirms_counter_exhausted(
+                        client,
+                        response=incremented,
+                        counter_url=counter_url,
+                        headers=headers,
+                        limit=limit,
+                        dimension=dimension,
+                    ):
+                        return max(1, int((window.end - self.now).total_seconds()))
         except httpx.HTTPError as exc:
             raise self._unavailable("rate_limits.create_or_increment", exc=exc) from exc
-        if incremented.status_code == 200:
-            return 0
-        if incremented.status_code == 409:
-            return max(1, int((window.end - self.now).total_seconds()))
-        if incremented.status_code == 400:
-            try:
-                error_type = incremented.json().get("type")
-            except (AttributeError, TypeError, ValueError):
-                error_type = None
-            if error_type == "row_max_exceeded":
-                return max(1, int((window.end - self.now).total_seconds()))
         raise self._unavailable("rate_limits.increment", response=incremented)
 
     async def guard_provider(self, provider: str) -> None:

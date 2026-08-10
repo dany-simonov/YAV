@@ -436,3 +436,91 @@ async def test_unstructured_increment_400_is_diagnostic_unavailable_not_false_li
         await store.consume("ip_minute", store.ip_subject("192.0.2.1"), "minute", 10)
     assert raised.value.code == "rate_limit_unavailable"
     assert "operation=rate_limits.increment" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_existing_counter_below_maximum_increments_successfully(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(409))
+    client.patch = AsyncMock(return_value=_response(200))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client):
+        assert await store.consume("ip_minute", "hashed-ip", "minute", 10) == 0
+    assert client.patch.await_args.kwargs["json"] == {"value": 1, "max": 10}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dimension", "subject", "period", "limit"),
+    [
+        ("ip_minute", "hashed-ip", "minute", 10),
+        ("user_minute", "trusted-user", "minute", 6),
+        ("user_hour", "trusted-user", "hour", 30),
+        ("provider_minute", "sapling", "minute", 60),
+    ],
+)
+async def test_column_limit_exceeded_at_counter_boundary_returns_retry(monkeypatch, dimension, subject, period, limit):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(409))
+    client.patch = AsyncMock(return_value=_response(400, {"type": "column_limit_exceeded", "code": 400}))
+    client.get = AsyncMock(return_value=_response(200, {"count": limit}))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client):
+        retry_after = await store.consume(dimension, subject, period, limit)
+    assert retry_after and retry_after > 0
+    assert client.patch.await_args.kwargs["json"] == {"value": 1, "max": limit}
+    client.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_column_limit_exceeded_race_reads_back_maximum_before_returning_retry(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(409))
+    client.patch = AsyncMock(return_value=_response(400, {"type": "column_limit_exceeded", "code": 400}))
+    client.get = AsyncMock(return_value=_response(200, {"count": 10}))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client):
+        retry_after = await store.consume("ip_minute", "hashed-ip", "minute", 10)
+    assert retry_after and retry_after > 0
+    assert client.patch.await_count == 1
+    client.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_ip_column_limit_exceeded_uses_existing_public_429_contract(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(409))
+    client.patch = AsyncMock(return_value=_response(400, {"type": "column_limit_exceeded", "code": 400}))
+    client.get = AsyncMock(return_value=_response(200, {"count": 10}))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await enforce_admission(store, "trusted-user", "192.0.2.1")
+    assert (raised.value.code, raised.value.status_code) == ("rate_limit_exceeded", 429)
+
+
+@pytest.mark.asyncio
+async def test_column_limit_exceeded_below_limit_remains_infrastructure_failure(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(409))
+    client.patch = AsyncMock(return_value=_response(400, {"type": "column_limit_exceeded", "code": 400}))
+    client.get = AsyncMock(return_value=_response(200, {"count": 9}))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await store.consume("ip_minute", "hashed-ip", "minute", 10)
+    assert raised.value.code == "rate_limit_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_create_column_limit_exceeded_remains_infrastructure_failure(monkeypatch):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client); client.__aexit__ = AsyncMock(return_value=False)
+    client.post = AsyncMock(return_value=_response(400, {"type": "column_limit_exceeded", "code": 400}))
+    store = _store(monkeypatch)
+    with patch("src.rate_limit.httpx.AsyncClient", return_value=client), pytest.raises(RateLimitError) as raised:
+        await store.consume("ip_minute", "hashed-ip", "minute", 10)
+    assert raised.value.code == "rate_limit_unavailable"

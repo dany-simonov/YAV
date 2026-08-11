@@ -5,11 +5,23 @@ import type { Check, MediaType, Verdict } from '../types';
 
 const MAX_ITEMS = 200;
 const PAGE_SIZE = 100;
+const HISTORY_FIELDS = [
+  '$id',
+  '$createdAt',
+  'user_id',
+  'media_type',
+  'verdict',
+  'authenticity_index',
+  'provider',
+  'model',
+  'explanation',
+  'source_label',
+  'processing_ms',
+];
 
 interface CheckRow extends Models.Row {
   user_id: string;
   media_type: string;
-  status: string;
   verdict: string;
   authenticity_index: number;
   provider?: string | null;
@@ -17,7 +29,6 @@ interface CheckRow extends Models.Row {
   explanation?: string | null;
   source_label?: string | null;
   processing_ms?: number | null;
-  details?: string | null;
 }
 
 export interface HistoryStats {
@@ -52,6 +63,7 @@ export function mapHistoryRow(row: CheckRow): Check {
 }
 
 function historyError(error: unknown): Error {
+  logHistoryDiagnostic(error);
   if (error instanceof AppwriteException) {
     if (error.code === 401 || error.code === 403) {
       return new Error('Нет доступа к истории проверок');
@@ -61,6 +73,25 @@ function historyError(error: unknown): Error {
     }
   }
   return new Error('Не удалось загрузить историю проверок');
+}
+
+function logHistoryDiagnostic(error: unknown): void {
+  if (!import.meta.env.DEV || !(error instanceof AppwriteException)) return;
+  const safe = (value: unknown, limit: number): string => {
+    if (typeof value !== 'string') return '';
+    return value
+      .replace(/[\r\n]/g, ' ')
+      .replace(/(?:bearer\s+|authorization\s*[:=]\s*|x-appwrite-(?:jwt|key|session)\s*[:=]\s*|(?:api[_ -]?(?:key|secret)|jwt|session(?:id)?|token|secret)\s*[:=]\s*)\S+/gi, '[REDACTED]')
+      .replace(/\b(?:api[_ -]?(?:key|secret)|jwt|session(?:id)?|token|secret)(?:[-_][A-Za-z0-9]+)+\b/gi, '[REDACTED]')
+      .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED]')
+      .replace(/(["'`])(?:(?!\1).){1,512}\1/g, '$1[REDACTED]$1')
+      .slice(0, limit);
+  };
+  console.warn('check_history_appwrite_error', {
+    code: typeof error.code === 'number' ? error.code : 0,
+    type: safe(error.type, 80),
+    message: safe(error.message, 240),
+  });
 }
 
 export async function loadChecksHistory(userId: string): Promise<Check[]> {
@@ -80,6 +111,7 @@ export async function loadChecksHistory(userId: string): Promise<Check[]> {
           Query.orderDesc('$createdAt'),
           Query.limit(limit),
           Query.offset(offset),
+          Query.select(HISTORY_FIELDS),
         ],
         total: false,
         ttl: 0,
@@ -120,27 +152,8 @@ export async function deleteCheckFromHistory(userId: string, checkId: string): P
 export async function clearChecksHistory(userId: string): Promise<void> {
   if (!userId) return;
   try {
-    while (true) {
-      const response = await tablesDB.listRows<CheckRow>({
-        databaseId: APPWRITE_CONFIG.databaseId,
-        tableId: APPWRITE_CONFIG.tables.checks,
-        queries: [Query.equal('user_id', [userId]), Query.limit(PAGE_SIZE)],
-        total: false,
-        ttl: 0,
-      });
-      const ownRows = response.rows.filter((row) => row.user_id === userId);
-      if (ownRows.length === 0) return;
-      await Promise.all(
-        ownRows.map((row) =>
-          tablesDB.deleteRow({
-            databaseId: APPWRITE_CONFIG.databaseId,
-            tableId: APPWRITE_CONFIG.tables.checks,
-            rowId: row.$id,
-          })
-        )
-      );
-      if (ownRows.length < PAGE_SIZE) return;
-    }
+    const checks = await loadChecksHistory(userId);
+    await Promise.all(checks.map((check) => deleteCheckFromHistory(userId, check.id)));
   } catch (error) {
     throw historyError(error);
   }

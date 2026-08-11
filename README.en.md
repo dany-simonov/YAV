@@ -6,7 +6,7 @@
 
   <img src="./web/public/assets/img/yav-logo.png" alt="YAV logo" width="92">
 
-  <h1>ЯВЬ</h1>
+  <h1>YAV</h1>
 
   <p><strong>AI-generated content detection for text and media</strong></p>
 

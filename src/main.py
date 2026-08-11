@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
 from core.enums import MediaType  # noqa: E402
 from core.analyzer import HybridTextAnalyzer  # noqa: E402
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError  # noqa: E402
+from core.short_report import build_short_report  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
     ChecksPersistenceError,
@@ -444,8 +445,11 @@ async def _analyze(
         result["processing_ms"] = processing_ms
         return result
 
-    # Keep legacy Function responses byte-for-byte field-compatible until a
-    # provider is migrated to BE-06 canonical semantics.
+    # Build the user-facing summary only after routing and normalization have
+    # produced the canonical result. Hybrid text has its own response contract.
+    result = result.model_copy(update={"short_report": build_short_report(result)})
+
+    # Preserve existing Function fields; short_report is an additive field.
     body = result.model_dump(mode="json", exclude_none=True)
     body["processing_ms"] = processing_ms
     return body

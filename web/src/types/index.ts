@@ -33,6 +33,7 @@ export interface CheckResult {
   explanation: string;
   processing_ms: number;
   media_type: MediaType;
+  short_report?: string | null;
 }
 
 // Backward-compatible type for older components/hooks.

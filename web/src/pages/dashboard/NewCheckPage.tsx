@@ -80,6 +80,7 @@ export function NewCheckPage() {
       explanation: source?.explanation ?? source?.reason ?? 'Результат получен без пояснения',
       processing_ms: Number(source?.processing_ms ?? source?.processingTime ?? 0),
       media_type: source?.media_type ?? mediaType,
+      short_report: typeof source?.short_report === 'string' ? source.short_report : undefined,
     };
   };
 

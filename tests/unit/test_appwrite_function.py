@@ -5,17 +5,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from api.schemas import AnalysisResult
+from core.enums import MediaType, ModelUsed, Verdict
+from core.exceptions import ExternalAPIError
+from src.appwrite_store import ChecksPersistenceError
 from src.main import (
     EmailNotVerifiedError,
+    _analyze,
     _download_file_bytes,
     _execute_request,
     _get_file_metadata,
     _metadata_media_type,
     main,
 )
-from src.appwrite_store import ChecksPersistenceError
-from core.exceptions import ExternalAPIError
-from src.validation import SecurityValidationError
+from src.validation import SecurityValidationError, validate_request_payload
 
 
 def _context(payload, headers=None):
@@ -374,6 +377,31 @@ async def test_execute_request_uses_runtime_identity_not_legacy_user_id():
     assert response["check_id"] == "check-1"
     assert persist_mock.await_args.args[1] == "runtime-user"
     assert persist_mock.await_args.args[3] == "dynamic-key"
+
+
+@pytest.mark.asyncio
+async def test_function_response_adds_short_report_after_canonical_analysis():
+    canonical = AnalysisResult(
+        verdict=Verdict.FAKE,
+        confidence=0.8,
+        model_used=ModelUsed.SAPLING,
+        explanation="Provider explanation",
+        media_type=MediaType.TEXT,
+        semantics_version=2,
+        ai_probability=0.8,
+        authenticity_index=20,
+    )
+    router = MagicMock()
+    router.route = AsyncMock(return_value=canonical)
+
+    with patch("src.main.MediaRouter", return_value=router):
+        response = await _analyze(
+            validate_request_payload({"text": "x" * 50}), "runtime-jwt"
+        )
+
+    assert response["short_report"].count(".") == 2
+    assert "вероятность AI-генерации — 80%" in response["short_report"]
+    assert response["verdict"] == "FAKE"
 
 
 @pytest.mark.asyncio

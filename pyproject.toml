@@ -14,6 +14,7 @@ dependencies = [
     "python-multipart==0.0.9",
     "aiofiles==23.2.1",
     "Pillow>=10,<13",
+    "static-ffmpeg==3.0",
     "reportlab==4.2.0",
     "g4f @ git+https://github.com/xtekky/gpt4free.git",
 ]

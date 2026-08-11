@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+
+import static_ffmpeg
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Callable
@@ -129,6 +131,7 @@ def detect_signature(data: bytes) -> MediaType:
 
 
 def _run_probe(data: bytes, diagnostic_log: DiagnosticLog | None = None) -> dict[str, Any]:
+    static_ffmpeg.add_paths(weak=True)
     command = [
         "ffprobe",
         "-v",

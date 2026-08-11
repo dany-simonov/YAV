@@ -119,7 +119,7 @@ export function FileDropzone({
       <div
         {...getRootProps()}
         className={cn(
-          'relative border border-dashed rounded-[14px] p-10 lg:p-16 min-h-[330px] transition-all duration-200 cursor-pointer',
+          'relative border border-black/[.1] rounded-[14px] p-10 lg:p-16 min-h-[430px] transition-all duration-200 cursor-pointer shadow-[0_1px_2px_rgba(0,0,0,.035),0_12px_30px_rgba(0,0,0,.055)]',
           'flex flex-col items-center justify-center text-center',
           isDragActive && !isDragReject && 'border-mv-accent bg-black/[.025]',
           isDragReject && 'border-mv-fake bg-mv-fake/5',
@@ -157,27 +157,18 @@ export function FileDropzone({
             )
           ) : (
             <>
-              <p className="text-mv-text font-medium">
+              <p className="text-xl sm:text-2xl tracking-[-.03em] text-mv-text font-semibold">
                 Перетащите файл или выберите на устройстве
               </p>
-              <p className="text-sm text-mv-text-muted">
+              <p className="mt-4 text-sm sm:text-base text-mv-text-muted">
                 Изображения и аудио · до {formatFileSize(maxSize)}
               </p>
             </>
           )}
         </div>
 
-        {/* Supported formats */}
-        <div className="mt-3 text-xs text-mv-uncertain">Поддержка видео требует подтверждения</div><div className="mt-6 flex flex-wrap gap-2 justify-center">
-          {['JPG', 'PNG', 'MP3', 'WAV', 'MP4'].map((format) => (
-            <span
-              key={format}
-              className="px-2 py-1 text-xs font-medium text-mv-text-muted bg-mv-surface-2 rounded"
-            >
-              {format}
-            </span>
-          ))}
-        </div>
+        <div className="mt-2 text-sm sm:text-base text-mv-text-muted">Поддержка видео требует подтверждения</div>
+        <button type="button" className="btn-light !min-h-[42px] mt-6 pointer-events-none">Выбрать файл</button>
       </div>
 
       {/* Errors */}

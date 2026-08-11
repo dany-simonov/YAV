@@ -194,7 +194,7 @@ export function DashboardOverview() {
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div className="flex items-start gap-4">
             <div className="w-12 h-12 rounded-xl bg-mv-accent/20 flex items-center justify-center">
-              <img src="/assets/img/logo.png" alt="" className="w-7 h-7" />
+              <img src="/assets/img/yav-logo.png" alt="" className="w-7 h-7 object-contain" />
             </div>
             <div>
               <h3 className="text-lg font-semibold text-mv-text">Большая проверка текста</h3>

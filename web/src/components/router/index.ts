@@ -3,11 +3,4 @@
  * =========================
  */
 
-export {
-  ProtectedRoute,
-  PublicOnlyRoute,
-  VerificationRoute,
-  getProtectedRouteRedirect,
-  getPublicOnlyRedirect,
-  getVerificationRouteRedirect,
-} from './ProtectedRoute';
+export { ProtectedRoute, PublicOnlyRoute, VerifiedRoute } from './ProtectedRoute';

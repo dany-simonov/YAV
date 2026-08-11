@@ -50,16 +50,35 @@ export function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-/**
- * Email validation regex
- */
-export const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Basic syntax check; domain labels and the top-level domain are checked below. */
+export const EMAIL_REGEX = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+$/i;
+
+export function normalizeEmail(email: string): string {
+  return email.replace(/\s+/g, '').toLowerCase();
+}
 
 /**
  * Validate email format
  */
 export function isValidEmail(email: string): boolean {
-  return EMAIL_REGEX.test(email);
+  const value = normalizeEmail(email);
+  if (!value || value.length > 254 || !EMAIL_REGEX.test(value)) return false;
+
+  const [localPart, domain, ...extraParts] = value.split('@');
+  if (!localPart || !domain || extraParts.length > 0 || localPart.length > 64) return false;
+  if (localPart.startsWith('.') || localPart.endsWith('.') || localPart.includes('..')) return false;
+
+  const labels = domain.split('.');
+  if (labels.length < 2) return false;
+  if (!/^[a-z]{2,24}$/i.test(labels[labels.length - 1] ?? '')) return false;
+
+  return labels.every((label) =>
+    label.length > 0 &&
+    label.length <= 63 &&
+    /^[a-z0-9-]+$/i.test(label) &&
+    !label.startsWith('-') &&
+    !label.endsWith('-')
+  );
 }
 
 /**

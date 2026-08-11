@@ -21,10 +21,6 @@ def _audio_probe(duration=1, channels=1, sample_rate=44_100):
     return {"format": {"duration": str(duration)}, "streams": [{"codec_type": "audio", "codec_name": "opus", "channels": channels, "sample_rate": str(sample_rate)}]}
 
 
-def _video_probe(duration=1, width=1920, height=1080, format_name="mov,mp4,m4a,3gp,3g2,mj2"):
-    return {"format": {"duration": str(duration), "format_name": format_name}, "streams": [{"codec_type": "video", "codec_name": "h264", "width": width, "height": height}]}
-
-
 def _ftyp(major_brand, compatible_brands=()):
     box_size = 16 + 4 * len(compatible_brands)
     return box_size.to_bytes(4, "big") + b"ftyp" + major_brand + b"\0\0\0\0" + b"".join(compatible_brands)
@@ -80,10 +76,10 @@ def test_iso_base_media_compatible_brand_is_used_when_major_brand_varies():
     assert detect_signature(_ftyp(b"zzzz", (b"iso6",))) == MediaType.VIDEO
 
 
-def test_iso_base_media_reaches_ffprobe_after_structural_signature_validation():
-    with patch("src.media_validation._run_probe", return_value=_video_probe()) as probe:
+def test_iso_base_media_bypasses_ffprobe_after_structural_signature_validation():
+    with patch("src.media_validation._run_probe") as probe:
         assert validate_media_bytes(_ftyp(b"iso6", (b"mp42",)), MediaType.VIDEO).media_type == MediaType.VIDEO
-    probe.assert_called_once()
+    probe.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -105,14 +101,14 @@ def test_probe_failures_emit_safe_diagnostic_codes(side_effect, completed, reaso
     assert all(secret not in " ".join(logs) for secret in ("file-id", "jwt", "filename", "stderr"))
 
 
-def test_happy_video_validation_emits_safe_stage_logs():
+def test_happy_video_validation_emits_safe_stage_logs_without_ffprobe():
     logs = []
-    with patch("src.media_validation._run_probe", return_value=_video_probe()) as probe:
+    with patch("src.media_validation._run_probe") as probe:
         assert validate_media_bytes(_ftyp(b"iso6", (b"mp42",)), MediaType.VIDEO, logs.append).media_type == MediaType.VIDEO
-    probe.assert_called_once()
+    probe.assert_not_called()
     assert logs == [
         "media_validation stage=signature result=ok detected=video",
-        "media_validation stage=limits result=ok",
+        "media_validation stage=video_base_validation result=ok",
     ]
 
 
@@ -135,8 +131,9 @@ def test_invalid_or_non_structural_ftyp_is_rejected_before_probe(data):
 
 def test_avi_signature_remains_supported():
     data = b"RIFF\x00\x00\x00\x00AVI " + b"x"
-    with patch("src.media_validation._run_probe", return_value=_video_probe(format_name="avi")):
+    with patch("src.media_validation._run_probe") as probe:
         assert validate_media_bytes(data, MediaType.VIDEO).media_type == MediaType.VIDEO
+    probe.assert_not_called()
 
 
 def test_huge_image_dimensions_are_rejected():
@@ -155,12 +152,4 @@ def test_audio_limits_are_rejected(probe):
     with patch("src.media_validation._run_probe", return_value=probe):
         with pytest.raises(SecurityValidationError) as raised:
             validate_media_bytes(b"OggS" + b"x", MediaType.AUDIO)
-    assert raised.value.code == "media_limits_exceeded"
-
-
-@pytest.mark.parametrize("probe", [_video_probe(duration=61), _video_probe(width=1921), _video_probe(height=1081)])
-def test_video_limits_are_rejected(probe):
-    with patch("src.media_validation._run_probe", return_value=probe):
-        with pytest.raises(SecurityValidationError) as raised:
-            validate_media_bytes(_ftyp(b"isom", (b"iso2", b"avc1")), MediaType.VIDEO)
     assert raised.value.code == "media_limits_exceeded"

@@ -235,24 +235,24 @@ class TestRoute:
         assert result is hf_result
         hf.assert_awaited_once()
 
+
     @pytest.mark.asyncio
-    async def test_video_routes_to_legacy_pipeline_after_direct_technical_failure(self):
-        video_result = AnalysisResult(
-            verdict=Verdict.FAKE,
-            confidence=0.70,
-            model_used=ModelUsed.SIGHTENGINE_VIDEO,
-            explanation="3/5 fake frames",
-            media_type=MediaType.VIDEO,
-            processing_ms=8000,
-        )
-        mock_analyze = AsyncMock(return_value=video_result)
+    async def test_video_propagates_direct_technical_failure(self):
         with patch(
             "router.media_router.SightengineVideoAdapter.analyze",
-            new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "unavailable")),
-        ), patch("router.media_router.VideoPipeline.analyze", mock_analyze):
-            result = await MediaRouter().route(MediaType.VIDEO, b"video_bytes")
-        mock_analyze.assert_awaited_once()
-        assert result.model_used == ModelUsed.SIGHTENGINE_VIDEO
+            new=AsyncMock(
+                side_effect=ProviderInfrastructureError(
+                    "sightengine", "unavailable"
+                )
+            ),
+        ):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await MediaRouter().route(MediaType.VIDEO, b"video_bytes")
+
+        assert (raised.value.service, raised.value.kind) == (
+            "sightengine",
+            "unavailable",
+        )
 
     @pytest.mark.asyncio
     async def test_text_routes_to_sapling(self):

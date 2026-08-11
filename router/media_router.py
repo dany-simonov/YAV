@@ -10,7 +10,6 @@ from adapters.resemble import ResembleAdapter
 from adapters.sapling import SaplingAdapter
 from adapters.sightengine import SightengineAdapter
 from adapters.sightengine_video import SightengineVideoAdapter
-from adapters.video_pipeline import VideoPipeline
 from api.schemas import AnalysisResult, ComponentEvidence
 from core.enums import MediaType, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError, UnsupportedMediaType
@@ -123,10 +122,7 @@ class MediaRouter:
                     return await HFAudioAdapter().analyze(file_bytes)
 
             case MediaType.VIDEO:
-                try:
-                    return await SightengineVideoAdapter().analyze(file_bytes)
-                except ProviderInfrastructureError:
-                    return await VideoPipeline().analyze(file_bytes)
+                return await SightengineVideoAdapter().analyze(file_bytes)
 
             case MediaType.TEXT:
                 text_bytes = text_content.encode("utf-8") if text_content else file_bytes

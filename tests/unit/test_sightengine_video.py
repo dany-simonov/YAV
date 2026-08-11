@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from adapters.sightengine_video import SightengineVideoAdapter
+from adapters.video_pipeline import VideoPipeline
 from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
@@ -132,8 +133,9 @@ async def test_guard_denial_prevents_outbound_http():
     client.assert_not_called()
 
 
+
 @pytest.mark.asyncio
-async def test_direct_success_does_not_call_legacy_video_pipeline():
+async def test_direct_success_routes_result():
     result = AnalysisResult(
         verdict=Verdict.FAKE,
         confidence=0.9,
@@ -141,28 +143,27 @@ async def test_direct_success_does_not_call_legacy_video_pipeline():
         explanation="safe",
         media_type=MediaType.VIDEO,
     )
-    with patch("router.media_router.SightengineVideoAdapter.analyze", new=AsyncMock(return_value=result)), patch(
-        "router.media_router.VideoPipeline.analyze", new=AsyncMock()
-    ) as legacy:
+
+    with patch(
+        "router.media_router.SightengineVideoAdapter.analyze",
+        new=AsyncMock(return_value=result),
+    ) as sightengine, patch.object(VideoPipeline, "analyze", new=AsyncMock()) as legacy_pipeline:
         routed = await MediaRouter().route(MediaType.VIDEO, VIDEO)
+
     assert routed is result
-    legacy.assert_not_awaited()
+    sightengine.assert_awaited_once_with(VIDEO)
+    legacy_pipeline.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_direct_technical_failure_uses_legacy_without_score_blending():
-    legacy_result = AnalysisResult(
-        verdict=Verdict.REAL,
-        confidence=0.8,
-        model_used=ModelUsed.SIGHTENGINE_VIDEO,
-        explanation="legacy only",
-        media_type=MediaType.VIDEO,
-    )
+async def test_direct_technical_failure_propagates():
     with patch(
         "router.media_router.SightengineVideoAdapter.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout")),
-    ), patch("router.media_router.VideoPipeline.analyze", new=AsyncMock(return_value=legacy_result)) as legacy:
-        result = await MediaRouter().route(MediaType.VIDEO, VIDEO)
-    assert result is legacy_result
-    assert result.confidence == 0.8
-    legacy.assert_awaited_once()
+        new=AsyncMock(
+            side_effect=ProviderInfrastructureError("sightengine", "timeout")
+        ),
+    ):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await MediaRouter().route(MediaType.VIDEO, VIDEO)
+
+    assert (raised.value.service, raised.value.kind) == ("sightengine", "timeout")

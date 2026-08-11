@@ -119,12 +119,12 @@ async def test_aiornot_score_threshold_policy_is_explicit_when_detected_flag_dif
 async def test_direct_sightengine_video_preserves_max_frame_probability(scores, verdict, maximum):
     body = {
         "status": "success",
-        "data": {"frames": [{"type": {"deepfake": score}} for score in scores]},
+        "data": {"frames": [{"type": {"ai_generated": score}} for score in scores]},
         "raw": "provider-internal-video-payload",
     }
     with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=_client(body)):
         result = await SightengineVideoAdapter().analyze(b"video")
-    _assert_canonical_probability(result, maximum, verdict, "sightengine", "deepfake")
+    _assert_canonical_probability(result, maximum, verdict, "sightengine", "genai")
     assert result.provider_evidence.safe_details == {
         "aggregation": "max_frame_probability",
         "frames_scored": len(scores),
@@ -170,7 +170,7 @@ async def test_existing_real_threshold_boundaries_are_unchanged(adapter, patch_p
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("score", "verdict"), [(0.75, Verdict.FAKE), (0.35, Verdict.REAL)])
 async def test_direct_video_threshold_boundaries_are_unchanged(score, verdict):
-    body = {"status": "success", "data": {"frames": [{"type": {"deepfake": score}}]}}
+    body = {"status": "success", "data": {"frames": [{"type": {"ai_generated": score}}]}}
     with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=_client(body)):
         result = await SightengineVideoAdapter().analyze(b"video")
     assert (result.confidence, result.verdict, result.ai_probability) == (score, verdict, score)

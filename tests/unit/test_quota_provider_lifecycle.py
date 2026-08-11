@@ -382,8 +382,9 @@ async def test_audio_terminal_technical_failures_refund_quota_once():
     assert store.transitions == ["refunded"]
 
 
+
 @pytest.mark.asyncio
-async def test_direct_video_success_consumes_quota_without_legacy_pipeline():
+async def test_direct_video_success_consumes_quota():
     store = _QuotaStore()
     real_route = MediaRouter.route
 
@@ -397,43 +398,23 @@ async def test_direct_video_success_consumes_quota_without_legacy_pipeline():
         explanation="safe",
         media_type=MediaType.VIDEO,
     )
-    with patch("src.main.MediaRouter.route", new=video_route), patch(
-        "router.media_router.SightengineVideoAdapter.analyze", new=AsyncMock(return_value=direct_result)
-    ), patch("router.media_router.VideoPipeline.analyze", new=AsyncMock()) as legacy:
-        await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
-    assert store.transitions == ["consumed"]
-    legacy.assert_not_awaited()
 
-
-@pytest.mark.asyncio
-async def test_direct_video_technical_failure_then_legacy_success_consumes_quota_once():
-    store = _QuotaStore()
-    real_route = MediaRouter.route
-
-    async def video_route(router, *_args, **_kwargs):
-        return await real_route(router, MediaType.VIDEO, b"validated-video")
-
-    legacy_result = AnalysisResult(
-        verdict=Verdict.UNCERTAIN,
-        confidence=0.5,
-        model_used=ModelUsed.SIGHTENGINE_VIDEO,
-        explanation="safe",
-        media_type=MediaType.VIDEO,
-    )
     with patch("src.main.MediaRouter.route", new=video_route), patch(
         "router.media_router.SightengineVideoAdapter.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout")),
-    ), patch(
-        "router.media_router.VideoPipeline.analyze", new=AsyncMock(return_value=legacy_result)
-    ) as legacy:
-        await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+        new=AsyncMock(return_value=direct_result),
+    ):
+        await _analyze(
+            TextAnalyzeRequest(text="x" * 50),
+            "jwt",
+            quota_store=store,
+            user_id="user",
+        )
 
     assert store.transitions == ["consumed"]
-    legacy.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_direct_video_and_legacy_technical_failures_refund_once():
+async def test_direct_video_technical_failure_refunds_quota_once():
     store = _QuotaStore()
     real_route = MediaRouter.route
 
@@ -442,11 +423,42 @@ async def test_direct_video_and_legacy_technical_failures_refund_once():
 
     with patch("src.main.MediaRouter.route", new=video_route), patch(
         "router.media_router.SightengineVideoAdapter.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "unavailable")),
-    ), patch(
-        "router.media_router.VideoPipeline.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("legacy", "timeout")),
+        new=AsyncMock(
+            side_effect=ProviderInfrastructureError("sightengine", "timeout")
+        ),
+    ):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await _analyze(
+                TextAnalyzeRequest(text="x" * 50),
+                "jwt",
+                quota_store=store,
+                user_id="user",
+            )
+
+    assert (raised.value.service, raised.value.kind) == ("sightengine", "timeout")
+    assert store.transitions == ["refunded"]
+
+
+@pytest.mark.asyncio
+async def test_direct_video_unavailable_refunds_once():
+    store = _QuotaStore()
+    real_route = MediaRouter.route
+
+    async def video_route(router, *_args, **_kwargs):
+        return await real_route(router, MediaType.VIDEO, b"validated-video")
+
+    with patch("src.main.MediaRouter.route", new=video_route), patch(
+        "router.media_router.SightengineVideoAdapter.analyze",
+        new=AsyncMock(
+            side_effect=ProviderInfrastructureError("sightengine", "unavailable")
+        ),
     ):
         with pytest.raises(ProviderInfrastructureError):
-            await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
+            await _analyze(
+                TextAnalyzeRequest(text="x" * 50),
+                "jwt",
+                quota_store=store,
+                user_id="user",
+            )
+
     assert store.transitions == ["refunded"]

@@ -1,4 +1,4 @@
-"""Focused tests for direct Sightengine Deepfake Video detection."""
+"""Focused tests for direct Sightengine AI-generated video detection."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from adapters.sightengine_video import SightengineVideoAdapter
+from adapters.video_pipeline import VideoPipeline
 from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
@@ -34,7 +35,7 @@ def _client(*, response=None, error=None):
 def _payload(*scores: float, **extra):
     return {
         "status": "success",
-        "data": {"frames": [{"type": {"deepfake": score}} for score in scores]},
+        "data": {"frames": [{"type": {"ai_generated": score}} for score in scores]},
         **extra,
     }
 
@@ -44,7 +45,7 @@ def _payload(*scores: float, **extra):
     ("scores", "verdict", "confidence"),
     [((0.95, 0.2), Verdict.FAKE, 0.95), ((0.1, 0.2), Verdict.REAL, 0.2), ((0.5, 0.2), Verdict.UNCERTAIN, 0.5)],
 )
-async def test_completed_video_results_use_only_direct_deepfake_scores(scores, verdict, confidence):
+async def test_completed_video_results_use_only_direct_genai_scores(scores, verdict, confidence):
     with patch(
         "adapters.sightengine_video.httpx.AsyncClient",
         return_value=_client(response=_response(200, _payload(*scores))),
@@ -57,7 +58,7 @@ async def test_completed_video_results_use_only_direct_deepfake_scores(scores, v
 
 
 @pytest.mark.asyncio
-async def test_uses_sync_endpoint_deepfake_model_and_shared_sightengine_credentials():
+async def test_uses_sync_endpoint_genai_model_and_shared_sightengine_credentials():
     client = _client(response=_response(200, _payload(0.95)))
     with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=client):
         result = await SightengineVideoAdapter().analyze(VIDEO)
@@ -65,7 +66,7 @@ async def test_uses_sync_endpoint_deepfake_model_and_shared_sightengine_credenti
     assert client.post.await_args.kwargs["data"] == {
         "api_user": "test_se_user",
         "api_secret": "test_se_secret",
-        "models": "deepfake",
+        "models": "genai",
     }
     assert client.post.await_args.kwargs["files"] == {"media": ("video.mp4", VIDEO, "video/mp4")}
     assert "test_se_secret" not in result.explanation
@@ -94,11 +95,28 @@ async def test_temporary_capacity_and_5xx_are_typed_unavailable(status):
 
 @pytest.mark.asyncio
 async def test_normal_4xx_is_not_infrastructure_failure():
-    with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=_client(response=_response(422))):
+    body = {"status": "failure", "error": {"code": "invalid_model", "message": "Unknown model"}}
+    with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=_client(response=_response(422, body))):
         with pytest.raises(ExternalAPIError) as raised:
             await SightengineVideoAdapter().analyze(VIDEO)
     assert not isinstance(raised.value, ProviderInfrastructureError)
     assert raised.value.detail == "request_error"
+    assert raised.value.status_code == 422
+    assert raised.value.provider_message == "code=invalid_model message=Unknown model"
+
+
+@pytest.mark.asyncio
+async def test_4xx_diagnostic_omits_secret_shaped_provider_message():
+    body = {
+        "error": {
+            "code": "invalid_credentials",
+            "message": "Authorization: Bearer provider-secret",
+        }
+    }
+    with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=_client(response=_response(401, body))):
+        with pytest.raises(ExternalAPIError) as raised:
+            await SightengineVideoAdapter().analyze(VIDEO)
+    assert raised.value.provider_message == "code=invalid_credentials"
 
 
 @pytest.mark.asyncio
@@ -132,8 +150,9 @@ async def test_guard_denial_prevents_outbound_http():
     client.assert_not_called()
 
 
+
 @pytest.mark.asyncio
-async def test_direct_success_does_not_call_legacy_video_pipeline():
+async def test_direct_success_routes_result():
     result = AnalysisResult(
         verdict=Verdict.FAKE,
         confidence=0.9,
@@ -141,28 +160,27 @@ async def test_direct_success_does_not_call_legacy_video_pipeline():
         explanation="safe",
         media_type=MediaType.VIDEO,
     )
-    with patch("router.media_router.SightengineVideoAdapter.analyze", new=AsyncMock(return_value=result)), patch(
-        "router.media_router.VideoPipeline.analyze", new=AsyncMock()
-    ) as legacy:
+
+    with patch(
+        "router.media_router.SightengineVideoAdapter.analyze",
+        new=AsyncMock(return_value=result),
+    ) as sightengine, patch.object(VideoPipeline, "analyze", new=AsyncMock()) as legacy_pipeline:
         routed = await MediaRouter().route(MediaType.VIDEO, VIDEO)
+
     assert routed is result
-    legacy.assert_not_awaited()
+    sightengine.assert_awaited_once_with(VIDEO)
+    legacy_pipeline.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_direct_technical_failure_uses_legacy_without_score_blending():
-    legacy_result = AnalysisResult(
-        verdict=Verdict.REAL,
-        confidence=0.8,
-        model_used=ModelUsed.SIGHTENGINE_VIDEO,
-        explanation="legacy only",
-        media_type=MediaType.VIDEO,
-    )
+async def test_direct_technical_failure_propagates():
     with patch(
         "router.media_router.SightengineVideoAdapter.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout")),
-    ), patch("router.media_router.VideoPipeline.analyze", new=AsyncMock(return_value=legacy_result)) as legacy:
-        result = await MediaRouter().route(MediaType.VIDEO, VIDEO)
-    assert result is legacy_result
-    assert result.confidence == 0.8
-    legacy.assert_awaited_once()
+        new=AsyncMock(
+            side_effect=ProviderInfrastructureError("sightengine", "timeout")
+        ),
+    ):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await MediaRouter().route(MediaType.VIDEO, VIDEO)
+
+    assert (raised.value.service, raised.value.kind) == ("sightengine", "timeout")

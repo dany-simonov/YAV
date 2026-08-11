@@ -255,6 +255,26 @@ def test_external_api_error_log_omits_provider_message_for_another_provider():
     assert "provider_message=" not in logged
 
 
+def test_sightengine_json_4xx_diagnostic_is_logged_without_credentials_or_request_data():
+    context = _context({"text": "private analysis input " * 20})
+    error = ExternalAPIError(
+        "sightengine",
+        "request_error",
+        status_code=422,
+        provider_message="code=invalid_model message=Unknown model",
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        _, status = main(context)
+    assert status == 503
+    logged = context.log.call_args.args[0]
+    assert "provider=sightengine" in logged
+    assert "status_code=422" in logged
+    assert "provider_message=code=invalid_model message=Unknown model" in logged
+    assert "private analysis input" not in logged
+
+
 def test_body_client_ip_is_rejected_before_execution():
     context = _context({"text": "x" * 50, "clientIp": "198.51.100.99"})
     with patch("src.main._execute_request", new=MagicMock()) as execute_mock:

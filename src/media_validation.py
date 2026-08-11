@@ -1,10 +1,11 @@
-"""Bounded image decoding and FFprobe-based audio/video inspection."""
+"""Bounded image decoding and FFprobe-based audio inspection."""
 
 from __future__ import annotations
 
 import json
 import math
 import subprocess
+
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Callable
@@ -21,6 +22,8 @@ MAX_IMAGE_DIMENSION = 8_192
 MAX_AUDIO_DURATION_SECONDS = 300
 MAX_AUDIO_CHANNELS = 2
 MAX_AUDIO_SAMPLE_RATE = 96_000
+# Retained for the isolated legacy VideoPipeline module; the production VIDEO
+# route does not use these limits or invoke FFprobe.
 MAX_VIDEO_DURATION_SECONDS = 60
 MAX_VIDEO_WIDTH = 1_920
 MAX_VIDEO_HEIGHT = 1_080
@@ -277,6 +280,14 @@ def validate_media_bytes(
         _diagnose(diagnostic_log, "media_validation stage=limits result=ok")
         return MediaInfo(actual, width=width, height=height)
 
+    if actual == MediaType.VIDEO:
+        # Appwrite Cloud does not ship FFmpeg.  Keep the fail-closed byte-size,
+        # structural signature, and declared-type checks above, then let the
+        # direct video provider inspect container/codec/duration details.
+        _diagnose(diagnostic_log, "media_validation stage=video_base_validation result=ok")
+        return MediaInfo(actual)
+
+    # Audio remains the only media type that uses the local FFprobe path.
     probe = _run_probe(data, diagnostic_log)
     format_data = probe.get("format")
     if not isinstance(format_data, dict):
@@ -301,12 +312,3 @@ def validate_media_bytes(
             raise SecurityValidationError("media_limits_exceeded", "Параметры аудио превышают лимит.", 422)
         _diagnose(diagnostic_log, "media_validation stage=limits result=ok")
         return MediaInfo(actual, duration=duration, channels=channels, sample_rate=sample_rate)
-
-    stream = _first_stream(probe, "video", diagnostic_log)
-    _require_codec(stream, {"h264", "hevc", "mpeg4", "mjpeg"})
-    width = _as_positive_int(stream.get("width"))
-    height = _as_positive_int(stream.get("height"))
-    if duration > MAX_VIDEO_DURATION_SECONDS or width > MAX_VIDEO_WIDTH or height > MAX_VIDEO_HEIGHT:
-        raise SecurityValidationError("media_limits_exceeded", "Параметры видео превышают лимит.", 422)
-    _diagnose(diagnostic_log, "media_validation stage=limits result=ok")
-    return MediaInfo(actual, duration=duration, width=width, height=height)

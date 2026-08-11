@@ -93,6 +93,7 @@ class AnalysisResult(BaseModel):
     ai_probability: float | None = None
     decision_confidence: float | None = None
     authenticity_index: StrictInt | None = Field(default=None, ge=0, le=100)
+    short_report: str | None = Field(default=None, max_length=600)
     provider_evidence: ProviderEvidence | None = None
     component_evidence: list[ComponentEvidence] | None = Field(default=None, max_length=2)
 

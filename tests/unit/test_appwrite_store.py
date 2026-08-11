@@ -186,6 +186,18 @@ def test_v2_evidence_is_bounded_to_versioned_curated_details():
     assert raw_marker not in json.dumps(details)
 
 
+def test_canonical_short_report_is_persisted_in_existing_details_column():
+    report = (
+        "В тексте обнаружены признаки AI-генерации: вероятность AI-генерации — 80%. "
+        "Это указывает на вероятное использование генеративной модели, но не доказывает автора текста."
+    )
+    row = map_analysis_to_check_row(
+        _canonical_result(short_report=report), "authenticated-user"
+    )
+
+    assert json.loads(row["details"])["short_report"] == report
+
+
 def test_audio_component_evidence_persists_safe_scores_without_a_universal_probability():
     result = _canonical_result(
         verdict="UNCERTAIN",

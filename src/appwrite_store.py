@@ -185,6 +185,8 @@ def _serialize_canonical_details(result: AnalysisResult) -> str:
         ]
     if evidence_details:
         details["provider_evidence_v2"] = evidence_details
+    if result.short_report is not None:
+        details["short_report"] = result.short_report
     encoded = json.dumps(details, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     if len(encoded.encode("utf-8")) > MAX_DETAILS_BYTES:
         return '{"truncated":true}'

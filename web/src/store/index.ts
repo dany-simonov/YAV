@@ -11,5 +11,8 @@ export {
   useAuthLoading, 
   useAuthActionLoading,
   useAuthError,
-  type User 
+  type User,
+  type AuthActionResult,
+  type ConfirmVerificationResult,
+  type VerificationSessionState,
 } from './authStore';

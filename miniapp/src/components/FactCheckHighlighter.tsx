@@ -1,6 +1,18 @@
 import React from 'react'
 import { HybridToken } from '../types'
 
+const safeExternalUrl = (value: unknown): string | null => {
+  if (typeof value !== 'string' || value.length > 2048) return null
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.hostname && !url.username && !url.password
+      ? url.toString()
+      : null
+  } catch {
+    return null
+  }
+}
+
 interface Props {
   tokens: HybridToken[]
 }
@@ -22,9 +34,9 @@ export const FactCheckHighlighter: React.FC<Props> = ({ tokens }) => {
                   {token.type === 'fake' ? 'Фейк' : 'Манипуляция'}
                 </div>
                 <div className="text-gray-800 mb-1">{token.details?.truth}</div>
-                {token.details?.source_url && (
+                {safeExternalUrl(token.details?.source_url) && (
                   <a
-                    href={token.details.source_url}
+                    href={safeExternalUrl(token.details?.source_url) || undefined}
                     target="_blank"
                     rel="noreferrer"
                     className="text-blue-600 underline"

@@ -9,6 +9,12 @@ import g4f
 
 from adapters.sapling import SaplingAdapter
 from core.enums import ModelUsed
+from src.provider_protection import admit_provider_operation
+from src.validation import (
+    MAX_FACT_CHECK_ITEMS,
+    bounded_provider_string,
+    safe_external_url,
+)
 
 # Strict system prompt for web-enabled fact-checking
 FACTCHECK_SYSTEM_PROMPT = (
@@ -50,6 +56,9 @@ class HybridTextAnalyzer:
                 timeout=self.FACTCHECK_TIMEOUT_S,
             )
 
+        # g4f is an external provider too: each cascade attempt must pass the
+        # request budget and the global provider-minute guard before I/O.
+        await admit_provider_operation("g4f")
         raw = await asyncio.to_thread(_run)
         content = "" if raw is None else ("".join(raw) if not isinstance(raw, str) else raw)
         ok, parsed = self._parse_json(content)
@@ -143,6 +152,36 @@ class HybridTextAnalyzer:
             tokens.append({"text": text[cursor:], "type": "normal"})
         return tokens
 
+    @staticmethod
+    def _fact_check_evidence(
+        fact_checks: list[dict[str, str]], fc_model: str, text: str, *, available: bool
+    ) -> dict[str, Any]:
+        """Create bounded persistence evidence without retaining the tokenized input."""
+        normalized_text = text.strip()
+
+        def _claim(item: dict[str, str]) -> str:
+            claim = item["exact_quote"][:240]
+            # A short Hybrid request can itself be a single quoted claim.  Its
+            # legacy response remains intact, but v2 persistence must not copy
+            # the complete user input into fact-check evidence.
+            return "Full-text claim omitted" if claim == normalized_text else claim
+
+        return {
+            "version": 2,
+            "provider": "g4f",
+            "model": fc_model,
+            "state": "completed" if available else "unavailable",
+            "findings": [
+                {
+                    "claim": _claim(item),
+                    "status": item["status"],
+                    "summary": item["truth"][:600],
+                    "source_url": item["source_url"],
+                }
+                for item in fact_checks
+            ],
+        }
+
     async def analyze(self, text: str) -> Dict[str, Any]:
         start_ts = time.monotonic()
 
@@ -162,14 +201,23 @@ class HybridTextAnalyzer:
         sapling_res = await sapling_task
 
         raw_checks = fc_parsed.get("fact_checks", []) if isinstance(fc_parsed, dict) else []
+        if not isinstance(raw_checks, list):
+            raw_checks = []
         fact_checks = []
-        for item in raw_checks:
+        for item in raw_checks[:MAX_FACT_CHECK_ITEMS]:
             if not isinstance(item, dict):
                 continue
-            source_url = item.get("source_url") or item.get("source") or ""
+            quote = bounded_provider_string(item.get("exact_quote"), 500)
+            truth = bounded_provider_string(item.get("truth"), 2_000)
+            status = bounded_provider_string(item.get("status"), 32).lower()
+            if not quote or status not in {"fake", "manipulation", "plagiarism", "ok"}:
+                continue
+            source_url = safe_external_url(item.get("source_url") or item.get("source"))
             fact_checks.append(
                 {
-                    **item,
+                    "exact_quote": quote,
+                    "truth": truth,
+                    "status": status,
                     "source_url": source_url,
                 }
             )
@@ -182,6 +230,8 @@ class HybridTextAnalyzer:
         )
 
         result = {
+            # `verdict` remains the legacy deterministic fact-check outcome;
+            # canonical AI fields below describe Sapling only.
             "verdict": verdict,
             "ai_confidence": sapling_res.confidence,
             "ai_verdict": sapling_res.verdict.value,
@@ -190,6 +240,20 @@ class HybridTextAnalyzer:
             "model_used": fc_model,
             "processing_ms": int((time.monotonic() - start_ts) * 1000),
             "model_used_enum": ModelUsed.HYBRID_G4F,
+            "semantics_version": sapling_res.semantics_version,
+            "ai_probability": sapling_res.ai_probability,
+            "decision_confidence": sapling_res.decision_confidence,
+            "authenticity_index": sapling_res.authenticity_index,
+            "provider_evidence": sapling_res.provider_evidence.model_dump(mode="json")
+            if sapling_res.provider_evidence
+            else None,
+            "fact_check_evidence": self._fact_check_evidence(
+                fact_checks,
+                fc_model,
+                text,
+                available=fc_model not in {"g4f_timeout", "g4f_unavailable"},
+            ),
+            "ai_explanation": sapling_res.explanation,
         }
         if fc_model in {"g4f_timeout", "g4f_unavailable"}:
             result["factcheck_error"] = fc_model

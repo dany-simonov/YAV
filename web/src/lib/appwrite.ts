@@ -6,19 +6,21 @@
  * @see https://appwrite.io/docs
  */
 
-import { Client, Account, Databases, Storage, Functions, type Models } from 'appwrite';
+import { Client, Account, TablesDB, Storage, Functions, type Models } from 'appwrite';
 
 // ============================================================================
 // Environment Configuration
 // ============================================================================
 
-const APPWRITE_ENDPOINT = import.meta.env.VITE_APPWRITE_ENDPOINT || 'https://sfo.cloud.appwrite.io/v1';
-const APPWRITE_PROJECT_ID = import.meta.env.VITE_APPWRITE_PROJECT_ID || '69a9d60e00230f1aceb2';
-const APPWRITE_DATABASE_ID = import.meta.env.VITE_APPWRITE_DATABASE_ID || '69af34d60006b11ddee4';
+const APPWRITE_ENDPOINT = import.meta.env.VITE_APPWRITE_ENDPOINT || 'https://fra.cloud.appwrite.io/v1';
+const APPWRITE_PROJECT_ID = import.meta.env.VITE_APPWRITE_PROJECT_ID || '6a67d79d000fcca992f3';
+const APPWRITE_DATABASE_ID = import.meta.env.VITE_APPWRITE_DATABASE_ID || 'yav';
+const APPWRITE_USERS_TABLE_ID = import.meta.env.VITE_APPWRITE_USERS_TABLE_ID || 'users';
+const APPWRITE_CHECKS_TABLE_ID = import.meta.env.VITE_APPWRITE_CHECKS_TABLE_ID || 'checks';
 const APPWRITE_UPLOADS_BUCKET_ID =
-  import.meta.env.VITE_APPWRITE_UPLOADS_BUCKET_ID || '69af36f900139c5afe5b';
+  import.meta.env.VITE_APPWRITE_UPLOADS_BUCKET_ID || 'uploads';
 const APPWRITE_ANALYZE_FUNCTION_ID =
-  import.meta.env.VITE_APPWRITE_ANALYZE_FUNCTION_ID || '69af3c9100376fedb9fd';
+  import.meta.env.VITE_APPWRITE_ANALYZE_FUNCTION_ID || 'analyze';
 
 // ============================================================================
 // Client Initialization
@@ -38,8 +40,8 @@ const client = new Client()
 /** Account service for auth operations */
 export const account = new Account(client);
 
-/** Databases service for data operations */
-export const databases = new Databases(client);
+/** TablesDB service for server-backed profiles and check history */
+export const tablesDB = new TablesDB(client);
 
 /** Storage service for file operations */
 export const storage = new Storage(client);
@@ -55,13 +57,17 @@ export const functions = new Functions(client);
  * Appwrite resource identifiers
  */
 export const APPWRITE_CONFIG = {
+  /** Appwrite API endpoint and project */
+  endpoint: APPWRITE_ENDPOINT,
+  projectId: APPWRITE_PROJECT_ID,
+
   /** Main database ID */
   databaseId: APPWRITE_DATABASE_ID,
   
-  /** Collections */
-  collections: {
-    checks: 'checks',
-    users: 'users',
+  /** Tables */
+  tables: {
+    checks: APPWRITE_CHECKS_TABLE_ID,
+    users: APPWRITE_USERS_TABLE_ID,
   },
   
   /** Storage buckets */

@@ -4,7 +4,7 @@
  * Страница истории проверок пользователя.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   Search, 
@@ -15,11 +15,16 @@ import {
   FileText,
   ChevronRight,
   Clock,
-  Plus
+  Plus,
+  Trash2
 } from 'lucide-react';
 import { Card, CardHeader, Button, Input } from '../../components/ui';
 import { cn } from '../../lib/utils';
-import { loadChecksHistory } from '../../lib/checkHistory';
+import {
+  clearChecksHistory,
+  deleteCheckFromHistory,
+  loadChecksHistory,
+} from '../../lib/checkHistory';
 import { useAuthStore } from '../../store';
 import type { Check, Verdict, MediaType } from '../../types';
 
@@ -39,12 +44,58 @@ const mediaTypeConfig: Record<MediaType, { icon: React.ReactNode; label: string 
 export function HistoryPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<MediaType | 'all'>('all');
+  const [checks, setChecks] = useState<Check[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const { user } = useAuthStore();
 
-  const checks = useMemo<Check[]>(() => {
-    if (!user?.$id) return [];
-    return loadChecksHistory(user.$id);
+  useEffect(() => {
+    let cancelled = false;
+    if (!user?.$id) {
+      setChecks([]);
+      setLoading(false);
+      return undefined;
+    }
+    setLoading(true);
+    setHistoryError(null);
+    loadChecksHistory(user.$id)
+      .then((items) => {
+        if (!cancelled) setChecks(items);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setHistoryError(error instanceof Error ? error.message : 'Не удалось загрузить историю');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [user?.$id]);
+
+  const handleDelete = async (checkId: string) => {
+    if (!user?.$id) return;
+    setHistoryError(null);
+    try {
+      await deleteCheckFromHistory(user.$id, checkId);
+      setChecks((current) => current.filter((check) => check.id !== checkId));
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : 'Не удалось удалить проверку');
+    }
+  };
+
+  const handleClear = async () => {
+    if (!user?.$id) return;
+    setHistoryError(null);
+    try {
+      await clearChecksHistory(user.$id);
+      setChecks([]);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : 'Не удалось очистить историю');
+    }
+  };
 
   // Filter checks
   const filteredChecks = checks.filter((check) => {
@@ -64,12 +115,21 @@ export function HistoryPage() {
           </p>
         </div>
         
-        <Link to="/dashboard/check">
-          <Button className="text-white" leftIcon={<Plus className="w-4 h-4" />}>
-            Новая проверка
-          </Button>
-        </Link>
+        <div className="flex gap-2">
+          {checks.length > 0 && (
+            <Button variant="secondary" onClick={handleClear} leftIcon={<Trash2 className="w-4 h-4" />}>
+              Очистить
+            </Button>
+          )}
+          <Link to="/dashboard/check">
+            <Button className="text-white" leftIcon={<Plus className="w-4 h-4" />}>
+              Новая проверка
+            </Button>
+          </Link>
+        </div>
       </div>
+
+      {historyError && <p className="text-sm text-mv-fake">{historyError}</p>}
 
       {/* Filters */}
       <Card padding="sm" className="flex flex-col sm:flex-row gap-4">
@@ -103,7 +163,9 @@ export function HistoryPage() {
       </Card>
 
       {/* Results */}
-      {filteredChecks.length > 0 ? (
+      {loading ? (
+        <Card className="text-center py-16">Загрузка истории...</Card>
+      ) : filteredChecks.length > 0 ? (
         <Card padding="none">
           <div className="divide-y divide-mv-border">
             {filteredChecks.map((check) => {
@@ -149,6 +211,15 @@ export function HistoryPage() {
                     </div>
                     <div className="text-xs text-mv-text-muted">уверенность</div>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(check.id)}
+                    className="p-2 text-mv-text-muted hover:text-mv-fake"
+                    aria-label="Удалить проверку"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                   
                   <ChevronRight className="w-5 h-5 text-mv-text-muted" />
                 </div>

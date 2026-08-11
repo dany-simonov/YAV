@@ -18,10 +18,10 @@ import {
   ApiSettingsPage,
   Research,
   ArcticResearch,
-  VerifyEmailPage,
   EmailVerificationPendingPage
 } from './pages';
 import { useAuthStore } from './store';
+import { VerifyEmailCallbackPage } from './pages/auth/VerifyEmailCallbackPage';
 
 function AppContent() {
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -117,8 +117,9 @@ function AppContent() {
       />
 
       {/* Appwrite email verification callback and resend screen */}
-      <Route path="/verify-email" element={<VerifyEmailPage />} />
+      <Route path="/verify-email" element={<EmailVerificationPendingPage />} />
       <Route path="/verify-email/pending" element={<EmailVerificationPendingPage />} />
+      <Route path="/verify-email/callback" element={<VerifyEmailCallbackPage />} />
 
       {/* Protected Dashboard Routes */}
       <Route
@@ -130,8 +131,8 @@ function AppContent() {
         }
       >
         <Route index element={<DashboardOverview />} />
-        <Route path="check" element={<NewCheckPage />} />
-        <Route path="big-text" element={<BigTextCheckPage />} />
+        <Route path="check" element={<VerifiedRoute><NewCheckPage /></VerifiedRoute>} />
+        <Route path="big-text" element={<VerifiedRoute><BigTextCheckPage /></VerifiedRoute>} />
         <Route path="history" element={<VerifiedRoute><HistoryPage /></VerifiedRoute>} />
         <Route path="api" element={<ApiSettingsPage />} />
       </Route>

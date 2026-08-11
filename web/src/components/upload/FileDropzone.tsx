@@ -21,9 +21,16 @@ interface FileDropzoneProps {
 }
 
 const DEFAULT_ACCEPT = {
-  'image/*': ['.jpg', '.jpeg', '.png', '.webp', '.gif'],
-  'audio/*': ['.mp3', '.wav', '.ogg', '.m4a', '.flac'],
-  'video/*': ['.mp4', '.webm', '.mov', '.avi'],
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/png': ['.png'],
+  'image/webp': ['.webp'],
+  'audio/mpeg': ['.mp3'],
+  'audio/wav': ['.wav'],
+  'audio/ogg': ['.ogg'],
+  'audio/mp4': ['.m4a'],
+  'video/mp4': ['.mp4'],
+  'video/avi': ['.avi'],
+  'video/quicktime': ['.mov'],
 };
 
 const DEFAULT_MAX_SIZE = 20 * 1024 * 1024; // 20MB

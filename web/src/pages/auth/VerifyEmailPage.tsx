@@ -21,7 +21,7 @@ function VerificationShell({ children }: { children: React.ReactNode }) {
 }
 
 export function EmailVerificationPendingPage() {
-  const { user, sendEmailVerification, isActionLoading, logout } = useAuthStore();
+  const { user, resendVerification, isActionLoading, logout } = useAuthStore();
   const navigate = useNavigate();
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +29,7 @@ export function EmailVerificationPendingPage() {
   const resend = async () => {
     setMessage(null);
     setError(null);
-    const result = await sendEmailVerification();
+    const result = await resendVerification();
     if (result.success) setMessage('Новое письмо отправлено. Проверьте папку «Спам», если его нет во входящих.');
     else setError(result.error ?? 'Не удалось отправить письмо');
   };
@@ -106,7 +106,7 @@ function readVerificationParams(locationSearch: string) {
 
 export function VerifyEmailPage() {
   const location = useLocation();
-  const { confirmEmailVerification } = useAuthStore();
+  const { confirmVerification } = useAuthStore();
   const started = useRef(false);
   const [state, setState] = useState<'loading' | 'success' | 'error'>('loading');
   const [error, setError] = useState('');
@@ -122,14 +122,14 @@ export function VerifyEmailPage() {
       return;
     }
 
-    void confirmEmailVerification(params.userId, params.secret).then((result) => {
+    void confirmVerification(params.userId, params.secret).then((result) => {
       if (result.success) setState('success');
       else {
         setError(result.error ?? 'Ссылка недействительна или уже была использована.');
         setState('error');
       }
     });
-  }, [confirmEmailVerification, location.search]);
+  }, [confirmVerification, location.search]);
 
   return (
     <VerificationShell>

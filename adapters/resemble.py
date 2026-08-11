@@ -6,30 +6,42 @@ import subprocess
 import httpx
 
 from adapters.base import BaseAdapter
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, ProviderEvidence
 from core.config import settings
-from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ExternalAPIError
+from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
+from core.result_normalization import canonicalize_result
+from src.validation import normalize_confidence
+from src.provider_protection import admit_provider_operation
 
 # Improved type safety
 # Thread-safe operation
 # Validated input parameters
 logger = logging.getLogger(__name__)
+MAX_CONVERTED_WAV_BYTES = 120 * 1024 * 1024
 
 
 def _convert_ogg_to_wav(ogg_bytes: bytes) -> bytes:
     """Convert OGG bytes to WAV bytes using ffmpeg (in-memory, no disk I/O)."""
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-i", "pipe:0", "-f", "wav", "-acodec", "pcm_s16le", "pipe:1"],
+            [
+                "ffmpeg", "-v", "error", "-nostdin", "-t", "300", "-i", "pipe:0",
+                "-ac", "2", "-ar", "96000", "-f", "wav", "-acodec", "pcm_s16le",
+                "-fs", str(MAX_CONVERTED_WAV_BYTES), "pipe:1",
+            ],
             input=ogg_bytes,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
         )
-    except FileNotFoundError:
-        raise ExternalAPIError("ffmpeg", "FFmpeg не установлен. Установите с https://ffmpeg.org/download.html")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        raise ExternalAPIError("ffmpeg", "audio_conversion_failed")
     
     if proc.returncode != 0:
-        logger.error("ffmpeg OGG->WAV conversion failed: %s", proc.stderr.decode(errors="replace"))
+        raise ExternalAPIError("resemble", "audio_conversion_failed")
+    if len(proc.stdout) > MAX_CONVERTED_WAV_BYTES:
         raise ExternalAPIError("resemble", "audio_conversion_failed")
     return proc.stdout
 
@@ -44,29 +56,34 @@ class ResembleAdapter(BaseAdapter):
             wav_data = _convert_ogg_to_wav(data)
 
         try:
+            await admit_provider_operation("resemble")
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(
                     self.URL,
                     headers={"Authorization": f"Token {settings.resemble_api_key}"},
                     files={"audio_file": ("audio.wav", wav_data, "audio/wav")},
                 )
-        except httpx.TimeoutException:
-            return self._build_uncertain(
-                "Resemble Detect: таймаут запроса.",
-                ModelUsed.RESEMBLE,
-                MediaType.AUDIO,
-            )
+        except httpx.TimeoutException as exc:
+            raise ProviderInfrastructureError("resemble", "timeout") from exc
+        except httpx.TransportError as exc:
+            raise ProviderInfrastructureError("resemble", "transport") from exc
 
         if response.status_code == 429:
             raise ExternalAPIError("resemble", "rate_limit")
         if response.status_code >= 500:
-            raise ExternalAPIError("resemble", "server_error")
-
-        body = response.json()
-        if not body.get("success", False):
-            raise ExternalAPIError("resemble", "API returned success=false")
-
-        score = body.get("score", 0.5)
+            raise ProviderInfrastructureError("resemble", "unavailable")
+        if response.status_code >= 400:
+            raise ExternalAPIError("resemble", "request_error")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ProviderInfrastructureError("resemble", "invalid_response") from exc
+        if not isinstance(body, dict) or body.get("success") is not True:
+            raise ProviderInfrastructureError("resemble", "invalid_response")
+        try:
+            score = normalize_confidence(body.get("score"))
+        except ValueError as exc:
+            raise ProviderInfrastructureError("resemble", "invalid_response") from exc
 
         if score >= 0.75:
             verdict = Verdict.FAKE
@@ -75,12 +92,22 @@ class ResembleAdapter(BaseAdapter):
         else:
             verdict = Verdict.UNCERTAIN
 
-        explanation = f"Resemble Detect: вероятность синтетической речи {round(score * 100)}%"
+        explanation = f"Resemble Detect: оценка сигнала синтетической речи {round(score * 100)}%"
 
-        return AnalysisResult(
-            verdict=verdict,
-            confidence=round(score, 4),
-            model_used=ModelUsed.RESEMBLE,
-            explanation=explanation,
-            media_type=MediaType.AUDIO,
+        return canonicalize_result(
+            AnalysisResult(
+                verdict=verdict,
+                confidence=round(score, 4),
+                model_used=ModelUsed.RESEMBLE,
+                explanation=explanation,
+                media_type=MediaType.AUDIO,
+            ),
+            ProviderEvidence(
+                provider="resemble",
+                model="detect_v1",
+                raw_score=score,
+                score_kind=ScoreKind.AGGREGATED_SIGNAL,
+                predicted_label=verdict.value,
+                safe_details={"score_field": "score"},
+            ),
         )

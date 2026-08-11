@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Clock, FileText, ShieldCheck, Sparkles } from 'lucide-react';
 
 import { Card, CardHeader, Button, Alert } from '../../components/ui';
 import { TextInput } from '../../components/upload';
 import { functions, APPWRITE_CONFIG } from '../../lib/appwrite';
+import {
+  AnalysisExecutionError,
+  analysisErrorMessageFromUnknown,
+  parseAnalysisBackendError,
+} from '../../lib/analysisError';
 import { cn } from '../../lib/utils';
+import { safeExternalUrl } from '../../lib/safeExternalUrl';
 import { useAuthStore } from '../../store';
 import type { HybridTextResult, HybridToken } from '../../types';
 
@@ -51,6 +58,7 @@ const splitIntoWordSpans = (text: string, className: string, keyPrefix: string) 
 };
 
 export function BigTextCheckPage() {
+  const navigate = useNavigate();
   const { user } = useAuthStore();
 
   const [text, setText] = useState('');
@@ -98,6 +106,7 @@ export function BigTextCheckPage() {
         firstName: user.name.split(' ')[0] || '',
         mediaType: 'text',
         mode: 'hybrid_text',
+        sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
       };
 
       const execution = await functions.createExecution(
@@ -107,7 +116,6 @@ export function BigTextCheckPage() {
       );
 
       let responseBody = execution.responseBody || '';
-      let lastStatus = execution.status || '';
       let responseStatusCode = execution.responseStatusCode;
 
       if (!responseBody && execution.$id) {
@@ -118,37 +126,37 @@ export function BigTextCheckPage() {
             APPWRITE_CONFIG.functions.analyze,
             execution.$id
           );
-          lastStatus = refreshed.status || '';
           responseStatusCode = refreshed.responseStatusCode;
           if (refreshed.responseBody) {
             responseBody = refreshed.responseBody;
             break;
           }
-          if (lastStatus && lastStatus !== 'processing') {
+          if (refreshed.status && refreshed.status !== 'processing') {
             break;
           }
         }
       }
 
       if (!responseBody) {
-        if (lastStatus && lastStatus !== 'processing') {
-          throw new Error(`Функция завершилась со статусом ${lastStatus}. Проверьте логи Appwrite Function.`);
-        }
-        throw new Error('Функция не вернула ответ. Проверьте логи Appwrite Function.');
+        throw new AnalysisExecutionError(null);
       }
 
       const data = JSON.parse(responseBody);
-      if (responseStatusCode && responseStatusCode >= 400) {
-        throw new Error(data?.detail || 'Ошибка выполнения функции анализа.');
+      const backendError = parseAnalysisBackendError(data);
+      if (backendError?.code === 'email_not_verified') {
+        navigate('/verify-email', {
+          replace: true,
+          state: { notice: 'Подтвердите email перед запуском анализа.' },
+        });
+        return;
       }
-      if (data?.detail) {
-        throw new Error(data.detail);
+      if (backendError || (responseStatusCode && responseStatusCode >= 400)) {
+        throw new AnalysisExecutionError(backendError);
       }
 
       setResult(data as HybridTextResult);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Произошла ошибка при проверке.';
-      setError(message);
+      setError(analysisErrorMessageFromUnknown(err));
     } finally {
       setIsAnalyzing(false);
     }
@@ -294,14 +302,14 @@ export function BigTextCheckPage() {
                   <div key={`${item.exact_quote}-${index}`} className="p-4 rounded-lg bg-mv-surface-2 border border-mv-border">
                     <p className="text-sm font-medium text-mv-text mb-2">{item.exact_quote}</p>
                     <p className="text-sm text-mv-text-secondary mb-2">{item.truth}</p>
-                    {item.source_url && (
+                    {safeExternalUrl(item.source_url) && (
                       <a
-                        href={item.source_url}
+                        href={safeExternalUrl(item.source_url) || undefined}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-xs text-mv-accent hover:underline"
                       >
-                        {item.source_url}
+                        {safeExternalUrl(item.source_url)}
                       </a>
                     )}
                   </div>

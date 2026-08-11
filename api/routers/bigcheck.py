@@ -1,5 +1,6 @@
 """POST /bigcheck — multi-file cross-analysis endpoint."""
 
+import asyncio
 import logging
 import time
 
@@ -11,12 +12,22 @@ from core.config import settings
 from core.enums import MediaType, Verdict
 from core.exceptions import ExternalAPIError, UnsupportedMediaType
 from router.media_router import MediaRouter
+from src.media_validation import validate_media_bytes
+from src.validation import SecurityValidationError, validate_request_payload
 
 # Following best practices
 # Optimized for async execution
 router = APIRouter()
 logger = logging.getLogger(__name__)
 media_router = MediaRouter()
+
+
+def _safe_display_filename(value: str | None) -> str:
+    if not isinstance(value, str) or not value or len(value) > 255:
+        return "file"
+    if any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in value):
+        return "file"
+    return value
 
 
 class BigCheckFileResult(BaseModel):
@@ -45,10 +56,11 @@ class BigCheckResponse(BaseModel):
 
 def _cross_analysis(results: list[AnalysisResult]) -> tuple[Verdict, float, str]:
     """
-    Cross-analysis logic:
-    - fake_count / total >= 0.5 → FAKE
-    - real_count / total >= 0.7 → REAL
-    - else → UNCERTAIN
+    Determine a cross-media verdict without combining incompatible scores.
+
+    A legacy ``overall_confidence`` field remains required by current
+    consumers.  It is a neutral unknown sentinel here, never a synthesized
+    provider probability or authenticity score.
 
     Returns (verdict, confidence, summary).
     """
@@ -60,25 +72,20 @@ def _cross_analysis(results: list[AnalysisResult]) -> tuple[Verdict, float, str]
     real_count = sum(1 for r in results if r.verdict == Verdict.REAL)
     uncertain_count = sum(1 for r in results if r.verdict == Verdict.UNCERTAIN)
 
-    avg_confidence = sum(r.confidence for r in results) / total
-
-    if fake_count / total >= 0.5:
+    if fake_count:
         verdict = Verdict.FAKE
-        confidence = avg_confidence
         summary = (
-            f"Кросс-анализ {total} файлов: {fake_count} из {total} определены как сгенерированные ИИ. "
-            f"Вероятность подделки высокая."
+            f"Кросс-анализ {total} файлов: найден как минимум один компонент с решающим "
+            f"вердиктом о синтетическом происхождении ({fake_count})."
         )
-    elif real_count / total >= 0.7:
+    elif real_count == total:
         verdict = Verdict.REAL
-        confidence = avg_confidence
         summary = (
-            f"Кросс-анализ {total} файлов: {real_count} из {total} определены как подлинные. "
-            f"Контент с высокой вероятностью создан человеком."
+            f"Кросс-анализ {total} файлов: все {real_count} завершённые компоненты "
+            f"получили решающий вердикт о подлинности."
         )
     else:
         verdict = Verdict.UNCERTAIN
-        confidence = avg_confidence
         parts = []
         if real_count > 0:
             parts.append(f"{real_count} подлинных")
@@ -91,7 +98,7 @@ def _cross_analysis(results: list[AnalysisResult]) -> tuple[Verdict, float, str]
             f"Однозначный вердикт вынести невозможно."
         )
 
-    return verdict, round(confidence, 4), summary
+    return verdict, 0.5, summary
 
 
 @router.post("", response_model=BigCheckResponse)
@@ -124,18 +131,30 @@ async def bigcheck(
     total_start = time.monotonic()
 
     for upload_file in files:
-        file_bytes = await upload_file.read()
-        if len(file_bytes) == 0:
-            continue
+        filename = _safe_display_filename(upload_file.filename)
+        file_bytes = await upload_file.read(20 * 1024 * 1024 + 1)
 
         try:
-            media_type = media_router.detect_type(
-                upload_file.content_type, upload_file.filename, ""
+            expected = media_router.detect_type(upload_file.content_type, upload_file.filename, "")
+            media_info = await asyncio.to_thread(validate_media_bytes, file_bytes, expected)
+            media_type = media_info.media_type
+        except SecurityValidationError as exc:
+            file_results.append(
+                BigCheckFileResult(
+                    filename=filename,
+                    media_type="unknown",
+                    verdict="UNCERTAIN",
+                    confidence=0.0,
+                    model_used="fallback_uncertain",
+                    explanation=exc.detail,
+                    processing_ms=0,
+                )
             )
+            continue
         except UnsupportedMediaType:
             file_results.append(
                 BigCheckFileResult(
-                    filename=upload_file.filename or "unknown",
+                    filename=filename,
                     media_type="unknown",
                     verdict="UNCERTAIN",
                     confidence=0.0,
@@ -149,16 +168,16 @@ async def bigcheck(
         start_time = time.monotonic()
         try:
             result = await media_router.route(media_type, file_bytes, "")
-        except (ExternalAPIError, Exception) as exc:
-            logger.error("BigCheck file error (%s): %s", upload_file.filename, exc)
+        except (ExternalAPIError, Exception):
+            logger.error("BigCheck file analysis failed")
             file_results.append(
                 BigCheckFileResult(
-                    filename=upload_file.filename or "unknown",
+                    filename=filename,
                     media_type=media_type.value,
                     verdict="UNCERTAIN",
                     confidence=0.0,
                     model_used="fallback_uncertain",
-                    explanation=f"Ошибка анализа: {exc}",
+                    explanation="Сервис анализа временно недоступен.",
                     processing_ms=0,
                 )
             )
@@ -170,7 +189,7 @@ async def bigcheck(
         individual_results.append(result)
         file_results.append(
             BigCheckFileResult(
-                filename=upload_file.filename or "file",
+                filename=filename,
                 media_type=result.media_type.value,
                 verdict=result.verdict.value,
                 confidence=result.confidence,
@@ -184,6 +203,7 @@ async def bigcheck(
     if text_content and text_content.strip():
         start_time = time.monotonic()
         try:
+            validate_request_payload({"text": text_content})
             text_result = await media_router.route(
                 MediaType.TEXT, b"", text_content
             )
@@ -202,8 +222,8 @@ async def bigcheck(
                     processing_ms=elapsed_ms,
                 )
             )
-        except Exception as exc:
-            logger.error("BigCheck text error: %s", exc)
+        except Exception:
+            logger.error("BigCheck text analysis failed")
             file_results.append(
                 BigCheckFileResult(
                     filename="text_input",
@@ -211,7 +231,7 @@ async def bigcheck(
                     verdict="UNCERTAIN",
                     confidence=0.0,
                     model_used="fallback_uncertain",
-                    explanation=f"Ошибка анализа текста: {exc}",
+                    explanation="Сервис анализа временно недоступен.",
                     processing_ms=0,
                 )
             )
@@ -219,11 +239,9 @@ async def bigcheck(
     # 5. Cross-analysis
     overall_verdict, overall_confidence, summary = _cross_analysis(individual_results)
 
-    # Calculate authenticity index
-    if overall_verdict == Verdict.FAKE:
-        authenticity_index = round((1 - overall_confidence) * 100)
-    else:
-        authenticity_index = round(overall_confidence * 100)
+    # This legacy field has no universal meaning across mixed score kinds.
+    # Keep its numeric API shape with the same neutral unknown sentinel.
+    authenticity_index = 50
 
     total_ms = int((time.monotonic() - total_start) * 1000)
 

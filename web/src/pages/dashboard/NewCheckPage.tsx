@@ -5,10 +5,9 @@
  */
 
 import { useState, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { AppwriteException } from 'appwrite';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Send, Loader2
+  FileImage, FileText, Send, Loader2
 } from 'lucide-react';
 
 import { Card, Button, Alert } from '../../components/ui';
@@ -16,21 +15,27 @@ import { FileDropzone, TextInput } from '../../components/upload';
 import { CheckResultCard } from '../../components/CheckResultCard';
 import { cn } from '../../lib/utils';
 import { functions, storage, ID, APPWRITE_CONFIG } from '../../lib/appwrite';
-import { saveCheckToHistory } from '../../lib/checkHistory';
+import {
+  AnalysisExecutionError,
+  analysisErrorMessageFromUnknown,
+  parseAnalysisBackendError,
+} from '../../lib/analysisError';
 import { useAuthStore } from '../../store';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 
 interface Tab {
   id: TabType;
   label: string;
+  icon: React.ReactNode;
 }
 
 const tabs: Tab[] = [
-  { id: 'media', label: 'Файл' },
-  { id: 'text', label: 'Текст' },
+  { id: 'media', label: 'Файл', icon: <FileImage className="w-4 h-4" /> },
+  { id: 'text', label: 'Текст', icon: <FileText className="w-4 h-4" /> },
 ];
 
 export function NewCheckPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as TabType) || 'media';
   
@@ -78,26 +83,6 @@ export function NewCheckPage() {
     };
   };
 
-  const mapAnalyzeError = (err: unknown): string => {
-    if (err instanceof AppwriteException) {
-      if (err.code === 401) return 'Нет доступа к функции анализа. Выполните вход снова.';
-      if (err.code === 404) {
-        const type = (err.type || '').toLowerCase();
-        if (type.includes('bucket')) {
-          return `Bucket не найден: ${APPWRITE_CONFIG.buckets.uploads}. Проверьте Storage -> Buckets в Appwrite.`;
-        }
-        if (type.includes('function')) {
-          return `Function не найдена: ${APPWRITE_CONFIG.functions.analyze}. Проверьте Functions в Appwrite.`;
-        }
-        return 'Ресурс не найден в Appwrite (function или bucket).';
-      }
-      if (err.code === 429) return 'Слишком много запросов. Подождите и повторите.';
-      return err.message || 'Ошибка Appwrite при анализе.';
-    }
-    if (err instanceof Error) return err.message;
-    return 'Произошла неизвестная ошибка анализа.';
-  };
-
   const resetState = () => {
     setError(null);
     setResult(null);
@@ -134,7 +119,7 @@ export function NewCheckPage() {
 
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
-    : text.length >= 50;
+    : text.length >= 50 && text.length <= 10000;
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;
@@ -170,6 +155,7 @@ export function NewCheckPage() {
           username: user.name,
           firstName: user.name.split(' ')[0] || '',
           mediaType,
+          sourceLabel: fileToUpload.name,
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else if (activeTab === 'text') {
@@ -180,6 +166,7 @@ export function NewCheckPage() {
           username: user.name,
           firstName: user.name.split(' ')[0] || '',
           mediaType,
+          sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else {
@@ -191,21 +178,27 @@ export function NewCheckPage() {
       }
 
       const resultData = JSON.parse(execution.responseBody);
-      if (resultData.detail) {
-        throw new Error(resultData.detail);
+      const backendError = parseAnalysisBackendError(resultData);
+      if (backendError?.code === 'email_not_verified') {
+        if (uploadedFileId) {
+          try {
+            await storage.deleteFile(APPWRITE_CONFIG.buckets.uploads, uploadedFileId);
+          } catch {
+            // Best effort cleanup before leaving the page.
+          }
+        }
+        navigate('/verify-email', {
+          replace: true,
+          state: { notice: 'Подтвердите email перед запуском анализа.' },
+        });
+        return;
+      }
+      if (backendError || execution.responseStatusCode >= 400) {
+        throw new AnalysisExecutionError(backendError);
       }
 
       const normalizedResult = normalizeFunctionResult(resultData, mediaType);
       setResult(normalizedResult);
-
-      // Personal history is available only after Appwrite confirms the email.
-      if (user?.$id && user.emailVerification) {
-        const sourceLabel =
-          activeTab === 'media' && files[0]?.file?.name
-            ? files[0].file.name
-            : text.slice(0, 120);
-        saveCheckToHistory(user.$id, normalizedResult, mediaType, sourceLabel);
-      }
 
       if (activeTab === 'media' && files.length > 0) {
         setFileStatus(files[0].id, 'complete', 100);
@@ -221,7 +214,7 @@ export function NewCheckPage() {
       }
 
     } catch (e) {
-      const message = mapAnalyzeError(e);
+      const message = analysisErrorMessageFromUnknown(e);
       setError(message);
       if (activeTab === 'media' && files.length > 0) {
         setFileStatus(files[0].id, 'error', 0, message);
@@ -232,31 +225,33 @@ export function NewCheckPage() {
   };
 
   return (
-    <div className="max-w-5xl space-y-8 pt-6 lg:pt-12">
+    <div className="max-w-4xl space-y-7 pt-4 lg:pt-8">
       <div>
         <p className="eyebrow mb-4">Рабочая область</p>
-        <h1 className="text-4xl lg:text-[46px] leading-none tracking-[-.045em] font-semibold text-mv-text">Новая проверка</h1>
-        <p className="mt-5 text-[17px] text-mv-text-secondary">Выберите материал. Максимальный размер файла в текущем продукте — 20 МБ.</p>
+        <h1 className="text-4xl lg:text-[42px] leading-none tracking-[-.045em] font-semibold text-mv-text">Новая проверка</h1>
+        <p className="mt-4 text-mv-text-secondary">Выберите материал. Максимальный размер файла в текущем продукте — 20 МБ.</p>
       </div>
 
-      <Card padding="none" variant="elevated" className="overflow-hidden !rounded-[20px] !p-6 sm:!p-8 shadow-[0_2px_3px_rgba(0,0,0,.04),0_24px_58px_rgba(0,0,0,.09)]">
-        <div className="flex w-fit p-1 bg-[#f5f5f3] border border-black/[.06] rounded-[12px] shadow-[0_4px_12px_rgba(0,0,0,.08)] mb-7">
+      <Card padding="none" variant="elevated" className="overflow-hidden !rounded-[20px]">
+        <div className="flex px-4 pt-3 border-b border-mv-border">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => handleTabChange(tab.id)}
               className={cn(
-                'flex items-center gap-2 px-5 py-3 rounded-[9px] text-sm font-medium transition-all relative',
-                activeTab === tab.id ? 'text-black bg-white shadow-[0_1px_3px_rgba(0,0,0,.12)]' : 'text-mv-text-secondary hover:text-mv-text',
+                'flex items-center gap-2 px-5 py-3 text-sm font-medium transition-colors relative',
+                activeTab === tab.id ? 'text-black' : 'text-mv-text-secondary hover:text-mv-text',
                 isAnalyzing && 'pointer-events-none opacity-50'
               )}
             >
+              {tab.icon}
               {tab.label}
+              {activeTab === tab.id && <div className="absolute bottom-0 left-3 right-3 h-px bg-black" />}
             </button>
           ))}
         </div>
 
-        <div>
+        <div className="p-4 sm:p-6">
           {activeTab === 'media' ? (
             <FileDropzone
               files={files}
@@ -270,7 +265,7 @@ export function NewCheckPage() {
           )}
         </div>
 
-        <div className="pt-7 flex items-center justify-between">
+        <div className="px-6 py-4 bg-[#fafaf9] border-t border-mv-border flex items-center justify-between">
           <p className="text-sm text-mv-text-muted">
             {activeTab === 'media' ? `${files.length} файл(ов) выбрано` : `${text.length} символов`}
           </p>

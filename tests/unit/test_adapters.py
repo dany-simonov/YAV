@@ -1,12 +1,14 @@
 """Unit tests for all adapters — mock httpx, no real API calls."""
 
+import json
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from core.enums import ModelUsed, Verdict
-from core.exceptions import ExternalAPIError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,6 +33,22 @@ def _mock_client(response_body: object, status_code: int = 200) -> AsyncMock:
 
 
 class TestSightengineAdapter:
+    @pytest.mark.asyncio
+    async def test_uses_genai_multipart_request_without_exposing_credentials(self):
+        from adapters.sightengine import SightengineAdapter
+
+        client = _mock_client({"status": "success", "type": {"ai_generated": 0.95}})
+        with patch("adapters.sightengine.httpx.AsyncClient", return_value=client):
+            result = await SightengineAdapter().analyze(b"image_bytes")
+        assert client.post.await_args.args[0] == SightengineAdapter.URL
+        assert client.post.await_args.kwargs["data"] == {
+            "api_user": "test_se_user",
+            "api_secret": "test_se_secret",
+            "models": "genai",
+        }
+        assert client.post.await_args.kwargs["files"] == {"media": ("image.jpg", b"image_bytes", "image/jpeg")}
+        assert "test_se_secret" not in result.explanation
+
     @pytest.mark.asyncio
     async def test_fake_verdict(self):
         from adapters.sightengine import SightengineAdapter
@@ -65,7 +83,7 @@ class TestSightengineAdapter:
         assert result.verdict == Verdict.UNCERTAIN
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_uncertain(self):
+    async def test_timeout_raises_typed_infrastructure_error(self):
         from adapters.sightengine import SightengineAdapter
 
         mock_instance = AsyncMock()
@@ -74,8 +92,9 @@ class TestSightengineAdapter:
         mock_instance.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_instance):
-            result = await SightengineAdapter().analyze(b"image_bytes")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await SightengineAdapter().analyze(b"image_bytes")
+        assert raised.value.kind == "timeout"
 
     @pytest.mark.asyncio
     async def test_rate_limit_raises_external_api_error(self):
@@ -86,6 +105,36 @@ class TestSightengineAdapter:
                 await SightengineAdapter().analyze(b"image_bytes")
         assert exc_info.value.service == "sightengine"
         assert exc_info.value.detail == "rate_limit"
+
+    @pytest.mark.asyncio
+    async def test_normal_4xx_is_not_typed_as_infrastructure_failure(self):
+        from adapters.sightengine import SightengineAdapter
+
+        with patch("adapters.sightengine.httpx.AsyncClient", return_value=_mock_client({}, status_code=422)):
+            with pytest.raises(ExternalAPIError) as raised:
+                await SightengineAdapter().analyze(b"image_bytes")
+        assert not isinstance(raised.value, ProviderInfrastructureError)
+        assert raised.value.detail == "request_error"
+
+    @pytest.mark.asyncio
+    async def test_provider_guard_denial_prevents_sightengine_http(self):
+        from adapters.sightengine import SightengineAdapter
+        from src.provider_protection import begin_provider_budget, end_provider_budget
+        from src.rate_limit import RateLimitError
+
+        async def deny(provider: str) -> None:
+            assert provider == "sightengine"
+            raise RateLimitError("provider_temporarily_unavailable", "safe", 503)
+
+        tokens = begin_provider_budget(deny)
+        try:
+            with patch("adapters.sightengine.httpx.AsyncClient") as client:
+                with pytest.raises(ProviderInfrastructureError) as raised:
+                    await SightengineAdapter().analyze(b"image_bytes")
+        finally:
+            end_provider_budget(tokens)
+        assert raised.value.kind == "capacity"
+        client.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_server_error_raises_external_api_error(self):
@@ -136,7 +185,7 @@ class TestResembleAdapter:
         assert result.verdict == Verdict.UNCERTAIN
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_uncertain(self):
+    async def test_timeout_raises_typed_infrastructure_error(self):
         from adapters.resemble import ResembleAdapter
 
         mock_instance = AsyncMock()
@@ -145,8 +194,9 @@ class TestResembleAdapter:
         mock_instance.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_instance):
-            result = await ResembleAdapter().analyze(b"WAV_bytes")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await ResembleAdapter().analyze(b"WAV_bytes")
+        assert raised.value.kind == "timeout"
 
     @pytest.mark.asyncio
     async def test_ogg_conversion_invoked(self):
@@ -192,7 +242,7 @@ class TestSaplingAdapter:
 
         body = {
             "score": 0.92,
-            "sentence_scores": [["This was generated by AI.", 0.95]],
+            "sentence_scores": [{"sentence": "This was generated by AI.", "score": 0.95}],
         }
         with patch("httpx.AsyncClient", return_value=_mock_client(body)):
             result = await SaplingAdapter().analyze(
@@ -201,6 +251,55 @@ class TestSaplingAdapter:
         assert result.verdict == Verdict.FAKE
         assert result.confidence >= 0.80
         assert result.model_used == ModelUsed.SAPLING
+        assert "This was generated by AI." in result.explanation
+
+    @pytest.mark.asyncio
+    async def test_prepared_request_is_json_with_only_key_and_text_fields(self):
+        from adapters.sapling import SaplingAdapter
+        from core.config import settings
+
+        text = "This text is long enough to be sent to the Sapling detector without alteration."
+        captured = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return httpx.Response(200, json={"score": 0.1, "sentence_scores": []})
+
+        client = httpx.AsyncClient(
+            headers={"Content-Type": "multipart/form-data"},
+            transport=httpx.MockTransport(handler),
+        )
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=client):
+            await SaplingAdapter().analyze(text.encode("utf-8"))
+
+        request = captured["request"]
+        assert request.method == "POST"
+        assert str(request.url) == SaplingAdapter.URL
+        content_type = request.headers["content-type"]
+        assert content_type.startswith("application/json")
+        assert "multipart/form-data" not in content_type
+        body = json.loads(request.content)
+        assert set(body) == {"key", "text"}
+        assert body["key"] == settings.sapling_api_key
+        assert body["text"] == text
+
+    @pytest.mark.asyncio
+    async def test_ordinary_4xx_preserves_status_code(self):
+        from adapters.sapling import SaplingAdapter
+
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=403)):
+            with pytest.raises(ExternalAPIError) as raised:
+                await SaplingAdapter().analyze(b"x" * 60)
+        assert (raised.value.detail, raised.value.status_code) == ("request_error", 403)
+
+    @pytest.mark.asyncio
+    async def test_429_is_a_typed_technical_failure(self):
+        from adapters.sapling import SaplingAdapter
+
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=429)):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await SaplingAdapter().analyze(b"x" * 60)
+        assert (raised.value.service, raised.value.kind) == ("sapling", "unavailable")
 
     @pytest.mark.asyncio
     async def test_real_verdict(self):
@@ -226,7 +325,7 @@ class TestSaplingAdapter:
         assert "короткий" in result.explanation
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_uncertain(self):
+    async def test_timeout_raises_typed_infrastructure_error(self):
         from adapters.sapling import SaplingAdapter
 
         mock_instance = AsyncMock()
@@ -235,19 +334,20 @@ class TestSaplingAdapter:
         mock_instance.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_instance):
-            result = await SaplingAdapter().analyze(b"x" * 60)
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await SaplingAdapter().analyze(b"x" * 60)
+        assert raised.value.kind == "timeout"
 
     @pytest.mark.asyncio
-    async def test_long_text_truncated_and_warns(self):
-        """Text over 10 000 chars must be truncated; explanation must mention truncation."""
+    async def test_long_text_is_rejected_without_silent_truncation(self):
+        """Text over 10 000 chars must not be silently sent to the provider."""
         from adapters.sapling import SaplingAdapter
 
-        body = {"score": 0.82, "sentence_scores": []}
-        with patch("httpx.AsyncClient", return_value=_mock_client(body)):
+        with patch("httpx.AsyncClient") as client:
             result = await SaplingAdapter().analyze(b"A" * 11_000)
-        assert result.verdict == Verdict.FAKE
-        assert "обрезан" in result.explanation
+        assert result.verdict == Verdict.UNCERTAIN
+        assert "превышает" in result.explanation
+        client.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_uncertain_midrange(self):
@@ -297,19 +397,20 @@ class TestHFImageAdapter:
         assert result.verdict == Verdict.UNCERTAIN
 
     @pytest.mark.asyncio
-    async def test_cold_start_retries_then_uncertain(self):
-        """Model loading body causes retries; after MAX_RETRIES → UNCERTAIN."""
+    async def test_cold_start_retries_then_typed_infrastructure_error(self):
+        """Model loading body causes retries; exhaustion is technical failure."""
         from adapters.hf_image import HFImageAdapter
 
         cold_body = {"error": "Model is currently loading"}
 
         with patch("httpx.AsyncClient", return_value=_mock_client(cold_body)), \
              patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await HFImageAdapter().analyze(b"image_bytes")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFImageAdapter().analyze(b"image_bytes")
+        assert raised.value.kind == "model_loading"
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_uncertain(self):
+    async def test_timeout_raises_typed_infrastructure_error(self):
         from adapters.hf_image import HFImageAdapter
 
         mock_instance = AsyncMock()
@@ -318,8 +419,9 @@ class TestHFImageAdapter:
         mock_instance.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_instance):
-            result = await HFImageAdapter().analyze(b"image_bytes")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFImageAdapter().analyze(b"image_bytes")
+        assert raised.value.kind == "timeout"
 
 
 # ===========================================================================
@@ -364,11 +466,12 @@ class TestHFAudioAdapter:
 
         with patch("httpx.AsyncClient", return_value=_mock_client(cold_body)), \
              patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await HFAudioAdapter().analyze(b"WAV_audio")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFAudioAdapter().analyze(b"WAV_audio")
+        assert raised.value.kind == "model_loading"
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_uncertain(self):
+    async def test_timeout_raises_typed_infrastructure_error(self):
         from adapters.hf_audio import HFAudioAdapter
 
         mock_instance = AsyncMock()
@@ -377,8 +480,18 @@ class TestHFAudioAdapter:
         mock_instance.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_instance):
-            result = await HFAudioAdapter().analyze(b"WAV_audio")
-        assert result.verdict == Verdict.UNCERTAIN
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFAudioAdapter().analyze(b"WAV_audio")
+        assert raised.value.kind == "timeout"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_response_is_typed_infrastructure_error(self):
+        from adapters.hf_audio import HFAudioAdapter
+
+        with patch("httpx.AsyncClient", return_value=_mock_client({"unexpected": "shape"})):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await HFAudioAdapter().analyze(b"WAV_audio")
+        assert raised.value.kind == "invalid_response"
 
     @pytest.mark.asyncio
     async def test_ogg_input_triggers_ffmpeg_conversion(self):

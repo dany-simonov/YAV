@@ -16,6 +16,7 @@ _MOCK_ENV: dict[str, str] = {
     "SAPLING_API_KEY": "test_sapling_key",
     "RESEMBLE_API_KEY": "test_resemble_key",
     "HF_API_TOKEN": "hf_test_token",
+    "AIORNOT_API_KEY": "test_aiornot_key",
 }
 
 for _key, _val in _MOCK_ENV.items():

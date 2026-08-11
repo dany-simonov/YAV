@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     sapling_api_key: str = ""
     resemble_api_key: str = ""
     hf_api_token: str = ""
+    aiornot_api_key: str = ""
 
     # Rate limits
     free_daily_limit: int = 3

@@ -95,17 +95,18 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
 
   return (
     <div className="w-full">
-      <div className="mb-9"><p className="eyebrow mb-5">Регистрация</p><h2 className="text-[42px] sm:text-[52px] leading-[1.04] tracking-[-.05em] font-semibold">Создать аккаунт<br/>в ЯВЬ</h2><p className="mt-6 text-lg text-mv-text-secondary">Уже есть аккаунт? <Link to="/login" className="underline underline-offset-4 hover:text-black">Войти</Link></p></div>
+      <Link to="/" className="lg:hidden inline-flex items-center gap-2.5 mb-5"><span className="w-10 h-10 rounded-[11px] bg-white border border-black/[.12] flex items-center justify-center"><img src="/assets/img/yav-logo.png" alt="" className="w-8 h-8 object-contain" /></span><strong>ЯВЬ</strong></Link>
+      <div className="mb-5"><p className="eyebrow mb-3">Регистрация</p><h2 className="text-[34px] sm:text-[40px] leading-[1.02] tracking-[-.05em] font-semibold">Создать аккаунт в ЯВЬ</h2><p className="mt-3 text-base text-mv-text-secondary">Уже есть аккаунт? <Link to="/login" className="underline underline-offset-4 hover:text-black">Войти</Link></p></div>
 
       {/* Error Alert */}
       {error && (
-        <Alert variant="error" className="mb-6" onClose={clearError}>
+        <Alert variant="error" className="mb-4" onClose={clearError}>
           {error}
         </Alert>
       )}
 
       {/* Form */}
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form onSubmit={handleSubmit} className="space-y-3">
         <Input
           label="Имя"
           type="text"
@@ -116,7 +117,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
             if (errors.name) setErrors((prev) => ({ ...prev, name: undefined }));
           }}
           error={errors.name}
-          size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
+          size="lg" className="!bg-white !rounded-[10px] !border-black/[.08] !px-4 !py-3 !text-base shadow-[0_2px_3px_rgba(0,0,0,.03),0_8px_22px_rgba(0,0,0,.06)]"
           autoComplete="name"
           disabled={isActionLoading}
         />
@@ -131,7 +132,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
             if (errors.email) setErrors((prev) => ({ ...prev, email: undefined }));
           }}
           error={errors.email}
-          size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
+          size="lg" className="!bg-white !rounded-[10px] !border-black/[.08] !px-4 !py-3 !text-base shadow-[0_2px_3px_rgba(0,0,0,.03),0_8px_22px_rgba(0,0,0,.06)]"
           autoComplete="email"
           inputMode="email"
           autoCapitalize="none"
@@ -150,15 +151,15 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
               if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }));
             }}
             error={errors.password}
-            size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
+            size="lg" className="!bg-white !rounded-[10px] !border-black/[.08] !px-4 !py-3 !text-base shadow-[0_2px_3px_rgba(0,0,0,.03),0_8px_22px_rgba(0,0,0,.06)]"
             autoComplete="new-password"
             disabled={isActionLoading}
           />
           
           {/* Password strength indicator */}
           {password && (
-            <div className="mt-2">
-              <div className="flex gap-1 mb-1">
+            <div className="mt-1.5 flex items-center gap-3">
+              <div className="flex flex-1 gap-1">
                 {[1, 2, 3].map((level) => (
                   <div
                     key={level}
@@ -168,7 +169,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
                   />
                 ))}
               </div>
-              <span className={`text-xs ${
+              <span className={`text-[11px] ${
                 strength.level === 1 ? 'text-mv-fake' :
                 strength.level === 2 ? 'text-mv-uncertain' :
                 'text-mv-real'
@@ -189,7 +190,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
             if (errors.confirmPassword) setErrors((prev) => ({ ...prev, confirmPassword: undefined }));
           }}
           error={errors.confirmPassword}
-          size="lg" className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
+          size="lg" className="!bg-white !rounded-[10px] !border-black/[.08] !px-4 !py-3 !text-base shadow-[0_2px_3px_rgba(0,0,0,.03),0_8px_22px_rgba(0,0,0,.06)]"
           autoComplete="new-password"
           disabled={isActionLoading}
         />
@@ -197,7 +198,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
         <Button
           type="submit"
           fullWidth
-          size="lg" className="!min-h-[58px] !rounded-[11px] !bg-black !text-base"
+          size="lg" className="!min-h-[48px] !rounded-[10px] !bg-black !text-sm"
           isLoading={isActionLoading}
         >
           Создать аккаунт
@@ -205,7 +206,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
       </form>
 
       {/* Terms */}
-      <p className="mt-6 text-xs text-mv-text-muted text-center">
+      <p className="mt-4 text-[11px] leading-5 text-mv-text-muted text-center">
         Регистрируясь, вы соглашаетесь с{' '}
         <Link to="/terms" className="text-mv-accent hover:underline">
           Условиями использования
@@ -216,7 +217,7 @@ export function RegisterForm({ onSuccess }: RegisterFormProps) {
         </Link>
       </p>
 
-      <Link to="/" className="btn-light w-full mt-3 !min-h-[58px] !text-base">Вернуться на сайт</Link>
+      <Link to="/" className="block mt-3 text-center text-xs text-mv-text-muted underline underline-offset-4 hover:text-black">Вернуться на сайт</Link>
     </div>
   );
 }

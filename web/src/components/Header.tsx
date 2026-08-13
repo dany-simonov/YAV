@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Menu, X } from 'lucide-react';
 
-interface HeaderProps { onLoginClick: () => void; isLoggedIn: boolean; onLogout: () => void; }
+interface HeaderProps { isLoggedIn: boolean; onLogout: () => void; }
 
 const nav = [
   { label: 'Возможности', section: 'features' },
@@ -12,7 +12,7 @@ const nav = [
   { label: 'Исследования', to: '/research' },
 ];
 
-export function Header({ onLoginClick, isLoggedIn }: HeaderProps) {
+export function Header({ isLoggedIn }: HeaderProps) {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
@@ -55,7 +55,7 @@ export function Header({ onLoginClick, isLoggedIn }: HeaderProps) {
               : <Link key={item.label} to={item.to!} className="hover:text-black transition-colors">{item.label}</Link>)}
           </nav>
           <div className="hidden md:flex items-center gap-2 shrink-0">
-            {isLoggedIn ? <Link to="/dashboard" className="btn-light !min-h-[40px] !px-4">Кабинет</Link> : <button onClick={onLoginClick} className="btn-light !min-h-[40px] !px-4">Войти</button>}
+            {isLoggedIn ? <Link to="/dashboard" className="btn-light !min-h-[40px] !px-4">Кабинет</Link> : <Link to="/login" className="btn-light !min-h-[40px] !px-4">Войти</Link>}
             <Link to={isLoggedIn ? '/dashboard/check' : '/register'} className="btn-black !min-h-[40px] !px-5 !bg-black !text-white hover:!bg-[#222]">Проверить медиа</Link>
           </div>
           <button onClick={() => setOpen(!open)} className="md:hidden p-2 text-black" aria-label="Открыть меню" aria-expanded={open}>{open ? <X /> : <Menu />}</button>
@@ -65,7 +65,7 @@ export function Header({ onLoginClick, isLoggedIn }: HeaderProps) {
             ? <button key={item.label} onClick={() => scrollToSection(item.section!)} className="px-3 py-2.5 text-sm text-left rounded-lg hover:bg-black/5">{item.label}</button>
             : <Link key={item.label} to={item.to!} onClick={() => setOpen(false)} className="px-3 py-2.5 text-sm rounded-lg hover:bg-black/5">{item.label}</Link>)}
           <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-black/5">
-            {isLoggedIn ? <Link to="/dashboard" className="btn-light">Кабинет</Link> : <button onClick={onLoginClick} className="btn-light">Войти</button>}
+            {isLoggedIn ? <Link to="/dashboard" className="btn-light">Кабинет</Link> : <Link to="/login" onClick={() => setOpen(false)} className="btn-light">Войти</Link>}
             <Link to={isLoggedIn ? '/dashboard/check' : '/register'} className="btn-black">Проверить</Link>
           </div>
         </nav>}

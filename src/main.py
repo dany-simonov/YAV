@@ -245,6 +245,16 @@ def _media_diagnostic_logger(context: Any):
     return _log
 
 
+def _safe_diagnostic_log(diagnostic_log: Any, message: str) -> None:
+    """Emit optional observability metadata without affecting request handling."""
+    if not callable(diagnostic_log):
+        return
+    try:
+        diagnostic_log(message)
+    except Exception:
+        pass
+
+
 def _log_internal_error(context: Any, exc: BaseException) -> None:
     """Emit bounded runtime diagnostics without rendering exception text or request data."""
     log = getattr(context, "log", None)
@@ -611,8 +621,8 @@ async def _execute_request(
         result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
         is_gemini_text = result.get("model_used") == "gemini_text_verification"
         persistence_started = time.monotonic()
-        if is_gemini_text and diagnostic_log:
-            diagnostic_log("provider=gemini_text stage=persistence_start")
+        if is_gemini_text:
+            _safe_diagnostic_log(diagnostic_log, "provider=gemini_text stage=persistence_start")
         try:
             check_id = await (
                 execution_deadline.run_persistence(
@@ -627,14 +637,16 @@ async def _execute_request(
                 else persist_check_result(result, user_id, request.source_label or "", api_key)
             )
         except Exception:
-            if is_gemini_text and diagnostic_log:
-                diagnostic_log(
+            if is_gemini_text:
+                _safe_diagnostic_log(
+                    diagnostic_log,
                     "provider=gemini_text stage=persistence_error "
                     f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
                 )
             raise
-        if is_gemini_text and diagnostic_log:
-            diagnostic_log(
+        if is_gemini_text:
+            _safe_diagnostic_log(
+                diagnostic_log,
                 "provider=gemini_text stage=persistence_success "
                 f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
             )

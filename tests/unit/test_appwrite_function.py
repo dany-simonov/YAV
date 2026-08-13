@@ -508,6 +508,72 @@ async def test_execute_request_uses_runtime_identity_not_legacy_user_id():
     assert persist_mock.await_args.args[3] == "dynamic-key"
 
 
+def _exploding_diagnostic_callback(_message: str) -> None:
+    raise RuntimeError("diagnostic failure")
+
+
+@pytest.mark.asyncio
+async def test_execute_request_ignores_throwing_diagnostic_callback_on_gemini_success():
+    result = {
+        "verdict": "REAL", "confidence": 0.8, "model_used": "gemini_text_verification",
+        "media_type": "text",
+    }
+    with patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})), patch(
+        "src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})
+    ), patch("src.main._analyze", new=AsyncMock(return_value=result)), patch(
+        "src.main.persist_check_result", new=AsyncMock(return_value="check-1")
+    ) as persist_mock, patch("src.main.AppwriteTablesRateLimitStore"), patch(
+        "src.main.enforce_admission", new=AsyncMock()
+    ):
+        response = await _execute_request(
+            {"text": "Привет"}, "dynamic-key", "runtime-user", "runtime-jwt",
+            diagnostic_log=_exploding_diagnostic_callback,
+        )
+    assert response["check_id"] == "check-1"
+    persist_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_request_preserves_provider_error_when_diagnostic_callback_throws():
+    provider_error = ProviderInfrastructureError("gemini", "timeout", stage="request")
+    with patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})), patch(
+        "src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})
+    ), patch("src.main._analyze", new=AsyncMock(side_effect=provider_error)), patch(
+        "src.main.persist_check_result", new=AsyncMock()
+    ) as persist_mock, patch("src.main.AppwriteTablesRateLimitStore"), patch(
+        "src.main.enforce_admission", new=AsyncMock()
+    ):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await _execute_request(
+                {"text": "Привет"}, "dynamic-key", "runtime-user", "runtime-jwt",
+                diagnostic_log=_exploding_diagnostic_callback,
+            )
+    assert raised.value is provider_error
+    persist_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_request_preserves_persistence_error_when_diagnostic_callback_throws():
+    result = {
+        "verdict": "REAL", "confidence": 0.8, "model_used": "gemini_text_verification",
+        "media_type": "text",
+    }
+    persistence_error = RuntimeError("persistence failure")
+    with patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})), patch(
+        "src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})
+    ), patch("src.main._analyze", new=AsyncMock(return_value=result)), patch(
+        "src.main.persist_check_result", new=AsyncMock(side_effect=persistence_error)
+    ), patch("src.main.AppwriteTablesRateLimitStore"), patch(
+        "src.main.enforce_admission", new=AsyncMock()
+    ):
+        with pytest.raises(RuntimeError) as raised:
+            await _execute_request(
+                {"text": "Привет"}, "dynamic-key", "runtime-user", "runtime-jwt",
+                diagnostic_log=_exploding_diagnostic_callback,
+            )
+    assert raised.value is persistence_error
+
+
 @pytest.mark.asyncio
 async def test_function_response_adds_short_report_after_canonical_analysis():
     canonical = AnalysisResult(

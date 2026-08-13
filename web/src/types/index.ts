@@ -11,6 +11,33 @@
 export type Verdict = 'REAL' | 'FAKE' | 'UNCERTAIN';
 export type MediaType = 'image' | 'audio' | 'video' | 'text';
 
+export type CredibilityVerdict =
+  | 'VERY_LOW_CREDIBILITY'
+  | 'LOW_CREDIBILITY'
+  | 'MIXED_CREDIBILITY'
+  | 'MOSTLY_CREDIBLE'
+  | 'HIGH_CREDIBILITY';
+
+export interface CredibilityIssue {
+  type: 'FACTUAL_CONTRADICTION' | 'UNSUPPORTED_CLAIM' | 'LOGICAL_INCONSISTENCY' | 'MISLEADING_INFERENCE' | 'OUTDATED_INFORMATION' | 'INSUFFICIENT_EVIDENCE';
+  severity: 'LOW' | 'MEDIUM' | 'HIGH';
+  claim: string;
+  explanation: string;
+  source_refs: number[];
+}
+
+export interface CredibilitySource { title: string; url: string; }
+
+export interface CredibilityAssessment {
+  status: 'completed' | 'unavailable';
+  credibility_index?: number | null;
+  verdict?: CredibilityVerdict | null;
+  confidence?: number | null;
+  summary: string;
+  issues: CredibilityIssue[];
+  sources: CredibilitySource[];
+}
+
 // ============================================================================
 // Analysis Types
 // ============================================================================
@@ -25,6 +52,9 @@ export interface Check {
   explanation: string;
   processing_ms: number;
   created_at: string;
+  short_report?: string | null;
+  credibility?: CredibilityAssessment | null;
+  ai_status?: 'completed' | 'unavailable';
 }
 
 export interface CheckResult {
@@ -36,6 +66,8 @@ export interface CheckResult {
   processing_ms: number;
   media_type: MediaType;
   short_report?: string | null;
+  credibility?: CredibilityAssessment | null;
+  ai_status?: 'completed' | 'unavailable';
 }
 
 // Backward-compatible type for older components/hooks.

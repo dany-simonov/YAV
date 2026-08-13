@@ -3,7 +3,7 @@
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 
@@ -78,6 +78,86 @@ class ComponentEvidence(BaseModel):
     evidence: ProviderEvidence
 
 
+class CredibilityIssue(BaseModel):
+    """One bounded, user-facing issue identified by grounded verification."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[
+        "FACTUAL_CONTRADICTION",
+        "UNSUPPORTED_CLAIM",
+        "LOGICAL_INCONSISTENCY",
+        "MISLEADING_INFERENCE",
+        "OUTDATED_INFORMATION",
+        "INSUFFICIENT_EVIDENCE",
+    ]
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    claim: str = Field(min_length=1, max_length=300)
+    explanation: str = Field(min_length=1, max_length=500)
+    source_refs: list[StrictInt] = Field(default_factory=list, max_length=5)
+
+    @field_validator("source_refs")
+    @classmethod
+    def validate_source_refs(cls, value: list[int]) -> list[int]:
+        if any(item < 0 or item >= 5 for item in value):
+            raise ValueError("source_refs must contain source indexes from 0 to 4")
+        return value
+
+
+class CredibilitySource(BaseModel):
+    """A source copied only from Gemini grounding metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=180)
+    url: str = Field(min_length=1, max_length=768)
+
+
+class CredibilityAssessment(BaseModel):
+    """Independent text credibility branch; never an AI-origin score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["completed", "unavailable"]
+    model: str = Field(default="gemini_credibility_grounded", min_length=1, max_length=128)
+    credibility_index: StrictInt | None = Field(default=None, ge=0, le=100)
+    verdict: Literal[
+        "VERY_LOW_CREDIBILITY",
+        "LOW_CREDIBILITY",
+        "MIXED_CREDIBILITY",
+        "MOSTLY_CREDIBLE",
+        "HIGH_CREDIBILITY",
+    ] | None = None
+    confidence: float | None = None
+    summary: str = Field(min_length=1, max_length=500)
+    issues: list[CredibilityIssue] = Field(default_factory=list, max_length=5)
+    sources: list[CredibilitySource] = Field(default_factory=list, max_length=5)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_confidence(cls, value: float | None) -> float | None:
+        return _finite_unit_interval(value, "confidence")
+
+    @field_validator("summary", "issues", "sources")
+    @classmethod
+    def validate_completed_fields(cls, value: Any) -> Any:
+        return value
+
+    @model_validator(mode="after")
+    def validate_state(self) -> "CredibilityAssessment":
+        if self.status == "completed":
+            if self.credibility_index is None or self.verdict is None or self.confidence is None:
+                raise ValueError("completed credibility assessment requires score fields")
+        elif any(value is not None for value in (self.credibility_index, self.verdict, self.confidence)):
+            raise ValueError("unavailable credibility assessment must not contain score fields")
+        for issue in self.issues:
+            if issue.source_refs != sorted(set(issue.source_refs)):
+                raise ValueError("source_refs must be unique and in deterministic order")
+            if any(ref >= len(self.sources) for ref in issue.source_refs):
+                raise ValueError("source_refs must refer to final sources")
+        return self
+
+
 class AnalysisResult(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     
@@ -94,6 +174,8 @@ class AnalysisResult(BaseModel):
     decision_confidence: float | None = None
     authenticity_index: StrictInt | None = Field(default=None, ge=0, le=100)
     short_report: str | None = Field(default=None, max_length=600)
+    ai_status: Literal["completed", "unavailable"] | None = None
+    credibility: CredibilityAssessment | None = None
     provider_evidence: ProviderEvidence | None = None
     component_evidence: list[ComponentEvidence] | None = Field(default=None, max_length=2)
 

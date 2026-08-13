@@ -28,14 +28,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.enums import MediaType  # noqa: E402
+from core.enums import MediaType, ModelUsed, Verdict  # noqa: E402
 from core.config import settings  # noqa: E402
 from core.analyzer import HybridTextAnalyzer  # noqa: E402
 from core.exceptions import (  # noqa: E402
     ExternalAPIError,
     ProviderInfrastructureError,
 )
-from core.short_report import build_short_report  # noqa: E402
+from core.short_report import build_combined_text_report, build_short_report  # noqa: E402
+from adapters.gemini_credibility import GeminiCredibilityAdapter  # noqa: E402
+from api.schemas import AnalysisResult, CredibilityAssessment  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
     ChecksPersistenceError,
@@ -245,6 +247,16 @@ def _media_diagnostic_logger(context: Any):
     return _log
 
 
+def _safe_diagnostic_log(diagnostic_log: Any, message: str) -> None:
+    """Emit optional observability metadata without affecting request handling."""
+    if not callable(diagnostic_log):
+        return
+    try:
+        diagnostic_log(message)
+    except Exception:
+        pass
+
+
 def _log_internal_error(context: Any, exc: BaseException) -> None:
     """Emit bounded runtime diagnostics without rendering exception text or request data."""
     log = getattr(context, "log", None)
@@ -433,6 +445,85 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
 hybrid_analyzer = HybridTextAnalyzer()
 
 
+def _branch_diagnostic(diagnostic_log: Any, branch: str):
+    """Attach an allowlisted branch label without exposing request data."""
+    def _log(message: str) -> None:
+        _safe_diagnostic_log(diagnostic_log, f"branch={branch} {message}")
+    return _log
+
+
+def _unavailable_credibility() -> CredibilityAssessment:
+    return CredibilityAssessment(
+        status="unavailable",
+        summary="Проверка достоверности временно недоступна.",
+    )
+
+
+def _unavailable_ai_result() -> AnalysisResult:
+    """Represent an independently unavailable AI-origin branch without inventing a score."""
+    return AnalysisResult(
+        verdict=Verdict.UNCERTAIN,
+        confidence=0.5,
+        model_used=ModelUsed.FALLBACK_UNCERTAIN,
+        explanation="Проверка признаков AI-генерации временно недоступна.",
+        media_type=MediaType.TEXT,
+        semantics_version=2,
+        ai_status="unavailable",
+    )
+
+
+async def _analyze_combined_normal_text(
+    router: MediaRouter, text: str, diagnostic_log: Any,
+) -> AnalysisResult:
+    """Run independent normal-text branches concurrently and join their safe output."""
+    text_bytes = text.encode("utf-8")
+    ai_started = time.monotonic()
+    credibility_started = time.monotonic()
+    _safe_diagnostic_log(diagnostic_log, "branch=ai_origin stage=branch_start")
+    ai_diagnostic = _branch_diagnostic(diagnostic_log, "ai_origin") if diagnostic_log is not None else None
+    ai_task = router.route(MediaType.TEXT, b"", text, diagnostic_log=ai_diagnostic)
+    credibility_task = GeminiCredibilityAdapter().analyze(
+        text_bytes, diagnostic_log=diagnostic_log,
+    )
+    ai_outcome, credibility_outcome = await asyncio.gather(
+        ai_task, credibility_task, return_exceptions=True,
+    )
+    _safe_diagnostic_log(
+        diagnostic_log,
+        "branch=ai_origin stage=branch_" + ("error" if isinstance(ai_outcome, BaseException) else "success")
+        + f" elapsed_ms={round((time.monotonic() - ai_started) * 1000)}",
+    )
+    _safe_diagnostic_log(
+        diagnostic_log,
+        "branch=credibility stage=branch_"
+        + ("error" if isinstance(credibility_outcome, BaseException) else "success")
+        + f" elapsed_ms={round((time.monotonic() - credibility_started) * 1000)}",
+    )
+
+    def _branch_error(value: Any) -> bool:
+        return isinstance(value, (ProviderInfrastructureError, ExternalAPIError))
+
+    if isinstance(ai_outcome, BaseException) and not _branch_error(ai_outcome):
+        raise ai_outcome
+    if isinstance(credibility_outcome, BaseException) and not _branch_error(credibility_outcome):
+        raise credibility_outcome
+    if isinstance(ai_outcome, BaseException) and isinstance(credibility_outcome, BaseException):
+        # Preserve an existing controlled provider classification when neither
+        # independent branch could provide a user-facing report.
+        raise ai_outcome
+
+    ai_result = _unavailable_ai_result() if isinstance(ai_outcome, BaseException) else ai_outcome
+    credibility = (
+        _unavailable_credibility()
+        if isinstance(credibility_outcome, BaseException)
+        else credibility_outcome
+    )
+    return ai_result.model_copy(update={
+        "credibility": credibility,
+        "short_report": build_combined_text_report(ai_result, credibility),
+    })
+
+
 async def _analyze(
     request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
     quota_store: AppwriteTablesRateLimitStore | None = None, user_id: str = ""
@@ -499,9 +590,7 @@ async def _analyze(
         if mode:
             result = await _with_quota(lambda: hybrid_analyzer.analyze(text))
         else:
-            result = await _with_quota(
-                lambda: router.route(MediaType.TEXT, b"", text, diagnostic_log=diagnostic_log)
-            )
+            result = await _with_quota(lambda: _analyze_combined_normal_text(router, text, diagnostic_log))
     else:
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
@@ -545,7 +634,8 @@ async def _analyze(
 
     # Build the user-facing summary only after routing and normalization have
     # produced the canonical result. Hybrid text has its own response contract.
-    result = result.model_copy(update={"short_report": build_short_report(result)})
+    if result.credibility is None:
+        result = result.model_copy(update={"short_report": build_short_report(result)})
 
     # Preserve existing Function fields; short_report is an additive field.
     body = result.model_dump(mode="json", exclude_none=True)
@@ -611,8 +701,8 @@ async def _execute_request(
         result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
         is_gemini_text = result.get("model_used") == "gemini_text_verification"
         persistence_started = time.monotonic()
-        if is_gemini_text and diagnostic_log:
-            diagnostic_log("provider=gemini_text stage=persistence_start")
+        if is_gemini_text:
+            _safe_diagnostic_log(diagnostic_log, "provider=gemini_text stage=persistence_start")
         try:
             check_id = await (
                 execution_deadline.run_persistence(
@@ -627,14 +717,16 @@ async def _execute_request(
                 else persist_check_result(result, user_id, request.source_label or "", api_key)
             )
         except Exception:
-            if is_gemini_text and diagnostic_log:
-                diagnostic_log(
+            if is_gemini_text:
+                _safe_diagnostic_log(
+                    diagnostic_log,
                     "provider=gemini_text stage=persistence_error "
                     f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
                 )
             raise
-        if is_gemini_text and diagnostic_log:
-            diagnostic_log(
+        if is_gemini_text:
+            _safe_diagnostic_log(
+                diagnostic_log,
                 "provider=gemini_text stage=persistence_success "
                 f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
             )

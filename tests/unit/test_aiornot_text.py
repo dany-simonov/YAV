@@ -282,64 +282,48 @@ async def test_exact_plain_text_boundary_error_is_typed_technical_failure():
 
 
 @pytest.mark.asyncio
-async def test_exact_boundary_error_falls_back_to_sapling_result():
+async def test_exact_boundary_error_propagates_without_gemini_fallback():
     response = httpx.Response(400, text=BOUNDARY_ERROR, headers={"content-type": "text/plain"})
-    sapling_result = AnalysisResult(
-        verdict=Verdict.REAL,
-        confidence=0.1,
-        model_used=ModelUsed.SAPLING,
-        explanation="safe",
-        media_type=MediaType.TEXT,
-    )
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)), patch(
-        "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=sapling_result)
-    ) as sapling:
-        result = await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
-    sapling.assert_awaited_once_with(ELIGIBLE_TEXT.encode())
-    assert result is sapling_result
-    assert result.model_used == ModelUsed.SAPLING
+        "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
+    ) as gemini:
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
+    gemini.assert_not_awaited()
+    assert (raised.value.service, raised.value.kind) == ("aiornot", "unavailable")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 401, 403, 422])
-async def test_other_aiornot_4xx_never_falls_back_to_sapling(status):
+async def test_other_aiornot_4xx_never_falls_back_to_gemini(status):
     reason = "another provider validation error"
     response = httpx.Response(status, text=reason, headers={"content-type": "text/plain"})
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)), patch(
-        "router.media_router.SaplingAdapter.analyze", new=AsyncMock()
-    ) as sapling:
+        "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
+    ) as gemini:
         with pytest.raises(ExternalAPIError):
             await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
-    sapling.assert_not_awaited()
+    gemini.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_boundary_fallback_admits_both_provider_operations():
+async def test_boundary_failure_does_not_admit_gemini_provider_operation():
     response = httpx.Response(400, text=BOUNDARY_ERROR, headers={"content-type": "text/plain"})
     admitted: list[str] = []
 
     async def guard(provider: str):
         admitted.append(provider)
 
-    async def sapling_fallback(_adapter, _data: bytes):
-        await admit_provider_operation("sapling")
-        return AnalysisResult(
-            verdict=Verdict.REAL,
-            confidence=0.1,
-            model_used=ModelUsed.SAPLING,
-            explanation="safe",
-            media_type=MediaType.TEXT,
-        )
-
     tokens = begin_provider_budget(guard)
     try:
         with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=response)), patch(
-            "router.media_router.SaplingAdapter.analyze", new=sapling_fallback
+            "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
         ):
-            await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
+            with pytest.raises(ProviderInfrastructureError):
+                await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
     finally:
         end_provider_budget(tokens)
-    assert admitted == ["aiornot", "sapling"]
+    assert admitted == ["aiornot"]
 
 
 @pytest.mark.asyncio
@@ -356,24 +340,17 @@ async def test_429_is_typed_temporary_unavailability_without_raw_error_leak():
 
 
 @pytest.mark.asyncio
-async def test_429_makes_sapling_fallback_available_without_raw_error_leak():
-    sapling_result = AnalysisResult(
-        verdict=Verdict.REAL,
-        confidence=0.1,
-        model_used=ModelUsed.SAPLING,
-        explanation="safe",
-        media_type=MediaType.TEXT,
-    )
+async def test_429_propagates_without_gemini_fallback():
     with patch(
         "adapters.aiornot_text.httpx.AsyncClient",
         return_value=_client(response=_response(429, {"detail": "provider throttled"})),
     ), patch(
-        "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=sapling_result)
-    ) as sapling:
-        result = await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
-    assert result is sapling_result
-    sapling.assert_awaited_once()
-    assert "throttled" not in result.explanation
+        "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
+    ) as gemini:
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
+    gemini.assert_not_awaited()
+    assert (raised.value.service, raised.value.kind) == ("aiornot", "unavailable")
 
 
 @pytest.mark.asyncio
@@ -435,26 +412,20 @@ async def test_guard_denial_prevents_outbound_http():
 
 
 @pytest.mark.asyncio
-async def test_guard_denial_falls_back_to_sapling_without_aiornot_http():
+async def test_guard_denial_propagates_without_gemini_fallback():
     async def guard(provider):
         if provider == "aiornot":
             raise RateLimitError("provider_temporarily_unavailable", "safe", 503)
 
-    sapling_result = AnalysisResult(
-        verdict=Verdict.REAL,
-        confidence=0.1,
-        model_used=ModelUsed.SAPLING,
-        explanation="safe",
-        media_type=MediaType.TEXT,
-    )
     tokens = begin_provider_budget(guard)
     try:
         with patch("adapters.aiornot_text.httpx.AsyncClient") as client, patch(
-            "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=sapling_result)
-        ) as sapling:
-            result = await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
+            "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
+        ) as gemini:
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
     finally:
         end_provider_budget(tokens)
-    assert result is sapling_result
+    assert raised.value.kind == "capacity"
     client.assert_not_called()
-    sapling.assert_awaited_once()
+    gemini.assert_not_awaited()

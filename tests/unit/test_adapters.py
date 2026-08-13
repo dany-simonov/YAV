@@ -284,13 +284,32 @@ class TestSaplingAdapter:
         assert body["text"] == text
 
     @pytest.mark.asyncio
-    async def test_ordinary_4xx_preserves_status_code(self):
+    async def test_short_russian_text_is_sent_to_sapling_unchanged(self):
         from adapters.sapling import SaplingAdapter
 
-        with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=403)):
+        text = "Привет"
+        captured = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            captured["request"] = request
+            return httpx.Response(200, json={"score": 0.1})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=client):
+            result = await SaplingAdapter().analyze(text.encode("utf-8"))
+
+        assert json.loads(captured["request"].content)["text"] == text
+        assert result.authenticity_index == 90
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [400, 401, 403])
+    async def test_auth_4xx_preserves_status_code(self, status_code):
+        from adapters.sapling import SaplingAdapter
+
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=status_code)):
             with pytest.raises(ExternalAPIError) as raised:
-                await SaplingAdapter().analyze(b"x" * 60)
-        assert (raised.value.detail, raised.value.status_code) == ("request_error", 403)
+                await SaplingAdapter().analyze(b"x")
+        assert (raised.value.detail, raised.value.status_code) == ("request_error", status_code)
 
     @pytest.mark.asyncio
     async def test_429_is_a_typed_technical_failure(self):
@@ -299,7 +318,21 @@ class TestSaplingAdapter:
         with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=429)):
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x" * 60)
-        assert (raised.value.service, raised.value.kind) == ("sapling", "unavailable")
+        assert (raised.value.service, raised.value.kind, raised.value.stage, raised.value.status_code) == (
+            "sapling", "unavailable", "request", 429
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [500, 502, 503])
+    async def test_5xx_is_a_typed_technical_failure(self, status_code):
+        from adapters.sapling import SaplingAdapter
+
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=status_code)):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await SaplingAdapter().analyze(b"x")
+        assert (raised.value.service, raised.value.kind, raised.value.stage, raised.value.status_code) == (
+            "sapling", "unavailable", "request", status_code
+        )
 
     @pytest.mark.asyncio
     async def test_real_verdict(self):
@@ -312,14 +345,64 @@ class TestSaplingAdapter:
             )
         assert result.verdict == Verdict.REAL
         assert result.confidence <= 0.25
+        assert result.authenticity_index == 95
 
     @pytest.mark.asyncio
-    async def test_short_text_returns_uncertain_without_api_call(self):
-        """Text shorter than 50 chars must return UNCERTAIN without calling API."""
+    async def test_score_near_ai_maps_to_low_canonical_authenticity_index(self):
+        from adapters.sapling import SaplingAdapter
+
+        with patch("httpx.AsyncClient", return_value=_mock_client({"score": 0.92})):
+            result = await SaplingAdapter().analyze(b"x")
+        assert result.verdict == Verdict.FAKE
+        assert result.confidence == 0.92
+        assert result.authenticity_index == 8
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("body", [{}, {"score": "invalid"}, {"score": 1.1}])
+    async def test_malformed_response_is_a_safe_typed_failure(self, body):
+        from adapters.sapling import SaplingAdapter
+
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client(body)):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await SaplingAdapter().analyze(b"x")
+        assert (raised.value.service, raised.value.kind, raised.value.stage) == (
+            "sapling", "invalid_response", "response"
+        )
+
+    @pytest.mark.asyncio
+    async def test_malformed_json_is_a_safe_typed_failure(self):
+        from adapters.sapling import SaplingAdapter
+
+        client = _mock_client({})
+        client.post.return_value.json.side_effect = ValueError("not json")
+        with patch("adapters.sapling.httpx.AsyncClient", return_value=client):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await SaplingAdapter().analyze(b"x")
+        assert (raised.value.service, raised.value.kind, raised.value.stage) == (
+            "sapling", "invalid_response", "response"
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key_fails_without_provider_request(self, monkeypatch):
+        from adapters.sapling import SaplingAdapter
+        from core.config import settings
+
+        monkeypatch.setattr(settings, "sapling_api_key", "")
+        with patch("adapters.sapling.httpx.AsyncClient") as client:
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await SaplingAdapter().analyze(b"x")
+        assert (raised.value.kind, raised.value.stage, raised.value.reason) == (
+            "config", "config", "api_key_missing"
+        )
+        client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_text_returns_uncertain_without_api_call(self):
+        """The adapter's defensive empty-input path must not call the provider."""
         from adapters.sapling import SaplingAdapter
 
         with patch("httpx.AsyncClient") as mock_cls:
-            result = await SaplingAdapter().analyze(b"Too short.")
+            result = await SaplingAdapter().analyze(b"   ")
         mock_cls.assert_not_called()
         assert result.verdict == Verdict.UNCERTAIN
         assert "короткий" in result.explanation
@@ -336,7 +419,7 @@ class TestSaplingAdapter:
         with patch("httpx.AsyncClient", return_value=mock_instance):
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x" * 60)
-        assert raised.value.kind == "timeout"
+        assert (raised.value.kind, raised.value.stage) == ("timeout", "request")
 
     @pytest.mark.asyncio
     async def test_long_text_is_rejected_without_silent_truncation(self):

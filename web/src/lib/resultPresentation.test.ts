@@ -12,7 +12,15 @@ describe('result presentation', () => {
     expect(displayAuthenticityIndex(null, 0.95, 'FAKE')).toBe(5);
   });
 
+  it.each([0, 100])('preserves canonical boundary %i', (index) => {
+    expect(displayAuthenticityIndex(index, 0.95, 'FAKE')).toBe(index);
+  });
+
   it('formats the Gemini VIDEO identifier for users', () => {
     expect(displayModelName('gemini_video_verification')).toBe('Gemini Video Verification');
+  });
+
+  it('formats the Gemini TEXT identifier for users', () => {
+    expect(displayModelName('gemini_text_verification')).toBe('Gemini Text Verification');
   });
 });

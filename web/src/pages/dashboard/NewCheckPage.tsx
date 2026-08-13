@@ -21,7 +21,7 @@ import {
   parseAnalysisBackendError,
 } from '../../lib/analysisError';
 import { useAuthStore } from '../../store';
-import { displayAuthenticityIndex, displayModelName } from '../../lib/resultPresentation';
+import { displayModelName } from '../../lib/resultPresentation';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 
 interface Tab {
@@ -74,15 +74,9 @@ export function NewCheckPage() {
     const canonicalIndex = typeof source?.authenticity_index === 'number'
       ? source.authenticity_index
       : undefined;
-    const authenticityIndex = displayAuthenticityIndex(
-      canonicalIndex,
-      rawConfidence,
-      source?.verdict ?? 'UNCERTAIN',
-    );
-
     return {
       verdict: source?.verdict ?? 'UNCERTAIN',
-      confidence: authenticityIndex,
+      confidence: rawConfidence,
       authenticity_index: canonicalIndex ?? null,
       model_used: displayModelName(source?.model_used ?? source?.model ?? 'Unknown model'),
       explanation: source?.explanation ?? source?.reason ?? 'Результат получен без пояснения',
@@ -128,7 +122,7 @@ export function NewCheckPage() {
 
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
-    : text.length >= 50 && text.length <= 10000;
+    : text.trim().length >= 1 && text.length <= 10000;
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;

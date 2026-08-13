@@ -32,6 +32,10 @@ class GeminiVideoAdapter(BaseAdapter):
     MAX_POLL_REQUESTS = 6
     REQUEST_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0)
     _FILE_NAME = re.compile(r"files/[a-z0-9-]{1,40}")
+    _SUMMARY_PREFIX = re.compile(
+        r"^(?:gemini\s+video\s+verification\s*(?::|—)|gemini\s*:)\s*",
+        re.IGNORECASE,
+    )
     _VIDEO_MIME_TYPES = {"video/mp4", "video/avi", "video/quicktime"}
     _RESPONSE_SCHEMA = {
         "type": "object",
@@ -51,7 +55,8 @@ class GeminiVideoAdapter(BaseAdapter):
         "your classification confidence. Use UNCERTAIN whenever the evidence is insufficient. "
         "reasoning_summary must be clear, natural Russian in one to three concise sentences, "
         "with no Markdown, JSON field names, or technical API/provider details. Keep it factual, "
-        "safe, and under 300 characters."
+        "safe, and under 300 characters. Do not begin reasoning_summary with Gemini Video "
+        "Verification:, Gemini:, a model name, a provider name, or any technical prefix."
     )
 
     @classmethod
@@ -147,6 +152,11 @@ class GeminiVideoAdapter(BaseAdapter):
         raise ProviderInfrastructureError(self.PROVIDER, "processing_timeout")
 
     @classmethod
+    def _sanitize_summary(cls, summary: str) -> str:
+        """Remove only known accidental Gemini labels at the beginning."""
+        return cls._SUMMARY_PREFIX.sub("", summary, count=1).strip()
+
+    @classmethod
     def _result(cls, response: httpx.Response, model: str) -> AnalysisResult:
         body = cls._json_object(response)
         try:
@@ -174,7 +184,7 @@ class GeminiVideoAdapter(BaseAdapter):
             or not isinstance(summary, str)
         ):
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response")
-        summary = " ".join(summary.split())
+        summary = cls._sanitize_summary(" ".join(summary.split()))
         if not summary or len(summary) > 300:
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response")
         verdict = Verdict(verdict_value)
@@ -183,7 +193,7 @@ class GeminiVideoAdapter(BaseAdapter):
                 verdict=verdict,
                 confidence=float(confidence),
                 model_used=ModelUsed.GEMINI_VIDEO,
-                explanation=f"Gemini Video Verification: {summary}",
+                explanation=summary,
                 media_type=MediaType.VIDEO,
             ),
             ProviderEvidence(

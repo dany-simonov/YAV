@@ -142,8 +142,9 @@ The frontend is hosted on Appwrite Sites. Auth manages sessions and email verifi
 
 | Content type | Provider | Model / API mode | Role |
 | --- | --- | --- | --- |
-| Text | AI or Not | `text_sync` | Primary option for text that meets the API constraints |
-| Text | Sapling | `aidetect` | Primary option for other text; fallback when AI or Not is unavailable |
+| Text | Gemini | `GEMINI_MODEL` / `generateContent` | Primary option for non-empty text that does not meet AI or Not constraints; also the fallback after its technical failure |
+| Text | AI or Not | `text_sync` | Primary option for text with at least 250 characters and 64 words |
+| Extended text analysis | Sapling | `aidetect` | AI detector in a separate hybrid flow alongside fact-checking |
 | Fact-checking | g4f | `gpt-4.1-nano` | First option in the extended analysis cascade |
 | Fact-checking | g4f | `gpt-oss-120b` | First fallback |
 | Fact-checking | g4f | `command-r` | Second fallback |
@@ -151,7 +152,7 @@ The frontend is hosted on Appwrite Sites. Auth manages sessions and email verifi
 | Images | Hugging Face | `dima806/deepfake-vs-real-image-detection` | Fallback analyzer |
 | Audio | Resemble Detect | `detect_v1` | Primary analyzer |
 | Audio | Hugging Face | `mo-gg/wav2vec2-large-xlsr-deepfake-detection` | Fallback analyzer |
-| Video | Gemini | `GEMINI_MODEL` | Primary analyzer |
+| Video | Gemini | `GEMINI_MODEL` / Files API | Primary analyzer |
 
 The table lists the model identifiers and API modes currently used in the code.
 

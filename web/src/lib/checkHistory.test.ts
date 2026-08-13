@@ -53,6 +53,13 @@ describe('server-backed check history', () => {
     });
   });
 
+  it('preserves the canonical history authenticity index', () => {
+    expect(mapHistoryRow(row({ authenticity_index: 95 }) as never)).toMatchObject({
+      confidence: 95,
+      authenticity_index: 95,
+    });
+  });
+
   it('uses the authenticated TablesDB client with owner, order, pagination, and projection queries', async () => {
     tablesDBMock.listRows.mockResolvedValue({ rows: [row(), row({ $id: 'foreign', user_id: 'user-2' })], total: 0 });
 

@@ -1,7 +1,8 @@
 import type { Verdict } from '../types'
+import { displayAuthenticityIndex } from '../lib/resultPresentation'
 
 interface ConfidenceGaugeProps {
-  value: number
+  confidence: number
   authenticityIndex?: number | null
   verdict: Verdict
 }
@@ -12,13 +13,8 @@ const VERDICT_COLORS: Record<Verdict, string> = {
   UNCERTAIN: '#F59E0B',
 }
 
-export function ConfidenceGauge({ value, authenticityIndex, verdict }: ConfidenceGaugeProps) {
-  // Canonical backend index wins. Legacy records without it keep the former
-  // confidence-based display for compatibility.
-  const legacyIndex = verdict === 'FAKE' ? Math.round((1 - value / 100) * 100) : value
-  const displayedIndex = typeof authenticityIndex === 'number' && Number.isFinite(authenticityIndex)
-    ? Math.max(0, Math.min(100, Math.round(authenticityIndex)))
-    : legacyIndex
+export function ConfidenceGauge({ confidence, authenticityIndex, verdict }: ConfidenceGaugeProps) {
+  const displayedIndex = displayAuthenticityIndex(authenticityIndex, confidence, verdict)
   const radius = 50
   const circumference = 2 * Math.PI * radius
   const progress = (displayedIndex / 100) * circumference

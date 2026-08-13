@@ -22,6 +22,16 @@ def test_request_preserves_script_and_sql_text():
     assert request.text == text
 
 
+@pytest.mark.parametrize("text", [
+    "Привет",
+    "Это короткий текст.",
+    "Сегодня хорошая погода.",
+    "Этот небольшой текст написан для проверки работы детектора.",
+])
+def test_normal_text_accepts_short_nonempty_input_for_sapling(text):
+    assert validate_request_payload({"text": text}).text == text
+
+
 @pytest.mark.parametrize("payload,code", [
     ({"text": "x" * 50, "fileId": "file-id"}, "conflicting_input"),
     ({"text": "x" * 50, "unknown": 1}, "invalid_request"),

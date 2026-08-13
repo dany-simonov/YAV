@@ -2,6 +2,7 @@ import type { Verdict } from '../types';
 
 const MODEL_NAMES: Record<string, string> = {
   gemini_video_verification: 'Gemini Video Verification',
+  gemini_text_verification: 'Gemini Text Verification',
 };
 
 const clampIndex = (value: number): number => Math.max(0, Math.min(100, Math.round(value)));

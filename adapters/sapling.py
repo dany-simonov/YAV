@@ -17,7 +17,7 @@ from src.provider_protection import admit_provider_operation
 # Following best practices
 logger = logging.getLogger(__name__)
 
-MIN_TEXT_LENGTH = 50
+MIN_TEXT_LENGTH = 1
 MAX_TEXT_LENGTH = 10_000
 
 
@@ -32,7 +32,7 @@ class SaplingAdapter(BaseAdapter):
                 verdict=Verdict.UNCERTAIN,
                 confidence=0.0,
                 model_used=ModelUsed.SAPLING,
-                explanation=f"Текст слишком короткий для анализа (минимум {MIN_TEXT_LENGTH} символов).",
+                explanation="Текст слишком короткий для анализа.",
                 media_type=MediaType.TEXT,
             )
 
@@ -43,6 +43,11 @@ class SaplingAdapter(BaseAdapter):
                 model_used=ModelUsed.SAPLING,
                 explanation="Текст превышает лимит в 10 000 символов.",
                 media_type=MediaType.TEXT,
+            )
+
+        if not settings.sapling_api_key:
+            raise ProviderInfrastructureError(
+                "sapling", "config", stage="config", reason="api_key_missing"
             )
 
         payload = {"key": settings.sapling_api_key, "text": text}
@@ -56,26 +61,30 @@ class SaplingAdapter(BaseAdapter):
                     json=payload,
                 )
         except httpx.TimeoutException as exc:
-            raise ProviderInfrastructureError("sapling", "timeout") from exc
+            raise ProviderInfrastructureError("sapling", "timeout", stage="request") from exc
         except httpx.TransportError as exc:
-            raise ProviderInfrastructureError("sapling", "transport") from exc
+            raise ProviderInfrastructureError("sapling", "transport", stage="request") from exc
 
         if response.status_code == 429:
-            raise ProviderInfrastructureError("sapling", "unavailable")
+            raise ProviderInfrastructureError(
+                "sapling", "unavailable", stage="request", status_code=429
+            )
         if response.status_code >= 500:
-            raise ProviderInfrastructureError("sapling", "unavailable")
+            raise ProviderInfrastructureError(
+                "sapling", "unavailable", stage="request", status_code=response.status_code
+            )
         if response.status_code >= 400:
             raise ExternalAPIError("sapling", "request_error", status_code=response.status_code)
         try:
             body = response.json()
         except ValueError as exc:
-            raise ProviderInfrastructureError("sapling", "invalid_response") from exc
+            raise ProviderInfrastructureError("sapling", "invalid_response", stage="response") from exc
         if not isinstance(body, dict):
-            raise ProviderInfrastructureError("sapling", "invalid_response")
+            raise ProviderInfrastructureError("sapling", "invalid_response", stage="response")
         try:
             score = normalize_confidence(body.get("score"))
         except ValueError as exc:
-            raise ProviderInfrastructureError("sapling", "invalid_response") from exc
+            raise ProviderInfrastructureError("sapling", "invalid_response", stage="response") from exc
         sentence_scores = body.get("sentence_scores", [])
         if not isinstance(sentence_scores, list):
             sentence_scores = []

@@ -25,6 +25,7 @@ import {
   deleteCheckFromHistory,
   loadChecksHistory,
 } from '../../lib/checkHistory';
+import { displayAuthenticityIndex } from '../../lib/resultPresentation';
 import { useAuthStore } from '../../store';
 import type { Check, Verdict, MediaType } from '../../types';
 
@@ -171,6 +172,11 @@ export function HistoryPage() {
             {filteredChecks.map((check) => {
               const verdict = verdictConfig[check.verdict];
               const mediaType = mediaTypeConfig[check.media_type];
+              const authenticityIndex = displayAuthenticityIndex(
+                check.authenticity_index,
+                check.confidence,
+                check.verdict,
+              );
               
               return (
                 <div
@@ -207,9 +213,9 @@ export function HistoryPage() {
                   {/* Confidence */}
                   <div className="text-right">
                     <div className="text-lg font-semibold text-mv-text">
-                      {check.confidence}%
+                      {authenticityIndex}%
                     </div>
-                    <div className="text-xs text-mv-text-muted">уверенность</div>
+                    <div className="text-xs text-mv-text-muted">индекс подлинности</div>
                   </div>
 
                   <button

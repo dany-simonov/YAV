@@ -274,9 +274,11 @@ export function DashboardOverview() {
                     <span className="text-mv-text">Текст</span>
                   </span>
                 </td>
-                <td className="py-3 px-4 text-mv-text-secondary">AI or Not</td>
+                <td className="py-3 px-4 text-mv-text-secondary">
+                  Gemini Text Verification / AIOrNot
+                </td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-real font-semibold">97%</span>
+                  <span className="text-mv-text-secondary font-semibold">—</span>
                 </td>
               </tr>
             </tbody>

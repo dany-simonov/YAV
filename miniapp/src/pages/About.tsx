@@ -16,7 +16,6 @@ export function About() {
         <StatBar label="Фото (Sightengine)" value={94.4} color="#6C63FF" />
         <StatBar label="Аудио (Resemble)" value={99.5} color="#00C48C" />
         <StatBar label="Видео (CLIP pipeline)" value={81} color="#FFB800" />
-        <StatBar label="Текст (Sapling)" value={98} color="#6C63FF" />
       </div>
 
       {/* How it works */}

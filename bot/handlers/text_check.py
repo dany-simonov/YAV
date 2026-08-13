@@ -198,12 +198,13 @@ async def handle_about(message: Message) -> None:
         "Фото → Sightengine genai + HuggingFace (fallback)\n"
         "Аудио → Resemble Detect + wav2vec2-xlsr (fallback)\n"
         "Видео → FFmpeg extraction + Sightengine pipeline\n"
-        "Текст → Sapling AI Detector\n\n"
+        "Текст → Gemini Text Verification (обычный) / AI or Not (длинный)\n"
+        "Расширенный текст → Sapling AI Detector + fact-checking\n\n"
         "<b>Точность на тестовых датасетах:</b>\n"
         "· Изображения: 94.4%\n"
         "· Аудио: 99.5%\n"
         "· Видео: 81%\n"
-        "· Текст: 98%\n\n"
+        "· Текст: вероятностная оценка\n\n"
         "Все файлы обрабатываются в оперативной памяти и не сохраняются.\n\n"
         "<i>v0.5.0 · Источник</i>",
         parse_mode="HTML",

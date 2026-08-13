@@ -301,10 +301,17 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
         )[:300]
     else:
         provider_message = ""
+    category = "request_error"
+    if provider == "sapling":
+        if safe_status in {401, 403}:
+            category = "auth_configuration"
+        elif safe_status == 400:
+            category = "request_rejected"
     message = (
         "provider_external_api_error operation=provider.external_api_error "
         f"provider={provider} safe_error_code={error_code} "
-        f"status_code={safe_status} exception_class={type(exc).__name__}"
+        f"stage=request category={category} status_code={safe_status} "
+        f"exception_class={type(exc).__name__}"
     )
     if provider == "aiornot" and error_code == "request_error":
         content_type = getattr(exc, "content_type", None)
@@ -325,6 +332,38 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
                 message += f" {field_name}={','.join(values)}"
     if provider_message:
         message += f" provider_message={provider_message}"
+    try:
+        log(message)
+    except Exception:
+        pass
+
+
+def _log_provider_infrastructure_error(context: Any, exc: ProviderInfrastructureError) -> None:
+    """Log a bounded failure classification without provider or user data."""
+    log = getattr(context, "log", None)
+    if not callable(log):
+        return
+
+    known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
+    known_kinds = {
+        "capacity", "config", "invalid_configuration", "invalid_response", "missing_credentials", "model_loading", "processing_timeout",
+        "timeout", "transport", "unavailable",
+    }
+    known_stages = {"admission", "config", "request", "response"}
+    known_reasons = {"api_key_missing"}
+    provider = exc.service if exc.service in known_providers else "unknown"
+    kind = exc.kind if exc.kind in known_kinds else "unknown"
+    stage = exc.stage if exc.stage in known_stages else (
+        "admission" if kind == "capacity" else "unknown"
+    )
+    reason = exc.reason if exc.reason in known_reasons else "none"
+    status = exc.status_code
+    safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "none"
+    message = (
+        "provider_infrastructure_error operation=provider.infrastructure_error "
+        f"provider={provider} stage={stage} category={kind} reason={reason} "
+        f"status_code={safe_status} exception_class={type(exc).__name__}"
+    )
     try:
         log(message)
     except Exception:
@@ -460,7 +499,9 @@ async def _analyze(
         if mode:
             result = await _with_quota(lambda: hybrid_analyzer.analyze(text))
         else:
-            result = await _with_quota(lambda: router.route(MediaType.TEXT, b"", text))
+            result = await _with_quota(
+                lambda: router.route(MediaType.TEXT, b"", text, diagnostic_log=diagnostic_log)
+            )
     else:
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
@@ -568,18 +609,35 @@ async def _execute_request(
         rate_store = AppwriteTablesRateLimitStore(api_key)
         await _within_deadline(enforce_admission(rate_store, user_id, client_ip))
         result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
-        check_id = await (
-            execution_deadline.run_persistence(
-                persist_check_result(
-                    result,
-                    user_id,
-                    request.source_label or "",
-                    api_key,
+        is_gemini_text = result.get("model_used") == "gemini_text_verification"
+        persistence_started = time.monotonic()
+        if is_gemini_text and diagnostic_log:
+            diagnostic_log("provider=gemini_text stage=persistence_start")
+        try:
+            check_id = await (
+                execution_deadline.run_persistence(
+                    persist_check_result(
+                        result,
+                        user_id,
+                        request.source_label or "",
+                        api_key,
+                    )
                 )
+                if execution_deadline is not None
+                else persist_check_result(result, user_id, request.source_label or "", api_key)
             )
-            if execution_deadline is not None
-            else persist_check_result(result, user_id, request.source_label or "", api_key)
-        )
+        except Exception:
+            if is_gemini_text and diagnostic_log:
+                diagnostic_log(
+                    "provider=gemini_text stage=persistence_error "
+                    f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
+                )
+            raise
+        if is_gemini_text and diagnostic_log:
+            diagnostic_log(
+                "provider=gemini_text stage=persistence_success "
+                f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
+            )
         result["check_id"] = check_id
         if execution_deadline is not None:
             execution_deadline.remaining_root_time()
@@ -685,7 +743,8 @@ def main(context: Any):
             },
             503,
         )
-    except ProviderInfrastructureError:
+    except ProviderInfrastructureError as exc:
+        _log_provider_infrastructure_error(context, exc)
         return _response_json(
             context,
             {

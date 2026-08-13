@@ -95,7 +95,7 @@ export function BigCheck() {
   };
 
   const handleTextSubmit = async () => {
-    if (textInput.trim().length < 50) return;
+    if (!textInput.trim()) return;
     
     setTextLoading(true);
     const result = await analyzeText(textInput);
@@ -222,7 +222,7 @@ export function BigCheck() {
                   {item.result && (
                     <div className="mt-4 flex items-center gap-6">
                       <ConfidenceGauge
-                        value={item.result.confidence}
+                        confidence={item.result.confidence}
                         authenticityIndex={item.result.authenticity_index}
                         verdict={item.result.verdict}
                         size={80}
@@ -251,16 +251,16 @@ export function BigCheck() {
           <textarea
             value={textInput}
             onChange={(e) => setTextInput(e.target.value)}
-            placeholder="Вставьте текст для проверки (минимум 50 символов)..."
+            placeholder="Вставьте текст для проверки..."
             className="w-full h-40 p-4 bg-mv-surface-2 border border-mv-border rounded-lg text-mv-text placeholder:text-mv-text-muted resize-none focus:border-mv-accent focus:outline-none transition-colors"
           />
           <div className="flex items-center justify-between mt-4">
             <span className="text-sm text-mv-text-secondary">
-              {textInput.length} / 50 мин. символов
+              {textInput.length} символов
             </span>
             <button
               onClick={handleTextSubmit}
-              disabled={textInput.trim().length < 50 || textLoading}
+              disabled={!textInput.trim() || textLoading}
               className="px-6 py-2 bg-mv-accent text-white rounded-lg font-medium hover:bg-mv-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >
               {textLoading ? 'Анализируем...' : 'Проверить'}
@@ -271,7 +271,7 @@ export function BigCheck() {
             <div className="mt-6 bg-mv-surface-2 border border-mv-border rounded-lg p-4">
               <div className="flex items-center gap-6">
                 <ConfidenceGauge
-                  value={textResult.confidence}
+                  confidence={textResult.confidence}
                   authenticityIndex={textResult.authenticity_index}
                   verdict={textResult.verdict}
                   size={80}

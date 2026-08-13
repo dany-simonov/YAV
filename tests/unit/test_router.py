@@ -255,26 +255,26 @@ class TestRoute:
         )
 
     @pytest.mark.asyncio
-    async def test_text_routes_to_sapling(self):
+    async def test_short_text_routes_to_gemini(self):
         text_result = AnalysisResult(
-            verdict=Verdict.FAKE,
-            confidence=0.92,
-            model_used=ModelUsed.SAPLING,
-            explanation="Sapling: 92% AI",
+            verdict=Verdict.UNCERTAIN,
+            confidence=0.5,
+            model_used=ModelUsed.GEMINI_TEXT,
+            explanation="Недостаточно текста для уверенного вывода.",
             media_type=MediaType.TEXT,
             processing_ms=400,
         )
         mock_analyze = AsyncMock(return_value=text_result)
-        with patch("router.media_router.SaplingAdapter.analyze", mock_analyze):
+        with patch("router.media_router.GeminiTextAdapter.analyze", mock_analyze):
             result = await MediaRouter().route(
-                MediaType.TEXT, b"some text for sapling", text_content="some text for sapling"
+                MediaType.TEXT, b"", text_content="Привет"
             )
-        mock_analyze.assert_awaited_once()
-        assert result.model_used == ModelUsed.SAPLING
+        mock_analyze.assert_awaited_once_with("Привет".encode("utf-8"))
+        assert result.model_used == ModelUsed.GEMINI_TEXT
 
     @pytest.mark.asyncio
-    async def test_eligible_text_routes_to_aiornot_without_sapling(self):
-        text = " ".join(["word"] * 64)
+    async def test_eligible_text_routes_to_aiornot_without_gemini(self):
+        text = " ".join(["слово"] * 64)
         aiornot_result = AnalysisResult(
             verdict=Verdict.FAKE,
             confidence=0.9,
@@ -285,64 +285,83 @@ class TestRoute:
         with patch(
             "router.media_router.AIOrNotTextAdapter.analyze",
             new=AsyncMock(return_value=aiornot_result),
-        ) as aiornot, patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock()) as sapling:
+        ) as aiornot, patch("router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()) as gemini:
             result = await MediaRouter().route(MediaType.TEXT, b"", text)
         aiornot.assert_awaited_once()
-        sapling.assert_not_awaited()
+        gemini.assert_not_awaited()
         assert result.model_used == ModelUsed.AIORNOT_TEXT
 
     @pytest.mark.asyncio
-    async def test_short_valid_text_bypasses_aiornot_and_routes_to_sapling(self):
-        text = "x" * 50
+    @pytest.mark.parametrize("text", ["Привет", "Сегодня хорошая погода.", "x" * 249])
+    async def test_ineligible_text_bypasses_aiornot_and_routes_to_gemini(self, text):
         fallback = AnalysisResult(
             verdict=Verdict.UNCERTAIN,
             confidence=0.5,
-            model_used=ModelUsed.SAPLING,
+            model_used=ModelUsed.GEMINI_TEXT,
             explanation="safe",
             media_type=MediaType.TEXT,
         )
         with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock()) as aiornot, patch(
-            "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=fallback)
-        ) as sapling:
+            "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock(return_value=fallback)
+        ) as gemini:
             result = await MediaRouter().route(MediaType.TEXT, b"", text)
         aiornot.assert_not_awaited()
-        sapling.assert_awaited_once()
-        assert result.model_used == ModelUsed.SAPLING
+        gemini.assert_awaited_once_with(text.encode("utf-8"))
+        assert result.model_used == ModelUsed.GEMINI_TEXT
 
     @pytest.mark.asyncio
-    async def test_eligible_text_uses_sapling_after_aiornot_technical_failure(self):
-        text = " ".join(["word"] * 64)
+    async def test_250_char_text_under_word_threshold_routes_to_gemini(self):
+        text = "x" * 250
         fallback = AnalysisResult(
-            verdict=Verdict.REAL,
-            confidence=0.1,
-            model_used=ModelUsed.SAPLING,
+            verdict=Verdict.UNCERTAIN,
+            confidence=0.5,
+            model_used=ModelUsed.GEMINI_TEXT,
             explanation="safe",
             media_type=MediaType.TEXT,
         )
+        with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock()) as aiornot, patch(
+            "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock(return_value=fallback)
+        ) as gemini:
+            result = await MediaRouter().route(MediaType.TEXT, b"", text)
+        aiornot.assert_not_awaited()
+        gemini.assert_awaited_once_with(text.encode("utf-8"))
+        assert result.model_used == ModelUsed.GEMINI_TEXT
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [
+        ProviderInfrastructureError("aiornot", "timeout"),
+        ProviderInfrastructureError("aiornot", "unavailable", status_code=500),
+    ])
+    async def test_eligible_text_propagates_aiornot_infrastructure_failure_without_gemini(
+        self, error
+    ):
+        text = " ".join(["слово"] * 64)
         with patch(
             "router.media_router.AIOrNotTextAdapter.analyze",
-            new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "timeout")),
-        ), patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=fallback)) as sapling:
-            result = await MediaRouter().route(MediaType.TEXT, b"", text)
-        sapling.assert_awaited_once()
-        assert result.model_used == ModelUsed.SAPLING
+            new=AsyncMock(side_effect=error),
+        ) as aiornot, patch("router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()) as gemini:
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await MediaRouter().route(MediaType.TEXT, b"", text)
+        aiornot.assert_awaited_once_with(text.encode("utf-8"))
+        gemini.assert_not_awaited()
+        assert raised.value is error
 
     @pytest.mark.asyncio
     async def test_eligible_text_does_not_fallback_after_aiornot_ordinary_4xx(self):
-        text = " ".join(["word"] * 64)
+        text = " ".join(["слово"] * 64)
         with patch(
             "router.media_router.AIOrNotTextAdapter.analyze",
             new=AsyncMock(side_effect=ExternalAPIError("aiornot", "request_error")),
-        ), patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock()) as sapling:
+        ), patch("router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()) as gemini:
             with pytest.raises(ExternalAPIError):
                 await MediaRouter().route(MediaType.TEXT, b"", text)
-        sapling.assert_not_awaited()
+        gemini.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_short_text_propagates_sapling_ordinary_4xx(self):
+    async def test_short_text_propagates_gemini_ordinary_4xx(self):
         with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock()) as aiornot, patch(
-            "router.media_router.SaplingAdapter.analyze",
-            new=AsyncMock(side_effect=ExternalAPIError("sapling", "request_error")),
+            "router.media_router.GeminiTextAdapter.analyze",
+            new=AsyncMock(side_effect=ExternalAPIError("gemini", "request_error")),
         ):
             with pytest.raises(ExternalAPIError):
                 await MediaRouter().route(MediaType.TEXT, b"", "x" * 50)

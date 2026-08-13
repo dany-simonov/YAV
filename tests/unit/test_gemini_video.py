@@ -119,6 +119,7 @@ async def test_gemini_structured_video_result_preserves_canonical_index(verdict,
     assert result.provider_evidence is not None
     assert result.provider_evidence.provider == "gemini"
     assert result.provider_evidence.raw_score == index / 100
+    assert result.explanation == "Visible evidence reviewed."
     assert "unit-test-key" not in result.explanation
     assert client.delete.await_count == 1
 
@@ -144,6 +145,30 @@ async def test_gemini_russian_summary_is_preserved_in_result_and_persistence():
     assert summary in result.explanation
     assert summary in payload["explanation"]
     assert summary in row["explanation"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_summary_removes_only_a_known_provider_prefix():
+    summary = "Gemini Video Verification: Видео не содержит выраженных признаков синтетической генерации."
+    expected = "Видео не содержит выраженных признаков синтетической генерации."
+    client = _client(
+        posts=[
+            _response(200, headers={"x-goog-upload-url": f"{BASE_URL}/upload/session"}),
+            _response(200, _file()),
+            _response(200, _generated("REAL", 95, 0.9, summary)),
+        ]
+    )
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch("adapters.gemini_video.httpx.AsyncClient", return_value=client):
+        result = await GeminiVideoAdapter().analyze(VIDEO)
+
+    assert result.explanation == expected
+
+
+def test_gemini_summary_without_a_known_prefix_is_unchanged():
+    summary = "Видео не содержит выраженных признаков синтетической генерации."
+
+    assert GeminiVideoAdapter._sanitize_summary(summary) == summary
 
 
 @pytest.mark.asyncio

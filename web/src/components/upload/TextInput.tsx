@@ -20,7 +20,7 @@ interface TextInputProps {
 export function TextInput({
   value,
   onChange,
-  minLength = 50,
+  minLength = 1,
   maxLength = 10000,
   disabled = false,
   recommendedRange,
@@ -56,7 +56,7 @@ export function TextInput({
           disabled={disabled}
           placeholder={`Вставьте текст для проверки...
 
-Минимум ${minLength} символов для точного анализа. Чем больше текста, тем выше точность.`}
+Короткие тексты могут давать менее точную оценку. Чем больше текста, тем выше точность.`}
           className={cn(
             'w-full h-64 p-4 bg-transparent text-mv-text placeholder-mv-text-muted resize-none',
             'focus:outline-none',
@@ -80,7 +80,7 @@ export function TextInput({
       {/* Hints */}
       <div className="flex items-start gap-4 text-sm">
         {/* Minimum chars hint */}
-        {charCount > 0 && !isValid && (
+        {minLength > 1 && charCount > 0 && !isValid && (
           <div className="flex items-center gap-2 text-mv-uncertain">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>Минимум {minLength} символов (ещё {minLength - charCount})</span>

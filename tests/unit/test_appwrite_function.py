@@ -8,7 +8,7 @@ import pytest
 
 from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ExternalAPIError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.appwrite_store import ChecksPersistenceError
 from src.execution_deadline import ExecutionDeadline
 from src.main import (
@@ -236,6 +236,94 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
     assert "provider_message=invalid credentials" in logged
     for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private analysis input"):
         assert sensitive_value not in logged
+
+
+def test_main_sanitizes_sapling_auth_error_without_logging_provider_data():
+    context = _context(
+        {"text": "Привет"},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    error = ExternalAPIError(
+        "sapling",
+        "request_error",
+        status_code=401,
+        provider_message="invalid key test_sapling_key",
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        payload, status = main(context)
+
+    assert (payload, status) == (
+        {"detail": "Сервис анализа временно недоступен.", "code": "provider_unavailable"},
+        503,
+    )
+    logged = context.log.call_args.args[0]
+    assert "provider=sapling" in logged
+    assert "stage=request" in logged
+    assert "category=auth_configuration" in logged
+    assert "status_code=401" in logged
+    assert "test_sapling_key" not in logged
+
+
+def test_main_logs_safe_sapling_missing_key_diagnostic():
+    context = _context(
+        {"text": "Привет"},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    error = ProviderInfrastructureError(
+        "sapling", "config", stage="config", reason="api_key_missing"
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        payload, status = main(context)
+
+    assert (payload, status) == (
+        {"detail": "Сервис анализа временно недоступен. Попробуйте позже.", "code": "provider_temporarily_unavailable"},
+        503,
+    )
+    assert context.log.call_args.args[0] == (
+        "provider_infrastructure_error operation=provider.infrastructure_error "
+        "provider=sapling stage=config category=config reason=api_key_missing "
+        "status_code=none exception_class=ProviderInfrastructureError"
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            ProviderInfrastructureError("sapling", "timeout", stage="request"),
+            "provider=sapling stage=request category=timeout reason=none status_code=none",
+        ),
+        (
+            ProviderInfrastructureError("sapling", "unavailable", stage="request", status_code=429),
+            "provider=sapling stage=request category=unavailable reason=none status_code=429",
+        ),
+        (
+            ProviderInfrastructureError("sapling", "invalid_response", stage="response"),
+            "provider=sapling stage=response category=invalid_response reason=none status_code=none",
+        ),
+    ],
+)
+def test_main_logs_safe_sapling_infrastructure_categories(error, expected):
+    context = _context({"text": "Привет"})
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        _, status = main(context)
+
+    assert status == 503
+    assert expected in context.log.call_args.args[0]
 
 
 def test_external_api_error_log_never_renders_untrusted_service_or_detail():

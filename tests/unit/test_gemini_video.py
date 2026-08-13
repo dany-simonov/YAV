@@ -125,6 +125,22 @@ async def test_gemini_structured_video_result_preserves_canonical_index(verdict,
 
 
 @pytest.mark.asyncio
+async def test_video_keeps_using_shared_model_when_credibility_model_is_configured():
+    client = _client(posts=[
+        _response(200, headers={"x-goog-upload-url": f"{BASE_URL}/upload/session"}),
+        _response(200, _file()),
+        _response(200, _generated("REAL", 95, 0.9)),
+    ])
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch.object(
+        settings, "gemini_credibility_model", "gemini-2.5-flash-lite"
+    ), patch("adapters.gemini_video.httpx.AsyncClient", return_value=client):
+        await GeminiVideoAdapter().analyze(VIDEO)
+
+    assert client.post.await_args_list[2].args[0] == f"{BASE_URL}/v1beta/models/gemini-test-model:generateContent"
+
+
+@pytest.mark.asyncio
 async def test_gemini_russian_summary_is_preserved_in_result_and_persistence():
     summary = "На видео не обнаружено выраженных визуальных признаков синтетической генерации."
     client = _client(

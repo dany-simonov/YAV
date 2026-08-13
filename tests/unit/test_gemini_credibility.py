@@ -78,6 +78,35 @@ async def test_grounded_credibility_uses_one_generate_content_request_and_ground
     assert result.sources[0].url == "https://example.org/report"
 
 
+@pytest.mark.asyncio
+async def test_grounded_credibility_uses_dedicated_model_and_logs_its_safe_identifier():
+    client = _client(_response(200, _body()))
+    diagnostics: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch.object(
+        settings, "gemini_credibility_model", "gemini-2.5-flash-lite"
+    ), patch("adapters.gemini_credibility.httpx.AsyncClient", return_value=client):
+        await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
+
+    assert client.post.await_args.args[0] == (
+        f"{BASE_URL}/v1beta/models/gemini-2.5-flash-lite:generateContent"
+    )
+    assert any("model=gemini-2.5-flash-lite stage=request_start" in item for item in diagnostics)
+    assert GeminiCredibilityAdapter.TOTAL_TIMEOUT_SECONDS - GeminiCredibilityAdapter.TRANSPORT_SAFETY_SECONDS == 11
+
+
+@pytest.mark.asyncio
+async def test_grounded_credibility_falls_back_to_shared_model_when_dedicated_model_is_empty():
+    client = _client(_response(200, _body()))
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch.object(
+        settings, "gemini_credibility_model", ""
+    ), patch("adapters.gemini_credibility.httpx.AsyncClient", return_value=client):
+        await GeminiCredibilityAdapter().analyze(b"text")
+
+    assert client.post.await_args.args[0] == f"{BASE_URL}/v1beta/models/gemini-test-model:generateContent"
+
+
 @pytest.mark.parametrize(
     ("status_code", "exception_type", "category", "diagnostic_category"),
     [

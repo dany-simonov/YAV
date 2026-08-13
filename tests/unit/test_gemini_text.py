@@ -93,6 +93,18 @@ async def test_text_uses_generate_content_structured_json_without_files_api():
 
 
 @pytest.mark.asyncio
+async def test_text_keeps_using_shared_model_when_credibility_model_is_configured():
+    client = _client(response=_response(200, _generated("REAL", 90, 0.8, "Нормальный текст.")))
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch.object(
+        settings, "gemini_credibility_model", "gemini-2.5-flash-lite"
+    ), patch("adapters.gemini_text.httpx.AsyncClient", return_value=client):
+        await GeminiTextAdapter().analyze(b"text")
+
+    assert client.post.await_args.args[0] == f"{BASE_URL}/v1beta/models/gemini-test-model:generateContent"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("verdict", "index", "confidence", "summary"),
     [

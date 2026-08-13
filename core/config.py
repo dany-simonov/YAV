@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_api_url: str = "https://generativelanguage.googleapis.com"
     gemini_model: str = "gemini-3.1-flash-lite"
+    # Grounded credibility can use a separately provisioned Gemini model.  An
+    # empty value deliberately falls back to gemini_model for compatibility.
+    gemini_credibility_model: str = ""
     # Developer-only diagnostic.  It remains unavailable unless both values
     # are explicitly configured in the Function environment.
     gemini_smoke_enabled: bool = False

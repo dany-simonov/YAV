@@ -18,7 +18,7 @@ from api.schemas import CredibilityAssessment, CredibilityIssue, CredibilitySour
 from core.config import settings
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.execution_deadline import bounded_timeout
-from src.gemini_client import gemini_headers, safe_gemini_base_url, safe_gemini_model
+from src.gemini_client import gemini_headers, safe_gemini_base_url, safe_gemini_credibility_model
 from src.provider_protection import admit_provider_operation
 
 
@@ -429,13 +429,13 @@ issues — максимум 5. Не придумывай проблемы рад
             raise ValueError("Gemini credibility input is empty")
         if not settings.gemini_api_key:
             raise ProviderInfrastructureError(self.PROVIDER, "missing_credentials", stage="config")
-        model, base_url = safe_gemini_model(), safe_gemini_base_url()
+        model, base_url = safe_gemini_credibility_model(), safe_gemini_base_url()
         if model == "invalid-model" or base_url is None:
             raise ProviderInfrastructureError(self.PROVIDER, "invalid_configuration", stage="config")
         started = time.monotonic()
         try:
             timeout = self._transport_timeout_seconds()
-            self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_start "
+            self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_start "
                            f"transport_timeout_ms={round(timeout * 1000)}")
             async with asyncio.timeout(timeout):
                 await admit_provider_operation(self.PROVIDER)
@@ -450,15 +450,15 @@ issues — максимум 5. Не придумывай проблемы рад
                         },
                     )
         except TimeoutError as exc:
-            self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_timeout "
+            self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_timeout "
                            f"category=timeout status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "timeout", stage="request") from exc
         except httpx.TimeoutException as exc:
-            self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_timeout "
+            self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_timeout "
                            f"category=timeout status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "timeout", stage="request") from exc
         except httpx.TransportError as exc:
-            self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_error "
+            self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_error "
                            f"category=transport status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "transport", stage="request") from exc
         if response.status_code >= 400:
@@ -467,10 +467,10 @@ issues — максимум 5. Не придумывай проблемы рад
                 if response.status_code == 429
                 else {"category": self._http_error_category(response.status_code)}
             )
-            self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_error "
+            self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_error "
                            f"{self._diagnostic_fields(metadata)} "
                            f"status_code={response.status_code} elapsed_ms={round((time.monotonic() - started) * 1000)}")
         self._raise_for_status(response)
-        self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_success "
+        self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_success "
                        f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
         return self._result(response)

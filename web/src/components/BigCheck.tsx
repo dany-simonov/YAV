@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { useAnalyze } from '../hooks';
 import { VerdictBadge } from './VerdictBadge';
 import { ConfidenceGauge } from './ConfidenceGauge';
+import { displayModelName } from '../lib/resultPresentation';
 import type { AnalyzeResult, MediaType } from '../types';
 
 interface FileWithResult {
@@ -222,6 +223,7 @@ export function BigCheck() {
                     <div className="mt-4 flex items-center gap-6">
                       <ConfidenceGauge
                         value={item.result.confidence}
+                        authenticityIndex={item.result.authenticity_index}
                         verdict={item.result.verdict}
                         size={80}
                       />
@@ -231,7 +233,7 @@ export function BigCheck() {
                           {item.result.explanation}
                         </p>
                         <p className="mt-1 text-xs text-mv-text-muted">
-                          Модель: {item.result.model_used} • {item.result.processing_ms}мс
+                          Модель: {displayModelName(item.result.model_used)} • {item.result.processing_ms}мс
                         </p>
                       </div>
                     </div>
@@ -270,6 +272,7 @@ export function BigCheck() {
               <div className="flex items-center gap-6">
                 <ConfidenceGauge
                   value={textResult.confidence}
+                  authenticityIndex={textResult.authenticity_index}
                   verdict={textResult.verdict}
                   size={80}
                 />
@@ -279,7 +282,7 @@ export function BigCheck() {
                     {textResult.explanation}
                   </p>
                   <p className="mt-1 text-xs text-mv-text-muted">
-                    Модель: {textResult.model_used} • {textResult.processing_ms}мс
+                    Модель: {displayModelName(textResult.model_used)} • {textResult.processing_ms}мс
                   </p>
                 </div>
               </div>

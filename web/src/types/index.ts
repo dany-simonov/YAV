@@ -20,6 +20,7 @@ export interface Check {
   media_type: MediaType;
   verdict: Verdict;
   confidence: number;
+  authenticity_index?: number | null;
   model_used: string;
   explanation: string;
   processing_ms: number;
@@ -29,6 +30,7 @@ export interface Check {
 export interface CheckResult {
   verdict: Verdict;
   confidence: number;
+  authenticity_index?: number | null;
   model_used: string;
   explanation: string;
   processing_ms: number;
@@ -40,6 +42,7 @@ export interface CheckResult {
 export interface AnalyzeResult {
   verdict: Verdict;
   confidence: number;
+  authenticity_index?: number | null;
   model_used: string;
   explanation: string;
   processing_ms: number;

@@ -2,6 +2,7 @@ import type { Verdict } from '../types'
 
 interface ConfidenceGaugeProps {
   value: number
+  authenticityIndex?: number | null
   verdict: Verdict
 }
 
@@ -11,12 +12,16 @@ const VERDICT_COLORS: Record<Verdict, string> = {
   UNCERTAIN: '#F59E0B',
 }
 
-export function ConfidenceGauge({ value, verdict }: ConfidenceGaugeProps) {
-  // Calculate authenticity index
-  const authenticityIndex = verdict === 'FAKE' ? Math.round((1 - value / 100) * 100) : value
+export function ConfidenceGauge({ value, authenticityIndex, verdict }: ConfidenceGaugeProps) {
+  // Canonical backend index wins. Legacy records without it keep the former
+  // confidence-based display for compatibility.
+  const legacyIndex = verdict === 'FAKE' ? Math.round((1 - value / 100) * 100) : value
+  const displayedIndex = typeof authenticityIndex === 'number' && Number.isFinite(authenticityIndex)
+    ? Math.max(0, Math.min(100, Math.round(authenticityIndex)))
+    : legacyIndex
   const radius = 50
   const circumference = 2 * Math.PI * radius
-  const progress = (authenticityIndex / 100) * circumference
+  const progress = (displayedIndex / 100) * circumference
   const color = VERDICT_COLORS[verdict]
 
   return (
@@ -47,7 +52,7 @@ export function ConfidenceGauge({ value, verdict }: ConfidenceGaugeProps) {
           />
         </svg>
         <div className="absolute inset-0 flex items-center justify-center">
-          <span className="text-2xl font-bold text-mv-text">{authenticityIndex}%</span>
+          <span className="text-2xl font-bold text-mv-text">{displayedIndex}%</span>
         </div>
       </div>
       <span className="text-xs text-mv-text-secondary mt-2">Индекс подлинности</span>

@@ -140,9 +140,11 @@ def test_smoke_action_is_strictly_validated_without_analyze_input():
 
 
 @pytest.mark.asyncio
-async def test_authenticated_smoke_action_bypasses_profile_quota_analysis_and_persistence():
+async def test_enabled_diagnostic_smoke_bypasses_profile_quota_analysis_and_persistence():
     response = {"ok": True, "provider": "gemini", "model": "gemini-3.1-flash-lite", "result": EXPECTED_RESULT}
-    with patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
+    with patch.object(settings, "gemini_smoke_enabled", True), patch.object(
+        settings, "gemini_smoke_diagnostic_secret", "diagnostic-secret"
+    ), patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
         "src.main.ensure_user_profile", new=AsyncMock()
     ) as profile, patch("src.main.AppwriteTablesRateLimitStore") as rate_store, patch(
         "src.main.enforce_admission", new=AsyncMock()
@@ -150,7 +152,8 @@ async def test_authenticated_smoke_action_bypasses_profile_quota_analysis_and_pe
         "src.main.persist_check_result", new=AsyncMock()
     ) as persist, patch("src.main.run_gemini_smoke_test", new=AsyncMock(return_value=response)) as smoke:
         result = await _execute_request(
-            {"action": "gemini_smoke_test"}, "dynamic-key", "user", "jwt", diagnostic_log=MagicMock()
+            {"action": "gemini_smoke_test"}, "dynamic-key", "user", "jwt", diagnostic_log=MagicMock(),
+            diagnostic_authorization="diagnostic-secret",
         )
     assert result is response
     smoke.assert_awaited_once()
@@ -159,6 +162,46 @@ async def test_authenticated_smoke_action_bypasses_profile_quota_analysis_and_pe
     admission.assert_not_awaited()
     analyze.assert_not_awaited()
     persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_verified_user_is_denied_gemini_smoke_by_default():
+    with patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
+        "src.main.run_gemini_smoke_test", new=AsyncMock()
+    ) as smoke, pytest.raises(SecurityValidationError) as raised:
+        await _execute_request({"action": "gemini_smoke_test"}, "dynamic-key", "user", "jwt")
+    assert raised.value.code == "diagnostic_access_denied"
+    smoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disabled_gemini_smoke_is_denied_even_with_secret():
+    with patch.object(settings, "gemini_smoke_enabled", False), patch.object(
+        settings, "gemini_smoke_diagnostic_secret", "diagnostic-secret"
+    ), patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
+        "src.main.run_gemini_smoke_test", new=AsyncMock()
+    ) as smoke, pytest.raises(SecurityValidationError) as raised:
+        await _execute_request(
+            {"action": "gemini_smoke_test"}, "dynamic-key", "user", "jwt",
+            diagnostic_authorization="diagnostic-secret",
+        )
+    assert raised.value.code == "diagnostic_access_denied"
+    smoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wrong_diagnostic_authorization_is_denied():
+    with patch.object(settings, "gemini_smoke_enabled", True), patch.object(
+        settings, "gemini_smoke_diagnostic_secret", "diagnostic-secret"
+    ), patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
+        "src.main.run_gemini_smoke_test", new=AsyncMock()
+    ) as smoke, pytest.raises(SecurityValidationError) as raised:
+        await _execute_request(
+            {"action": "gemini_smoke_test"}, "dynamic-key", "user", "jwt",
+            diagnostic_authorization="wrong-secret",
+        )
+    assert raised.value.code == "diagnostic_access_denied"
+    smoke.assert_not_awaited()
 
 
 @pytest.mark.asyncio

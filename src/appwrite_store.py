@@ -22,6 +22,7 @@ from src.validation import (
     MAX_PROVIDER,
     MAX_SOURCE_LABEL,
 )
+from src.execution_deadline import bounded_persistence_timeout, current_execution_deadline
 
 
 DEFAULT_ENDPOINT = "https://fra.cloud.appwrite.io/v1"
@@ -401,9 +402,14 @@ async def persist_check_result(
     except Exception as exc:
         raise ChecksPersistenceError("checks.payload.map", exc=exc, user_id=user_id, api_key=api_key) from exc
 
+    deadline = current_execution_deadline()
+
+    async def _persist_request(awaitable: Any) -> Any:
+        return await deadline.run_persistence(awaitable) if deadline is not None else await awaitable
+
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            created = await client.post(
+        async with httpx.AsyncClient(timeout=bounded_persistence_timeout(15.0)) as client:
+            created = await _persist_request(client.post(
                 checks_url,
                 headers=headers,
                 json={
@@ -411,28 +417,28 @@ async def persist_check_result(
                     "data": check_data,
                     "permissions": _user_permissions(user_id, allow_delete=True),
                 },
-            )
+            ))
             if created.status_code not in (200, 201):
                 raise ChecksPersistenceError(
                     "checks.create", response=created, data=check_data, user_id=user_id, api_key=api_key,
                 )
 
-            incremented = await client.patch(
+            incremented = await _persist_request(client.patch(
                 f"{users_url}/{encoded_user}/checks_count/increment",
                 headers=headers,
                 json={"value": 1},
-            )
+            ))
             if incremented.status_code != 200:
                 raise ChecksPersistenceError(
                     "profile.checks_count.increment", response=incremented,
                     user_id=user_id, api_key=api_key,
                 )
 
-            updated = await client.patch(
+            updated = await _persist_request(client.patch(
                 f"{users_url}/{encoded_user}",
                 headers=headers,
                 json={"data": {"last_check_at": now}},
-            )
+            ))
             if updated.status_code != 200:
                 raise ChecksPersistenceError(
                     "profile.last_check_at.update", response=updated,

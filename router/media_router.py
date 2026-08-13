@@ -9,7 +9,7 @@ from adapters.hf_image import HFImageAdapter
 from adapters.resemble import ResembleAdapter
 from adapters.sapling import SaplingAdapter
 from adapters.sightengine import SightengineAdapter
-from adapters.sightengine_video import SightengineVideoAdapter
+from adapters.gemini_video import GeminiVideoAdapter
 from api.schemas import AnalysisResult, ComponentEvidence
 from core.enums import MediaType, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError, UnsupportedMediaType
@@ -99,7 +99,14 @@ class MediaRouter:
 
         raise UnsupportedMediaType()
 
-    async def route(self, media_type: MediaType, file_bytes: bytes, text_content: str = "") -> AnalysisResult:
+    async def route(
+        self,
+        media_type: MediaType,
+        file_bytes: bytes,
+        text_content: str = "",
+        *,
+        mime_type: str | None = None,
+    ) -> AnalysisResult:
         """Route to the appropriate adapter based on media type."""
         match media_type:
             case MediaType.IMAGE:
@@ -122,7 +129,7 @@ class MediaRouter:
                     return await HFAudioAdapter().analyze(file_bytes)
 
             case MediaType.VIDEO:
-                return await SightengineVideoAdapter().analyze(file_bytes)
+                return await GeminiVideoAdapter().analyze(file_bytes, mime_type=mime_type or "video/mp4")
 
             case MediaType.TEXT:
                 text_bytes = text_content.encode("utf-8") if text_content else file_bytes

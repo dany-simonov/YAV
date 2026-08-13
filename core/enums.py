@@ -21,6 +21,7 @@ class ModelUsed(str, Enum):
     SIGHTENGINE = "sightengine"
     SIGHTENGINE_VIDEO = "sightengine_video_pipeline"
     SIGHTENGINE_VIDEO_DIRECT = "sightengine_video_direct"
+    GEMINI_VIDEO = "gemini_video_verification"
     RESEMBLE = "resemble_detect"
     SAPLING = "sapling"
     HF_IMAGE = "hf_image_inference"
@@ -36,3 +37,4 @@ class ScoreKind(str, Enum):
     AI_PROBABILITY = "ai_probability"
     CLASS_CONFIDENCE = "class_confidence"
     AGGREGATED_SIGNAL = "aggregated_signal"
+    AUTHENTICITY_SCORE = "authenticity_score"

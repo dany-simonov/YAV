@@ -15,6 +15,7 @@ VERDICT_TEXT = {
 }
 
 MODEL_NAMES = {
+    "gemini_video_verification": "Gemini Video Verification",
     "sightengine": "Sightengine (\u0444\u043e\u0442\u043e)",
     "sightengine_video_pipeline": "Sightengine (\u0432\u0438\u0434\u0435\u043e)",
     "resemble_detect": "Resemble Detect (\u0430\u0443\u0434\u0438\u043e)",
@@ -69,7 +70,9 @@ def format_result(result: AnalysisResult) -> str:
     verdict_val = result.verdict.value
     emoji = VERDICT_EMOJI.get(verdict_val, "\u2753")
     verdict_text = VERDICT_TEXT.get(verdict_val, "\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e")
-    authenticity_index = calculate_authenticity_index(verdict_val, result.confidence)
+    authenticity_index = result.authenticity_index
+    if authenticity_index is None:
+        authenticity_index = calculate_authenticity_index(verdict_val, result.confidence)
     model_name = result.model_used.value
     human_model_name = MODEL_NAMES.get(model_name, model_name)
 

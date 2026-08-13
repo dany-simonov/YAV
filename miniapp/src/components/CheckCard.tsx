@@ -21,6 +21,9 @@ const MEDIA_LABELS: Record<MediaType, string> = {
   text: 'Текст',
 }
 
+const modelName = (value: string): string =>
+  value === 'gemini_video_verification' ? 'Gemini Video Verification' : value
+
 function formatDate(dateString: string): string {
   const date = new Date(dateString)
   return date.toLocaleDateString('ru-RU', {
@@ -33,7 +36,7 @@ function formatDate(dateString: string): string {
 
 export function CheckCard({ check }: CheckCardProps) {
   const [expanded, setExpanded] = useState(false)
-  const confidencePercent = Math.round(check.confidence * 100)
+  const confidencePercent = check.confidence <= 1 ? Math.round(check.confidence * 100) : Math.round(check.confidence)
 
   return (
     <div
@@ -69,11 +72,11 @@ export function CheckCard({ check }: CheckCardProps) {
       >
         <div className="px-4 pb-4 pt-2 border-t border-white/5">
           <div className="flex items-center gap-6">
-            <ConfidenceGauge value={confidencePercent} verdict={check.verdict} />
+            <ConfidenceGauge value={confidencePercent} authenticityIndex={check.authenticity_index} verdict={check.verdict} />
             <div className="flex-1 space-y-2">
               <div className="text-sm">
                 <span className="text-mv-text-secondary">Модель: </span>
-                <span className="text-mv-text">{check.model_used}</span>
+                <span className="text-mv-text">{modelName(check.model_used)}</span>
               </div>
               <div className="text-sm">
                 <span className="text-mv-text-secondary">Время: </span>

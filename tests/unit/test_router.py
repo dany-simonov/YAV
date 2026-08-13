@@ -239,10 +239,10 @@ class TestRoute:
     @pytest.mark.asyncio
     async def test_video_propagates_direct_technical_failure(self):
         with patch(
-            "router.media_router.SightengineVideoAdapter.analyze",
+            "router.media_router.GeminiVideoAdapter.analyze",
             new=AsyncMock(
                 side_effect=ProviderInfrastructureError(
-                    "sightengine", "unavailable"
+                    "gemini", "unavailable"
                 )
             ),
         ):
@@ -250,7 +250,7 @@ class TestRoute:
                 await MediaRouter().route(MediaType.VIDEO, b"video_bytes")
 
         assert (raised.value.service, raised.value.kind) == (
-            "sightengine",
+            "gemini",
             "unavailable",
         )
 

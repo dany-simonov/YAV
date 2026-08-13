@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+import time
 
 import pytest
 
@@ -9,6 +10,7 @@ from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError
 from src.appwrite_store import ChecksPersistenceError
+from src.execution_deadline import ExecutionDeadline
 from src.main import (
     EmailNotVerifiedError,
     _analyze,
@@ -124,6 +126,45 @@ def test_main_uses_only_runtime_client_ip_for_admission():
         main(context)
 
     assert execute_mock.call_args.args[5] == "2001:db8::1"
+
+
+def test_main_builds_analyze_response_with_the_same_root_deadline():
+    context = _context(
+        {"text": "x" * 50},
+        {"X-Appwrite-Key": "runtime-key", "X-Appwrite-User-Id": "runtime-user", "X-Appwrite-User-Jwt": "runtime-jwt"},
+    )
+    now = time.monotonic()
+    deadline = ExecutionDeadline(now, now + 1, now + 0.5, now + 0.8)
+    result = {"media_type": "text", "verdict": "UNCERTAIN", "confidence": 0.5, "model_used": "sapling"}
+    with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
+        "src.main._execute_request", new=MagicMock(return_value=object())
+    ) as execute_mock, patch("src.main._run_coro_sync", return_value=result):
+        payload, status = main(context)
+
+    assert (payload, status) == (result, 200)
+    assert execute_mock.call_args.kwargs["execution_deadline"] is deadline
+    assert context.log.called
+
+
+def test_main_fails_closed_before_an_expired_final_response_stage():
+    context = _context(
+        {"text": "x" * 50},
+        {"X-Appwrite-Key": "runtime-key", "X-Appwrite-User-Id": "runtime-user", "X-Appwrite-User-Jwt": "runtime-jwt"},
+    )
+    now = time.monotonic()
+    deadline = ExecutionDeadline(now, now, now, now)
+    result = {"media_type": "text", "verdict": "UNCERTAIN", "confidence": 0.5, "model_used": "sapling"}
+    with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
+        "src.main._execute_request", new=MagicMock(return_value=object())
+    ) as execute_mock, patch("src.main._run_coro_sync", return_value=result):
+        payload, status = main(context)
+
+    assert (payload, status) == (
+        {"detail": "Сервис анализа временно недоступен. Попробуйте позже.", "code": "provider_temporarily_unavailable"},
+        503,
+    )
+    assert execute_mock.call_args.kwargs["execution_deadline"] is deadline
+    context.log.assert_not_called()
 
 
 def test_main_internal_error_logs_safe_checks_operation_metadata():
@@ -400,7 +441,7 @@ async def test_function_response_adds_short_report_after_canonical_analysis():
         )
 
     assert response["short_report"].count(".") == 2
-    assert "вероятность AI-генерации — 80%" in response["short_report"]
+    assert "вероятность составила 80%" in response["short_report"]
     assert response["verdict"] == "FAKE"
 
 

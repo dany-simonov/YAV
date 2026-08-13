@@ -14,6 +14,7 @@ def _make_result(
     explanation: str = "Test explanation",
     media_type: MediaType = MediaType.IMAGE,
     processing_ms: int = 1000,
+    authenticity_index: int | None = None,
 ) -> AnalysisResult:
     return AnalysisResult(
         verdict=verdict,
@@ -22,6 +23,7 @@ def _make_result(
         explanation=explanation,
         media_type=media_type,
         processing_ms=processing_ms,
+        authenticity_index=authenticity_index,
     )
 
 
@@ -51,6 +53,32 @@ class TestFormatResult:
         """FAKE with confidence 0.95 => authenticity_index = 5%"""
         text = format_result(_make_result(verdict=Verdict.FAKE, confidence=0.95))
         assert "5%" in text
+
+    def test_gemini_video_uses_canonical_authenticity_index_and_model_name(self):
+        text = format_result(_make_result(
+            verdict=Verdict.FAKE,
+            confidence=0.95,
+            authenticity_index=10,
+            model_used=ModelUsed.GEMINI_VIDEO,
+            media_type=MediaType.VIDEO,
+        ))
+
+        assert "Индекс подлинности: <b>10%</b>" in text
+        assert "Индекс подлинности: <b>5%</b>" not in text
+        assert "Gemini Video Verification" in text
+
+    def test_canonical_authenticity_index_takes_priority_over_legacy_calculation(self):
+        text = format_result(_make_result(
+            verdict=Verdict.FAKE, confidence=0.95, authenticity_index=0
+        ))
+
+        assert "Индекс подлинности: <b>0%</b>" in text
+
+    @pytest.mark.parametrize("authenticity_index", [0, 100])
+    def test_canonical_authenticity_index_accepts_boundaries(self, authenticity_index):
+        text = format_result(_make_result(authenticity_index=authenticity_index))
+
+        assert f"Индекс подлинности: <b>{authenticity_index}%</b>" in text
 
     def test_fake_result_shows_human_model_name(self):
         text = format_result(_make_result(verdict=Verdict.FAKE, model_used=ModelUsed.SIGHTENGINE))

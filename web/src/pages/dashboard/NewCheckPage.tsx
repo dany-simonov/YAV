@@ -21,6 +21,7 @@ import {
   parseAnalysisBackendError,
 } from '../../lib/analysisError';
 import { useAuthStore } from '../../store';
+import { displayAuthenticityIndex, displayModelName } from '../../lib/resultPresentation';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 
 interface Tab {
@@ -70,13 +71,20 @@ export function NewCheckPage() {
   const normalizeFunctionResult = (data: any, mediaType: CheckResult['media_type']): CheckResult => {
     const source = data?.result ?? data;
     const rawConfidence = Number(source?.confidence ?? 0);
-    const aiProbability = rawConfidence <= 1 ? rawConfidence * 100 : rawConfidence;
-    const authenticityIndex = Math.max(0, Math.min(100, Math.round(100 - aiProbability)));
+    const canonicalIndex = typeof source?.authenticity_index === 'number'
+      ? source.authenticity_index
+      : undefined;
+    const authenticityIndex = displayAuthenticityIndex(
+      canonicalIndex,
+      rawConfidence,
+      source?.verdict ?? 'UNCERTAIN',
+    );
 
     return {
       verdict: source?.verdict ?? 'UNCERTAIN',
       confidence: authenticityIndex,
-      model_used: source?.model_used ?? source?.model ?? 'Unknown model',
+      authenticity_index: canonicalIndex ?? null,
+      model_used: displayModelName(source?.model_used ?? source?.model ?? 'Unknown model'),
       explanation: source?.explanation ?? source?.reason ?? 'Результат получен без пояснения',
       processing_ms: Number(source?.processing_ms ?? source?.processingTime ?? 0),
       media_type: source?.media_type ?? mediaType,

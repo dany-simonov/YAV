@@ -52,4 +52,15 @@ describe('CheckResultCard short report', () => {
     expect(markup).toContain('Gemini Video Verification');
     expect(markup).not.toContain('gemini_video_verification');
   });
+
+  it('renders a canonical real-video index directly', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      verdict: 'REAL',
+      confidence: 0.9,
+      authenticity_index: 95,
+    })} />);
+
+    expect(markup).toContain('>95<span');
+    expect(markup).not.toContain('>90<span');
+  });
 });

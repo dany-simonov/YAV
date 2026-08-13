@@ -1,17 +1,15 @@
 import type { Verdict } from '../types';
+import { displayAuthenticityIndex } from '../lib/resultPresentation';
 
 interface ConfidenceGaugeProps {
-  value: number; // 0..100 (legacy 0..1 is also supported)
+  confidence: number;
   authenticityIndex?: number | null;
   verdict: Verdict;
   size?: number;
 }
 
-export function ConfidenceGauge({ value, authenticityIndex, verdict, size = 120 }: ConfidenceGaugeProps) {
-  const percentage = value <= 1 ? Math.round(value * 100) : Math.round(value);
-  const safePercentage = typeof authenticityIndex === 'number' && Number.isFinite(authenticityIndex)
-    ? Math.max(0, Math.min(100, Math.round(authenticityIndex)))
-    : Math.max(0, Math.min(100, percentage));
+export function ConfidenceGauge({ confidence, authenticityIndex, verdict, size = 120 }: ConfidenceGaugeProps) {
+  const safePercentage = displayAuthenticityIndex(authenticityIndex, confidence, verdict);
   const displayValue = safePercentage / 100;
   
   const radius = (size - 12) / 2;

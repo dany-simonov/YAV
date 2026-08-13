@@ -21,7 +21,7 @@ import {
   parseAnalysisBackendError,
 } from '../../lib/analysisError';
 import { useAuthStore } from '../../store';
-import { displayAuthenticityIndex, displayModelName } from '../../lib/resultPresentation';
+import { displayModelName } from '../../lib/resultPresentation';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 
 interface Tab {
@@ -74,15 +74,9 @@ export function NewCheckPage() {
     const canonicalIndex = typeof source?.authenticity_index === 'number'
       ? source.authenticity_index
       : undefined;
-    const authenticityIndex = displayAuthenticityIndex(
-      canonicalIndex,
-      rawConfidence,
-      source?.verdict ?? 'UNCERTAIN',
-    );
-
     return {
       verdict: source?.verdict ?? 'UNCERTAIN',
-      confidence: authenticityIndex,
+      confidence: rawConfidence,
       authenticity_index: canonicalIndex ?? null,
       model_used: displayModelName(source?.model_used ?? source?.model ?? 'Unknown model'),
       explanation: source?.explanation ?? source?.reason ?? 'Результат получен без пояснения',

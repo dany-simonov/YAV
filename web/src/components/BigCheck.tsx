@@ -222,7 +222,7 @@ export function BigCheck() {
                   {item.result && (
                     <div className="mt-4 flex items-center gap-6">
                       <ConfidenceGauge
-                        value={item.result.confidence}
+                        confidence={item.result.confidence}
                         authenticityIndex={item.result.authenticity_index}
                         verdict={item.result.verdict}
                         size={80}
@@ -271,7 +271,7 @@ export function BigCheck() {
             <div className="mt-6 bg-mv-surface-2 border border-mv-border rounded-lg p-4">
               <div className="flex items-center gap-6">
                 <ConfidenceGauge
-                  value={textResult.confidence}
+                  confidence={textResult.confidence}
                   authenticityIndex={textResult.authenticity_index}
                   verdict={textResult.verdict}
                   size={80}

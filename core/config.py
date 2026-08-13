@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     resemble_api_key: str = ""
     hf_api_token: str = ""
     aiornot_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_api_url: str = "https://generativelanguage.googleapis.com"
+    gemini_model: str = "gemini-3.1-flash-lite"
 
     # Rate limits
     free_daily_limit: int = 3

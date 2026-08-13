@@ -39,6 +39,7 @@ from src.appwrite_store import (  # noqa: E402
     persist_check_result,
 )
 from src.media_validation import validate_media_bytes  # noqa: E402
+from src.gemini_smoke import run_gemini_smoke_test  # noqa: E402
 from src.rate_limit import AppwriteTablesRateLimitStore, RateLimitError, enforce_admission  # noqa: E402
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
 from src.validation import (  # noqa: E402
@@ -467,13 +468,18 @@ async def _execute_request(
     request = validate_request_payload(payload) if isinstance(payload, dict) else payload
 
     account = await get_authenticated_account(user_id, user_jwt)
-    profile = await ensure_user_profile(account, api_key)
 
     if request.action == "ensure_profile":
+        profile = await ensure_user_profile(account, api_key)
         return {"profile_id": str(profile.get("$id") or user_id)}
 
     if account.get("emailVerification") is not True:
         raise EmailNotVerifiedError("Подтвердите email перед запуском анализа.")
+
+    if request.action == "gemini_smoke_test":
+        return await run_gemini_smoke_test(diagnostic_log)
+
+    profile = await ensure_user_profile(account, api_key)
 
     if not isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest)):
         raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
@@ -529,7 +535,7 @@ def main(context: Any):
             _execute_request(request, api_key, user_id, user_jwt, _media_diagnostic_logger(context),
                              _extract_request_header(context.req, "x-appwrite-client-ip"))
         )
-        if request.action != "ensure_profile":
+        if request.action == "analyze":
             try:
                 media_type = MediaType(str(result.get("media_type", "text")))
             except (TypeError, ValueError):

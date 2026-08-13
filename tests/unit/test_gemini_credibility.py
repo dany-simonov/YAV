@@ -8,7 +8,7 @@ import pytest
 
 from adapters.gemini_credibility import GeminiCredibilityAdapter
 from core.config import settings
-from core.exceptions import ProviderInfrastructureError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.execution_deadline import ExecutionDeadline, reset_execution_deadline, set_execution_deadline
 
 
@@ -41,7 +41,11 @@ def _body(index=34, confidence=0.88, issues=None, chunks=None, supports=None):
 
 def _client(response):
     client = AsyncMock()
-    client.post = AsyncMock(return_value=response)
+    client.post = (
+        AsyncMock(side_effect=response)
+        if isinstance(response, BaseException)
+        else AsyncMock(return_value=response)
+    )
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
     return client
@@ -66,11 +70,66 @@ async def test_grounded_credibility_uses_one_generate_content_request_and_ground
 
     request = client.post.await_args.kwargs["json"]
     assert client.post.await_count == 1
-    assert request["tools"] == [{"googleSearch": {}}]
+    assert request["tools"] == [{"google_search": {}}]
+    assert "googleSearch" not in request["tools"][0]
     assert request["generationConfig"]["maxOutputTokens"] == GeminiCredibilityAdapter.MAX_OUTPUT_TOKENS
     assert result.credibility_index == 34
     assert result.verdict == "LOW_CREDIBILITY"
     assert result.sources[0].url == "https://example.org/report"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "exception_type", "category"),
+    [
+        (400, ExternalAPIError, "request_rejected"),
+        (401, ExternalAPIError, "auth_configuration"),
+        (403, ExternalAPIError, "auth_configuration"),
+        (429, ProviderInfrastructureError, "rate_limited"),
+        (500, ProviderInfrastructureError, "unavailable"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_grounded_credibility_classifies_http_failure_without_exposing_provider_content(
+    status_code, exception_type, category,
+):
+    client = _client(_response(status_code, {"error": {"message": "not safe to log"}}))
+    diagnostics: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch(
+        "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
+    ):
+        with pytest.raises(exception_type) as raised:
+            await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
+
+    assert raised.value.service == "gemini"
+    assert raised.value.detail == category
+    assert raised.value.status_code == status_code
+    assert any(
+        f"stage=request_error category={category} status_code={status_code}" in message
+        for message in diagnostics
+    )
+    assert all("not safe to log" not in message for message in diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_grounded_credibility_classifies_timeout_and_transport_diagnostics():
+    config = _configured_gemini()
+    for error, expected_stage, expected_category in (
+        (httpx.ReadTimeout("timeout"), "request_timeout", "timeout"),
+        (httpx.ConnectError("network"), "request_error", "transport"),
+    ):
+        client = _client(error)
+        diagnostics: list[str] = []
+        with config[0], config[1], config[2], patch(
+            "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
+        ):
+            with pytest.raises(ProviderInfrastructureError) as raised:
+                await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
+        assert raised.value.kind == expected_category
+        assert any(
+            f"stage={expected_stage} category={expected_category} status_code=none" in message
+            for message in diagnostics
+        )
 
 
 @pytest.mark.parametrize(

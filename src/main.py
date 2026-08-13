@@ -359,7 +359,7 @@ def _log_provider_infrastructure_error(context: Any, exc: ProviderInfrastructure
     known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
     known_kinds = {
         "capacity", "config", "invalid_configuration", "invalid_response", "missing_credentials", "model_loading", "processing_timeout",
-        "timeout", "transport", "unavailable",
+        "rate_limited", "timeout", "transport", "unavailable",
     }
     known_stages = {"admission", "config", "request", "response"}
     known_reasons = {"api_key_missing"}

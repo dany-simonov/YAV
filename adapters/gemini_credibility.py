@@ -97,11 +97,28 @@ issues — максимум 5. Не придумывай проблемы рад
     def _raise_for_status(cls, response: httpx.Response) -> None:
         if response.status_code < 400:
             return
-        if response.status_code == 429 or response.status_code >= 500:
+        if response.status_code == 429:
+            raise ProviderInfrastructureError(
+                cls.PROVIDER, "rate_limited", stage="request", status_code=response.status_code
+            )
+        if response.status_code >= 500:
             raise ProviderInfrastructureError(
                 cls.PROVIDER, "unavailable", stage="request", status_code=response.status_code
             )
-        raise ExternalAPIError(cls.PROVIDER, "request_error", status_code=response.status_code)
+        category = "auth_configuration" if response.status_code in {401, 403} else "request_rejected"
+        raise ExternalAPIError(cls.PROVIDER, category, status_code=response.status_code)
+
+    @staticmethod
+    def _http_error_category(status_code: int) -> str:
+        if status_code == 400:
+            return "request_rejected"
+        if status_code in {401, 403}:
+            return "auth_configuration"
+        if status_code == 429:
+            return "rate_limited"
+        if status_code >= 500:
+            return "unavailable"
+        return "request_rejected"
 
     @staticmethod
     def _clean_text(value: Any, maximum: int) -> str | None:
@@ -326,25 +343,26 @@ issues — максимум 5. Не придумывай проблемы рад
                         headers={**gemini_headers(), "Content-Type": "application/json"},
                         json={
                             "contents": [{"parts": [{"text": f"{self._PROMPT}{text}"}]}],
-                            "tools": [{"googleSearch": {}}],
+                            "tools": [{"google_search": {}}],
                             "generationConfig": {"temperature": 0.1, "maxOutputTokens": self.MAX_OUTPUT_TOKENS},
                         },
                     )
         except TimeoutError as exc:
             self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_timeout "
-                           f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
+                           f"category=timeout status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "timeout", stage="request") from exc
         except httpx.TimeoutException as exc:
             self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_timeout "
-                           f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
+                           f"category=timeout status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "timeout", stage="request") from exc
         except httpx.TransportError as exc:
             self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_error "
-                           f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
+                           f"category=transport status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "transport", stage="request") from exc
         if response.status_code >= 400:
             self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_error "
-                           f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
+                           f"category={self._http_error_category(response.status_code)} "
+                           f"status_code={response.status_code} elapsed_ms={round((time.monotonic() - started) * 1000)}")
         self._raise_for_status(response)
         self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_success "
                        f"elapsed_ms={round((time.monotonic() - started) * 1000)}")

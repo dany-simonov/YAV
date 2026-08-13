@@ -62,17 +62,18 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
 
   return (
     <div className="w-full">
-      <div className="mb-9"><p className="eyebrow mb-5">Вход в систему</p><h2 className="text-[42px] sm:text-[52px] leading-[1.04] tracking-[-.05em] font-semibold">Продолжить в<br/>ЯВЬ</h2><p className="mt-6 text-lg text-mv-text-secondary">Нет аккаунта? <Link to="/register" className="underline underline-offset-4 hover:text-black">Создать</Link></p></div>
+      <Link to="/" className="lg:hidden inline-flex items-center gap-2.5 mb-7"><span className="w-10 h-10 rounded-[11px] bg-white border border-black/[.12] flex items-center justify-center"><img src="/assets/img/yav-logo.png" alt="" className="w-8 h-8 object-contain" /></span><strong>ЯВЬ</strong></Link>
+      <div className="mb-6"><p className="eyebrow mb-3">Вход в систему</p><h2 className="text-[36px] sm:text-[42px] leading-[1.02] tracking-[-.05em] font-semibold">Продолжить в ЯВЬ</h2><p className="mt-4 text-base text-mv-text-secondary">Нет аккаунта? <Link to="/register" className="underline underline-offset-4 hover:text-black">Создать</Link></p></div>
 
       {/* Error Alert */}
       {error && (
-        <Alert variant="error" className="mb-6" onClose={clearError}>
+        <Alert variant="error" className="mb-4" onClose={clearError}>
           {error}
         </Alert>
       )}
 
       {/* Form */}
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form onSubmit={handleSubmit} className="space-y-3.5">
         <Input
           label="Электронная почта"
           type="email"
@@ -84,7 +85,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
           }}
           error={errors.email}
           size="lg"
-          className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
+          className="!bg-white !rounded-[10px] !border-black/[.08] !px-4 !py-3 !text-base shadow-[0_2px_3px_rgba(0,0,0,.03),0_8px_22px_rgba(0,0,0,.06)]"
           autoComplete="email"
           inputMode="email"
           autoCapitalize="none"
@@ -103,7 +104,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
           }}
           error={errors.password}
           size="lg"
-          className="!bg-white !rounded-[10px] !border-black/[.07] !px-5 !py-4 !text-lg shadow-[0_2px_3px_rgba(0,0,0,.04),0_12px_28px_rgba(0,0,0,.08)]"
+          className="!bg-white !rounded-[10px] !border-black/[.08] !px-4 !py-3 !text-base shadow-[0_2px_3px_rgba(0,0,0,.03),0_8px_22px_rgba(0,0,0,.06)]"
           autoComplete="current-password"
           disabled={isActionLoading}
         />
@@ -111,15 +112,14 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
         <Button
           type="submit"
           fullWidth
-          size="lg" className="!min-h-[58px] !rounded-[11px] !bg-black !text-base"
+          size="lg" className="!min-h-[48px] !rounded-[10px] !bg-black !text-sm"
           isLoading={isActionLoading}
         >
           Войти
         </Button>
       </form>
 
-      <Link to="/" className="btn-light w-full mt-3 !min-h-[58px] !text-base">Вернуться на сайт</Link>
-      <p className="mt-7 text-xs sm:text-sm text-mv-text-muted leading-6">Продолжая, вы соглашаетесь с <Link to="/terms" className="underline">условиями использования</Link> и <Link to="/privacy" className="underline">политикой конфиденциальности</Link>.</p>
+      <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-xs text-mv-text-muted"><Link to="/" className="underline underline-offset-4 hover:text-black">Вернуться на сайт</Link><span>Продолжая, вы принимаете <Link to="/terms" className="underline">условия</Link>.</span></div>
     </div>
   );
 }

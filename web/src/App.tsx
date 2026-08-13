@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { HashRouter, Routes, Route } from 'react-router-dom';
-import { Header, Footer, AuthModal, DashboardLayout, ProtectedRoute, PublicOnlyRoute, VerifiedRoute } from './components';
+import { Header, Footer, DashboardLayout, ProtectedRoute, PublicOnlyRoute, VerifiedRoute } from './components';
 import { 
   Home, 
   About, 
@@ -15,6 +15,7 @@ import {
   NewCheckPage,
   BigTextCheckPage,
   HistoryPage,
+  HistoryDetailPage,
   ApiSettingsPage,
   Research,
   ArcticResearch,
@@ -24,7 +25,6 @@ import { useAuthStore } from './store';
 import { VerifyEmailCallbackPage } from './pages/auth/VerifyEmailCallbackPage';
 
 function AppContent() {
-  const [authModalOpen, setAuthModalOpen] = useState(false);
   const { user, isLoading, initialize, logout } = useAuthStore();
 
   // Initialize auth on mount
@@ -51,7 +51,6 @@ function AppContent() {
         element={
           <div className="min-h-screen bg-mv-bg flex flex-col">
             <Header
-              onLoginClick={() => setAuthModalOpen(true)}
               isLoggedIn={!!user}
               onLogout={logout}
             />
@@ -59,10 +58,6 @@ function AppContent() {
               <Home />
             </main>
             <Footer />
-            <AuthModal
-              isOpen={authModalOpen}
-              onClose={() => setAuthModalOpen(false)}
-            />
           </div>
         }
       />
@@ -83,16 +78,11 @@ function AppContent() {
           element={
             <div className="min-h-screen bg-mv-bg flex flex-col">
               <Header
-                onLoginClick={() => setAuthModalOpen(true)}
                 isLoggedIn={!!user}
                 onLogout={logout}
               />
               <main className="flex-1">{element}</main>
               <Footer />
-              <AuthModal
-                isOpen={authModalOpen}
-                onClose={() => setAuthModalOpen(false)}
-              />
             </div>
           }
         />
@@ -134,6 +124,7 @@ function AppContent() {
         <Route path="check" element={<VerifiedRoute><NewCheckPage /></VerifiedRoute>} />
         <Route path="big-text" element={<VerifiedRoute><BigTextCheckPage /></VerifiedRoute>} />
         <Route path="history" element={<VerifiedRoute><HistoryPage /></VerifiedRoute>} />
+        <Route path="history/:checkId" element={<VerifiedRoute><HistoryDetailPage /></VerifiedRoute>} />
         <Route path="api" element={<ApiSettingsPage />} />
       </Route>
 

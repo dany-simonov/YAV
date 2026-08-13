@@ -1,5 +1,6 @@
 """Unit contracts for normal TEXT Gemini verification."""
 
+import asyncio
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -196,6 +197,60 @@ async def test_timeout_is_typed():
         with pytest.raises(ProviderInfrastructureError) as raised:
             await GeminiTextAdapter().analyze(b"test")
     assert (raised.value.service, raised.value.kind) == ("gemini", "timeout")
+
+
+@pytest.mark.asyncio
+async def test_slow_async_provider_is_cancelled_inside_transport_budget():
+    async def slow_post(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return _response(200, _generated("REAL", 90, 0.8, "Безопасный текст."))
+
+    client = _client()
+    client.post = slow_post
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch.object(
+        GeminiTextAdapter, "TOTAL_TIMEOUT_SECONDS", 0.01
+    ), patch.object(GeminiTextAdapter, "TRANSPORT_SAFETY_SECONDS", 0.001), patch(
+        "adapters.gemini_text.httpx.AsyncClient", return_value=client
+    ):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await GeminiTextAdapter().analyze(b"test")
+    assert (raised.value.service, raised.value.kind, raised.value.stage) == (
+        "gemini", "timeout", "request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_transport_timeout_uses_remaining_analysis_budget_minus_reserve():
+    now = time.monotonic()
+    deadline = ExecutionDeadline(now, now + 20, now + 2.5, now + 18)
+    token = set_execution_deadline(deadline)
+    client = _client(response=_response(200, _generated("REAL", 90, 0.8, "Безопасный текст.")))
+    config = _configured_gemini()
+    try:
+        with config[0], config[1], config[2], patch("adapters.gemini_text.httpx.AsyncClient") as async_client:
+            async_client.return_value = client
+            await GeminiTextAdapter().analyze(b"test")
+    finally:
+        reset_execution_deadline(token)
+    transport_timeout = async_client.call_args.kwargs["timeout"]
+    assert 0 < transport_timeout.connect <= 0.5
+    assert 0 < transport_timeout.read <= 0.5
+    assert 0 < transport_timeout.write <= 0.5
+    assert 0 < transport_timeout.pool <= 0.5
+
+
+@pytest.mark.asyncio
+async def test_safe_timing_logs_exclude_request_content_and_credentials():
+    client = _client(response=_response(200, _generated("REAL", 90, 0.8, "Безопасный текст.")))
+    logs: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch("adapters.gemini_text.httpx.AsyncClient", return_value=client):
+        await GeminiTextAdapter().analyze(b"private text", diagnostic_log=logs.append)
+    assert any("stage=request_start" in item for item in logs)
+    assert any("stage=request_success" in item for item in logs)
+    assert any("stage=normalize" in item for item in logs)
+    assert all("private text" not in item and "unit-test-key" not in item for item in logs)
 
 
 @pytest.mark.asyncio

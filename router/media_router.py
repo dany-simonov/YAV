@@ -2,6 +2,7 @@
 
 import logging
 import os
+from typing import Callable
 
 from adapters.aiornot_text import AIOrNotTextAdapter
 from adapters.gemini_text import GeminiTextAdapter
@@ -106,6 +107,7 @@ class MediaRouter:
         text_content: str = "",
         *,
         mime_type: str | None = None,
+        diagnostic_log: Callable[[str], None] | None = None,
     ) -> AnalysisResult:
         """Route to the appropriate adapter based on media type."""
         match media_type:
@@ -135,6 +137,8 @@ class MediaRouter:
                 text_bytes = text_content.encode("utf-8") if text_content else file_bytes
                 if AIOrNotTextAdapter.is_eligible(text_bytes):
                     return await AIOrNotTextAdapter().analyze(text_bytes)
+                if diagnostic_log is not None:
+                    return await GeminiTextAdapter().analyze(text_bytes, diagnostic_log=diagnostic_log)
                 return await GeminiTextAdapter().analyze(text_bytes)
 
             case _:

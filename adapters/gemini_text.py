@@ -6,7 +6,8 @@ import asyncio
 import json
 import math
 import re
-from typing import Any
+import time
+from typing import Any, Callable
 
 import httpx
 
@@ -27,6 +28,7 @@ class GeminiTextAdapter(BaseAdapter):
     PROVIDER = "gemini"
     MODEL = "text_verification"
     TOTAL_TIMEOUT_SECONDS = 15.0
+    TRANSPORT_SAFETY_SECONDS = 2.0
     REQUEST_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0)
     _SUMMARY_PREFIX = re.compile(
         r"^(?:gemini\s+text\s+verification\s*(?::|—)|gemini\s*:)\s*",
@@ -55,14 +57,30 @@ class GeminiTextAdapter(BaseAdapter):
     )
 
     @classmethod
-    def _request_timeout(cls) -> httpx.Timeout:
-        remaining = bounded_timeout(cls.TOTAL_TIMEOUT_SECONDS)
+    def _transport_timeout_seconds(cls) -> float:
+        """Keep a local reserve for quota finalization and the Appwrite response."""
+        timeout = bounded_timeout(cls.TOTAL_TIMEOUT_SECONDS) - cls.TRANSPORT_SAFETY_SECONDS
+        if timeout <= 0:
+            raise ProviderInfrastructureError(cls.PROVIDER, "timeout", stage="request")
+        return timeout
+
+    @classmethod
+    def _request_timeout(cls, timeout_seconds: float) -> httpx.Timeout:
         return httpx.Timeout(
-            connect=min(cls.REQUEST_TIMEOUT.connect, remaining),
-            read=min(cls.REQUEST_TIMEOUT.read, remaining),
-            write=min(cls.REQUEST_TIMEOUT.write, remaining),
-            pool=min(cls.REQUEST_TIMEOUT.pool, remaining),
+            connect=min(cls.REQUEST_TIMEOUT.connect, timeout_seconds),
+            read=min(cls.REQUEST_TIMEOUT.read, timeout_seconds),
+            write=min(cls.REQUEST_TIMEOUT.write, timeout_seconds),
+            pool=min(cls.REQUEST_TIMEOUT.pool, timeout_seconds),
         )
+
+    @staticmethod
+    def _diagnose(diagnostic_log: Callable[[str], None] | None, message: str) -> None:
+        if diagnostic_log is None:
+            return
+        try:
+            diagnostic_log(message)
+        except Exception:
+            pass
 
     @classmethod
     def _raise_for_status(cls, response: httpx.Response) -> None:
@@ -131,7 +149,9 @@ class GeminiTextAdapter(BaseAdapter):
             ),
         )
 
-    async def analyze(self, data: bytes) -> AnalysisResult:
+    async def analyze(
+        self, data: bytes, *, diagnostic_log: Callable[[str], None] | None = None
+    ) -> AnalysisResult:
         text = data.decode("utf-8", errors="replace").strip()
         if not text:
             raise ValueError("Gemini text input is empty")
@@ -140,11 +160,17 @@ class GeminiTextAdapter(BaseAdapter):
         model, base_url = safe_gemini_model(), safe_gemini_base_url()
         if model == "invalid-model" or base_url is None:
             raise ProviderInfrastructureError(self.PROVIDER, "invalid_configuration", stage="config")
+        started = time.monotonic()
         try:
-            timeout = bounded_timeout(self.TOTAL_TIMEOUT_SECONDS)
+            timeout = self._transport_timeout_seconds()
+            self._diagnose(
+                diagnostic_log,
+                "provider=gemini_text stage=request_start "
+                f"transport_timeout_ms={round(timeout * 1000)}",
+            )
             async with asyncio.timeout(timeout):
                 await admit_provider_operation(self.PROVIDER)
-                async with httpx.AsyncClient(timeout=self._request_timeout()) as client:
+                async with httpx.AsyncClient(timeout=self._request_timeout(timeout)) as client:
                     response = await client.post(
                         f"{base_url}/v1beta/models/{model}:generateContent",
                         headers={**gemini_headers(), "Content-Type": "application/json"},
@@ -157,10 +183,43 @@ class GeminiTextAdapter(BaseAdapter):
                         },
                     )
         except TimeoutError as exc:
+            self._diagnose(
+                diagnostic_log,
+                "provider=gemini_text stage=request_timeout "
+                f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+            )
             raise ProviderInfrastructureError(self.PROVIDER, "timeout", stage="request") from exc
         except httpx.TimeoutException as exc:
+            self._diagnose(
+                diagnostic_log,
+                "provider=gemini_text stage=request_timeout "
+                f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+            )
             raise ProviderInfrastructureError(self.PROVIDER, "timeout", stage="request") from exc
         except httpx.TransportError as exc:
+            self._diagnose(
+                diagnostic_log,
+                "provider=gemini_text stage=request_error "
+                f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+            )
             raise ProviderInfrastructureError(self.PROVIDER, "transport", stage="request") from exc
+        if response.status_code >= 400:
+            self._diagnose(
+                diagnostic_log,
+                "provider=gemini_text stage=request_error "
+                f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+            )
         self._raise_for_status(response)
-        return self._result(response, model)
+        self._diagnose(
+            diagnostic_log,
+            "provider=gemini_text stage=request_success "
+            f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
+        )
+        normalize_started = time.monotonic()
+        result = self._result(response, model)
+        self._diagnose(
+            diagnostic_log,
+            "provider=gemini_text stage=normalize "
+            f"elapsed_ms={round((time.monotonic() - normalize_started) * 1000)}",
+        )
+        return result

@@ -499,7 +499,9 @@ async def _analyze(
         if mode:
             result = await _with_quota(lambda: hybrid_analyzer.analyze(text))
         else:
-            result = await _with_quota(lambda: router.route(MediaType.TEXT, b"", text))
+            result = await _with_quota(
+                lambda: router.route(MediaType.TEXT, b"", text, diagnostic_log=diagnostic_log)
+            )
     else:
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
@@ -607,18 +609,35 @@ async def _execute_request(
         rate_store = AppwriteTablesRateLimitStore(api_key)
         await _within_deadline(enforce_admission(rate_store, user_id, client_ip))
         result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
-        check_id = await (
-            execution_deadline.run_persistence(
-                persist_check_result(
-                    result,
-                    user_id,
-                    request.source_label or "",
-                    api_key,
+        is_gemini_text = result.get("model_used") == "gemini_text_verification"
+        persistence_started = time.monotonic()
+        if is_gemini_text and diagnostic_log:
+            diagnostic_log("provider=gemini_text stage=persistence_start")
+        try:
+            check_id = await (
+                execution_deadline.run_persistence(
+                    persist_check_result(
+                        result,
+                        user_id,
+                        request.source_label or "",
+                        api_key,
+                    )
                 )
+                if execution_deadline is not None
+                else persist_check_result(result, user_id, request.source_label or "", api_key)
             )
-            if execution_deadline is not None
-            else persist_check_result(result, user_id, request.source_label or "", api_key)
-        )
+        except Exception:
+            if is_gemini_text and diagnostic_log:
+                diagnostic_log(
+                    "provider=gemini_text stage=persistence_error "
+                    f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
+                )
+            raise
+        if is_gemini_text and diagnostic_log:
+            diagnostic_log(
+                "provider=gemini_text stage=persistence_success "
+                f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
+            )
         result["check_id"] = check_id
         if execution_deadline is not None:
             execution_deadline.remaining_root_time()

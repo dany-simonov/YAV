@@ -1,4 +1,4 @@
-import { Download, ArrowUpRight } from 'lucide-react';
+import { Download } from 'lucide-react';
 import type { CheckResult } from '../types';
 interface Props{result:CheckResult}
 const labels={REAL:'Признаки генерации не выражены',FAKE:'Найдены признаки AI-генерации',UNCERTAIN:'Требуется дополнительная проверка'};
@@ -8,5 +8,5 @@ export function CheckResultCard({result}:Props){const rows=[['01 · Вывод �
   <div className="border-t border-black/[.07] p-6 sm:p-9 grid lg:grid-cols-[1fr_300px] gap-10"><div><p className="eyebrow mb-5">Общий вывод</p><h3 className="text-2xl sm:text-3xl font-semibold tracking-[-.04em] leading-tight">{labels[result.verdict]}</h3><p className="text-mv-text-secondary leading-7 mt-4 max-w-xl">{result.explanation}</p></div><aside className="bg-[#f4f4f2] border border-black/[.06] rounded-[14px] p-5"><p className="text-xs font-semibold mb-3">Рекомендация</p><p className="text-sm text-mv-text-secondary leading-6">Используйте результат вместе с контекстом материала. Для значимых решений проведите ручную проверку источника.</p></aside></div>
   {result.short_report && <section className="px-6 sm:px-9 pb-8"><p className="eyebrow mb-3">Краткий отчёт</p><p className="max-w-3xl text-sm sm:text-base text-mv-text-secondary leading-7">{result.short_report}</p></section>}
   <section className="px-6 sm:px-9 pb-8"><p className="eyebrow mb-3">Основные признаки</p>{rows.map(r=><div key={r[0]} className="grid sm:grid-cols-2 gap-2 py-4 border-t border-black/[.07] text-sm"><span className="text-mv-text-secondary">{r[0]}</span><span className={`${r[2]} sm:text-right`}>{r[1]}</span></div>)}</section>
-  <footer className="px-6 sm:px-9 py-5 bg-[#fafaf9] border-t border-black/[.07] flex flex-wrap justify-between gap-3"><button className="btn-light !min-h-[40px]"><ArrowUpRight size={15}/>Технические детали</button><button className="btn-black !min-h-[40px]" onClick={()=>window.print()}><Download size={15}/>Экспортировать PDF</button></footer>
+	  <footer className="px-6 sm:px-9 py-5 bg-[#fafaf9] border-t border-black/[.07] flex justify-end"><button className="btn-black !min-h-[40px]" onClick={()=>window.print()}><Download size={15}/>Экспортировать PDF</button></footer>
   </article>}

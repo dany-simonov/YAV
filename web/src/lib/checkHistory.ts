@@ -127,6 +127,27 @@ export async function loadChecksHistory(userId: string): Promise<Check[]> {
   }
 }
 
+export async function loadCheckFromHistory(userId: string, checkId: string): Promise<Check> {
+  if (!userId || !checkId) throw new Error('Проверка не найдена');
+
+  try {
+    const row = await tablesDB.getRow<CheckRow>({
+      databaseId: APPWRITE_CONFIG.databaseId,
+      tableId: APPWRITE_CONFIG.tables.checks,
+      rowId: checkId,
+    });
+    if (row.user_id !== userId) throw new Error('Нет доступа к этой проверке');
+
+    return {
+      ...mapHistoryRow(row),
+      explanation: row.explanation || row.source_label || 'Пояснение отсутствует',
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Нет доступа к этой проверке') throw error;
+    throw historyError(error);
+  }
+}
+
 export async function deleteCheckFromHistory(userId: string, checkId: string): Promise<void> {
   if (!userId || !checkId) return;
   try {

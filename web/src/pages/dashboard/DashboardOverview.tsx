@@ -40,7 +40,7 @@ export function DashboardOverview() {
   }, [user?.$id]);
 
   return (
-    <div className="max-w-6xl mx-auto space-y-8">
+    <div className="max-w-6xl mx-auto space-y-8 pb-[200px]">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -238,9 +238,9 @@ export function DashboardOverview() {
                     <span className="text-mv-text">Фото</span>
                   </span>
                 </td>
-                <td className="py-3 px-4 text-mv-text-secondary">Sightengine</td>
+                <td className="py-3 px-4 text-mv-text-secondary">Sightengine GenAI</td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-real font-semibold">94.4%</span>
+                  <span className="text-mv-real font-semibold">98.3%</span>
                 </td>
               </tr>
               <tr className="border-b border-mv-border">
@@ -262,9 +262,9 @@ export function DashboardOverview() {
                     <span className="text-mv-text">Видео</span>
                   </span>
                 </td>
-                <td className="py-3 px-4 text-mv-text-secondary">FFmpeg + CLIP</td>
+                <td className="py-3 px-4 text-mv-text-secondary">Gemini 2.5 Pro</td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-uncertain font-semibold">81%</span>
+                  <span className="text-mv-uncertain font-semibold">84.8%</span>
                 </td>
               </tr>
               <tr>
@@ -274,9 +274,9 @@ export function DashboardOverview() {
                     <span className="text-mv-text">Текст</span>
                   </span>
                 </td>
-                <td className="py-3 px-4 text-mv-text-secondary">Sapling AI</td>
+                <td className="py-3 px-4 text-mv-text-secondary">AI or Not</td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-real font-semibold">98%</span>
+                  <span className="text-mv-real font-semibold">97%</span>
                 </td>
               </tr>
             </tbody>

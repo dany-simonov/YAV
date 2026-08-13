@@ -221,7 +221,14 @@ export function HistoryPage() {
                     <Trash2 className="w-4 h-4" />
                   </button>
                   
-                  <ChevronRight className="w-5 h-5 text-mv-text-muted" />
+                  <Link
+                    to={`/dashboard/history/${encodeURIComponent(check.id)}`}
+                    className="p-2 rounded-lg text-mv-text-muted hover:text-mv-text hover:bg-mv-surface-2 transition-colors"
+                    aria-label="Открыть результат проверки"
+                    title="Открыть результат"
+                  >
+                    <ChevronRight className="w-5 h-5" />
+                  </Link>
                 </div>
               );
             })}

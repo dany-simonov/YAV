@@ -79,18 +79,18 @@ async def test_grounded_credibility_uses_one_generate_content_request_and_ground
 
 
 @pytest.mark.parametrize(
-    ("status_code", "exception_type", "category"),
+    ("status_code", "exception_type", "category", "diagnostic_category"),
     [
-        (400, ExternalAPIError, "request_rejected"),
-        (401, ExternalAPIError, "auth_configuration"),
-        (403, ExternalAPIError, "auth_configuration"),
-        (429, ProviderInfrastructureError, "rate_limited"),
-        (500, ProviderInfrastructureError, "unavailable"),
+        (400, ExternalAPIError, "request_rejected", "request_rejected"),
+        (401, ExternalAPIError, "auth_configuration", "auth_configuration"),
+        (403, ExternalAPIError, "auth_configuration", "auth_configuration"),
+        (429, ProviderInfrastructureError, "rate_limited", "unknown_rate_limit"),
+        (500, ProviderInfrastructureError, "unavailable", "unavailable"),
     ],
 )
 @pytest.mark.asyncio
 async def test_grounded_credibility_classifies_http_failure_without_exposing_provider_content(
-    status_code, exception_type, category,
+    status_code, exception_type, category, diagnostic_category,
 ):
     client = _client(_response(status_code, {"error": {"message": "not safe to log"}}))
     diagnostics: list[str] = []
@@ -105,7 +105,7 @@ async def test_grounded_credibility_classifies_http_failure_without_exposing_pro
     assert raised.value.detail == category
     assert raised.value.status_code == status_code
     assert any(
-        f"stage=request_error category={category} status_code={status_code}" in message
+        f"stage=request_error category={diagnostic_category} status_code={status_code}" in message
         for message in diagnostics
     )
     assert all("not safe to log" not in message for message in diagnostics)
@@ -130,6 +130,85 @@ async def test_grounded_credibility_classifies_timeout_and_transport_diagnostics
             f"stage={expected_stage} category={expected_category} status_code=none" in message
             for message in diagnostics
         )
+
+
+def _quota_failure(quota_id, quota_metric, *, quota_value=None, model="gemini-test-model", location="global"):
+    violation = {"quotaId": quota_id, "quotaMetric": quota_metric, "quotaDimensions": {
+        "model": model, "location": location,
+    }}
+    if quota_value is not None:
+        violation["quotaValue"] = quota_value
+    return {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [violation]}
+
+
+def _retry_info(delay):
+    return {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay}
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected_category"),
+    [
+        (_quota_failure("GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "generate_content_free_tier_requests"), "rate_limit_minute"),
+        (_quota_failure("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "generate_content_free_tier_requests"), "daily_quota"),
+        (_quota_failure("GenerateInputTokensPerMinutePerProjectPerModel-FreeTier", "generate_content_input_tokens"), "rate_limit_tokens"),
+        (_quota_failure("GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "generate_content_free_tier_requests", quota_value="0"), "quota_unavailable_or_zero"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_grounded_credibility_emits_allowlisted_429_quota_metadata(detail, expected_category):
+    client = _client(_response(429, {"error": {"details": [detail, _retry_info("1.25s")]}}))
+    diagnostics: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch(
+        "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
+    ):
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
+
+    assert raised.value.kind == "rate_limited"
+    message = next(message for message in diagnostics if "stage=request_error" in message)
+    assert f"category={expected_category}" in message
+    assert "quota_id=GenerateRequestsPerMinutePerProjectPerModel-FreeTier" in message or "PerDay" in message or "InputTokens" in message
+    assert "quota_metric=generate_content_" in message
+    assert "quota_model=gemini-test-model" in message
+    assert "quota_location=global" in message
+    assert "retry_delay_ms=1250" in message
+
+
+@pytest.mark.asyncio
+async def test_grounded_credibility_429_without_valid_details_is_unknown_and_does_not_log_secrets():
+    body = {
+        "error": {
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": "malformed"},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "not-a-duration"},
+                {"secret": "api_key=never-log-this", "message": "never-log-this"},
+            ],
+            "message": "never-log-this",
+            "authorization": "Bearer never-log-this",
+        },
+    }
+    client = _client(_response(429, body))
+    diagnostics: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch(
+        "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
+    ):
+        with pytest.raises(ProviderInfrastructureError):
+            await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
+
+    message = next(message for message in diagnostics if "stage=request_error" in message)
+    assert "category=unknown_rate_limit" in message
+    assert "quota_" not in message
+    assert "never-log-this" not in message
+
+
+def test_grounded_credibility_malformed_429_json_is_safe_unknown_rate_limit():
+    response = _response(429, {})
+    response.json.side_effect = ValueError("not JSON")
+    assert GeminiCredibilityAdapter._rate_limit_metadata(response) == {
+        "category": "unknown_rate_limit",
+    }
 
 
 @pytest.mark.parametrize(

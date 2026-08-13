@@ -40,6 +40,9 @@ class GeminiCredibilityAdapter(BaseAdapter):
         "INSUFFICIENT_EVIDENCE",
     }
     _SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
+    _QUOTA_TEXT = re.compile(r"[A-Za-z0-9._/-]{1,160}")
+    _QUOTA_VALUE = re.compile(r"\d{1,20}")
+    _RETRY_DELAY = re.compile(r"(\d{1,7})(?:\.(\d{1,3}))?s")
     _PROMPT = """Проверь текст на достоверность, а не на признаки AI-генерации.
 Используй Google Search экономно и только для 1–5 ключевых проверяемых утверждений
 (для короткого текста достаточно 1–2). Не проводи глубокое исследование, не делай
@@ -119,6 +122,105 @@ issues — максимум 5. Не придумывай проблемы рад
         if status_code >= 500:
             return "unavailable"
         return "request_rejected"
+
+    @classmethod
+    def _safe_quota_text(cls, value: Any) -> str | None:
+        """Accept only bounded identifier-like metadata from a 429 response."""
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value if cls._QUOTA_TEXT.fullmatch(value) else None
+
+    @classmethod
+    def _safe_retry_delay_ms(cls, value: Any) -> int | None:
+        if not isinstance(value, str):
+            return None
+        matched = cls._RETRY_DELAY.fullmatch(value.strip())
+        if matched is None:
+            return None
+        seconds = int(matched.group(1))
+        milliseconds = int((matched.group(2) or "").ljust(3, "0") or 0)
+        total = seconds * 1000 + milliseconds
+        return total if total <= 3_600_000 else None
+
+    @classmethod
+    def _rate_limit_classification(cls, quota_id: str | None, quota_metric: str | None,
+                                   quota_value: str | None) -> str:
+        if quota_value == "0":
+            return "quota_unavailable_or_zero"
+        marker = " ".join(item.casefold() for item in (quota_id, quota_metric) if item)
+        if "token" in marker:
+            return "rate_limit_tokens"
+        if "ground" in marker:
+            return "grounding_quota"
+        if any(item in marker for item in ("perday", "per_day", "daily", "rpd")):
+            return "daily_quota"
+        if any(item in marker for item in ("perminute", "per_minute", "minute", "rpm")):
+            return "rate_limit_minute"
+        return "unknown_rate_limit"
+
+    @classmethod
+    def _rate_limit_metadata(cls, response: httpx.Response) -> dict[str, str | int]:
+        """Extract only stable quota identifiers; never expose a provider body."""
+        try:
+            body = response.json()
+        except (TypeError, ValueError):
+            return {"category": "unknown_rate_limit"}
+        error = body.get("error") if isinstance(body, dict) else None
+        details = error.get("details") if isinstance(error, dict) else None
+        if not isinstance(details, list):
+            return {"category": "unknown_rate_limit"}
+
+        quota_id = quota_metric = quota_model = quota_location = quota_value = None
+        retry_delay_ms = None
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            detail_type = detail.get("@type")
+            if detail_type == "type.googleapis.com/google.rpc.QuotaFailure" and quota_id is None:
+                violations = detail.get("violations")
+                if not isinstance(violations, list):
+                    continue
+                for violation in violations:
+                    if not isinstance(violation, dict):
+                        continue
+                    candidate_id = cls._safe_quota_text(violation.get("quotaId"))
+                    candidate_metric = cls._safe_quota_text(violation.get("quotaMetric"))
+                    candidate_value = violation.get("quotaValue")
+                    candidate_value = (
+                        candidate_value.strip()
+                        if isinstance(candidate_value, str) and cls._QUOTA_VALUE.fullmatch(candidate_value.strip())
+                        else None
+                    )
+                    if candidate_id is None and candidate_metric is None and candidate_value is None:
+                        continue
+                    dimensions = violation.get("quotaDimensions")
+                    quota_id, quota_metric, quota_value = candidate_id, candidate_metric, candidate_value
+                    if isinstance(dimensions, dict):
+                        quota_model = cls._safe_quota_text(dimensions.get("model"))
+                        quota_location = cls._safe_quota_text(dimensions.get("location"))
+                    break
+            elif detail_type == "type.googleapis.com/google.rpc.RetryInfo" and retry_delay_ms is None:
+                retry_delay_ms = cls._safe_retry_delay_ms(detail.get("retryDelay"))
+
+        metadata: dict[str, str | int] = {
+            "category": cls._rate_limit_classification(quota_id, quota_metric, quota_value),
+        }
+        for name, value in (
+            ("quota_id", quota_id),
+            ("quota_metric", quota_metric),
+            ("quota_model", quota_model),
+            ("quota_location", quota_location),
+            ("quota_value", quota_value),
+            ("retry_delay_ms", retry_delay_ms),
+        ):
+            if value is not None:
+                metadata[name] = value
+        return metadata
+
+    @staticmethod
+    def _diagnostic_fields(fields: dict[str, str | int]) -> str:
+        return " ".join(f"{key}={value}" for key, value in fields.items())
 
     @staticmethod
     def _clean_text(value: Any, maximum: int) -> str | None:
@@ -360,8 +462,13 @@ issues — максимум 5. Не придумывай проблемы рад
                            f"category=transport status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "transport", stage="request") from exc
         if response.status_code >= 400:
+            metadata = (
+                self._rate_limit_metadata(response)
+                if response.status_code == 429
+                else {"category": self._http_error_category(response.status_code)}
+            )
             self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_error "
-                           f"category={self._http_error_category(response.status_code)} "
+                           f"{self._diagnostic_fields(metadata)} "
                            f"status_code={response.status_code} elapsed_ms={round((time.monotonic() - started) * 1000)}")
         self._raise_for_status(response)
         self._diagnose(diagnostic_log, "branch=credibility provider=gemini stage=request_success "

@@ -142,8 +142,9 @@ Frontend размещён на Appwrite Sites. Auth отвечает за сес
 
 | Тип контента | Provider | Model / API mode | Роль |
 | --- | --- | --- | --- |
-| Текст | AI or Not | `text_sync` | Основной для текста, подходящего под ограничения API |
-| Текст | Sapling | `aidetect` | Основной для остальных текстов; резервный при недоступности AI or Not |
+| Текст | Gemini | `GEMINI_MODEL` / `generateContent` | Основной для непустого текста, не подходящего под ограничения AI or Not; также резервный при его технической недоступности |
+| Текст | AI or Not | `text_sync` | Основной для текста от 250 символов и 64 слов |
+| Расширенная проверка текста | Sapling | `aidetect` | AI-детектор в отдельном hybrid-потоке вместе с fact-checking |
 | Fact-checking | g4f | `gpt-4.1-nano` | Первый вариант в каскаде расширенного анализа |
 | Fact-checking | g4f | `gpt-oss-120b` | Первый резервный вариант |
 | Fact-checking | g4f | `command-r` | Второй резервный вариант |
@@ -151,7 +152,7 @@ Frontend размещён на Appwrite Sites. Auth отвечает за сес
 | Изображения | Hugging Face | `dima806/deepfake-vs-real-image-detection` | Резервный анализатор |
 | Аудио | Resemble Detect | `detect_v1` | Основной анализатор |
 | Аудио | Hugging Face | `mo-gg/wav2vec2-large-xlsr-deepfake-detection` | Резервный анализатор |
-| Видео | Gemini | `GEMINI_MODEL` | Основной анализатор |
+| Видео | Gemini | `GEMINI_MODEL` / Files API | Основной анализатор |
 
 В таблице указаны идентификаторы моделей и режимов API, которые фактически используются в коде.
 

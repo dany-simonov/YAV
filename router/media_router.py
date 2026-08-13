@@ -4,10 +4,10 @@ import logging
 import os
 
 from adapters.aiornot_text import AIOrNotTextAdapter
+from adapters.gemini_text import GeminiTextAdapter
 from adapters.hf_audio import HFAudioAdapter
 from adapters.hf_image import HFImageAdapter
 from adapters.resemble import ResembleAdapter
-from adapters.sapling import SaplingAdapter
 from adapters.sightengine import SightengineAdapter
 from adapters.gemini_video import GeminiVideoAdapter
 from api.schemas import AnalysisResult, ComponentEvidence
@@ -134,11 +134,8 @@ class MediaRouter:
             case MediaType.TEXT:
                 text_bytes = text_content.encode("utf-8") if text_content else file_bytes
                 if AIOrNotTextAdapter.is_eligible(text_bytes):
-                    try:
-                        return await AIOrNotTextAdapter().analyze(text_bytes)
-                    except ProviderInfrastructureError:
-                        return await SaplingAdapter().analyze(text_bytes)
-                return await SaplingAdapter().analyze(text_bytes)
+                    return await AIOrNotTextAdapter().analyze(text_bytes)
+                return await GeminiTextAdapter().analyze(text_bytes)
 
             case _:
                 raise UnsupportedMediaType()

@@ -22,6 +22,7 @@ class ModelUsed(str, Enum):
     SIGHTENGINE_VIDEO = "sightengine_video_pipeline"
     SIGHTENGINE_VIDEO_DIRECT = "sightengine_video_direct"
     GEMINI_VIDEO = "gemini_video_verification"
+    GEMINI_TEXT = "gemini_text_verification"
     RESEMBLE = "resemble_detect"
     SAPLING = "sapling"
     HF_IMAGE = "hf_image_inference"

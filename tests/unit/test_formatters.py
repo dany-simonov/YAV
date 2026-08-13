@@ -67,6 +67,19 @@ class TestFormatResult:
         assert "Индекс подлинности: <b>5%</b>" not in text
         assert "Gemini Video Verification" in text
 
+    def test_gemini_text_uses_canonical_authenticity_index_and_model_name(self):
+        text = format_result(_make_result(
+            verdict=Verdict.FAKE,
+            confidence=0.93,
+            authenticity_index=12,
+            model_used=ModelUsed.GEMINI_TEXT,
+            media_type=MediaType.TEXT,
+        ))
+
+        assert "Индекс подлинности: <b>12%</b>" in text
+        assert "Индекс подлинности: <b>7%</b>" not in text
+        assert "Gemini Text Verification" in text
+
     def test_canonical_authenticity_index_takes_priority_over_legacy_calculation(self):
         text = format_result(_make_result(
             verdict=Verdict.FAKE, confidence=0.95, authenticity_index=0

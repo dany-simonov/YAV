@@ -19,4 +19,8 @@ describe('result presentation', () => {
   it('formats the Gemini VIDEO identifier for users', () => {
     expect(displayModelName('gemini_video_verification')).toBe('Gemini Video Verification');
   });
+
+  it('formats the Gemini TEXT identifier for users', () => {
+    expect(displayModelName('gemini_text_verification')).toBe('Gemini Text Verification');
+  });
 });

@@ -107,8 +107,8 @@ export function Dashboard() {
                   </tr>
                   <tr>
                     <td className="py-3 text-mv-text">📄 Текст</td>
-                    <td className="py-3 text-mv-text-secondary">Sapling AI</td>
-                    <td className="py-3 text-right text-mv-real font-medium">98%</td>
+                    <td className="py-3 text-mv-text-secondary">Gemini Text Verification</td>
+                    <td className="py-3 text-right text-mv-text-secondary font-medium">—</td>
                   </tr>
                 </tbody>
               </table>

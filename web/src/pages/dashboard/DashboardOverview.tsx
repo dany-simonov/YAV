@@ -274,9 +274,9 @@ export function DashboardOverview() {
                     <span className="text-mv-text">Текст</span>
                   </span>
                 </td>
-                <td className="py-3 px-4 text-mv-text-secondary">Sapling AI</td>
+                <td className="py-3 px-4 text-mv-text-secondary">Gemini Text Verification</td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-real font-semibold">98%</span>
+                  <span className="text-mv-text-secondary font-semibold">—</span>
                 </td>
               </tr>
             </tbody>

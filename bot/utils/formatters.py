@@ -16,6 +16,7 @@ VERDICT_TEXT = {
 
 MODEL_NAMES = {
     "gemini_video_verification": "Gemini Video Verification",
+    "gemini_text_verification": "Gemini Text Verification",
     "sightengine": "Sightengine (\u0444\u043e\u0442\u043e)",
     "sightengine_video_pipeline": "Sightengine (\u0432\u0438\u0434\u0435\u043e)",
     "resemble_detect": "Resemble Detect (\u0430\u0443\u0434\u0438\u043e)",

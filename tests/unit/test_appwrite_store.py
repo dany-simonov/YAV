@@ -89,20 +89,20 @@ def test_ai_probability_v2_persists_canonical_fields_without_double_inversion():
     assert row["authenticity_index"] != 80
 
 
-def test_short_sapling_result_persists_its_canonical_authenticity_index():
+def test_gemini_text_result_persists_its_canonical_authenticity_index():
     row = map_analysis_to_check_row(
         _canonical_result(
             verdict="REAL",
             confidence=0.05,
-            model_used="sapling",
+            model_used="gemini_text_verification",
             media_type="text",
             ai_probability=0.05,
             authenticity_index=95,
             provider_evidence={
-                "provider": "sapling",
-                "model": "aidetect",
-                "raw_score": 0.05,
-                "score_kind": "ai_probability",
+                "provider": "gemini",
+                "model": "gemini-test-model",
+                "raw_score": 0.95,
+                "score_kind": "authenticity_score",
                 "predicted_label": "REAL",
                 "safe_details": {"score_field": "score"},
             },
@@ -367,6 +367,12 @@ def test_analysis_result_mapping_persists_aiornot_text_under_canonical_provider(
     row = map_analysis_to_check_row({"model_used": "aiornot_text"}, "authenticated-user")
     assert row["provider"] == "aiornot"
     assert row["model"] == "aiornot_text"
+
+
+def test_analysis_result_mapping_persists_gemini_text_under_canonical_provider():
+    row = map_analysis_to_check_row({"model_used": "gemini_text_verification"}, "authenticated-user")
+    assert row["provider"] == "gemini"
+    assert row["model"] == "gemini_text_verification"
 
 
 def test_details_serialization_handles_enum_like_values():

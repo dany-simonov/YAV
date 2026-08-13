@@ -63,4 +63,18 @@ describe('CheckResultCard short report', () => {
     expect(markup).toContain('>95<span');
     expect(markup).not.toContain('>90<span');
   });
+
+  it('renders a canonical Gemini TEXT index and readable model name directly', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      verdict: 'FAKE',
+      confidence: 0.93,
+      authenticity_index: 12,
+      model_used: 'gemini_text_verification',
+    })} />);
+
+    expect(markup).toContain('>12<span');
+    expect(markup).not.toContain('>7<span');
+    expect(markup).toContain('Gemini Text Verification');
+    expect(markup).not.toContain('gemini_text_verification');
+  });
 });

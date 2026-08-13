@@ -36,7 +36,7 @@ def _result(verdict: Verdict) -> AnalysisResult:
     return AnalysisResult(
         verdict=verdict,
         confidence=0.5,
-        model_used=ModelUsed.SAPLING,
+        model_used=ModelUsed.GEMINI_TEXT,
         explanation="safe",
         media_type=MediaType.TEXT,
     )
@@ -57,16 +57,16 @@ async def test_completed_result_finalizes_quota_exactly_once(verdict):
 
 
 @pytest.mark.asyncio
-async def test_short_text_sapling_result_consumes_quota_once():
+async def test_short_text_gemini_result_consumes_quota_once():
     store = _QuotaStore()
     text = "Привет"
     completed = _result(Verdict.REAL).model_copy(
         update={"confidence": 0.05, "authenticity_index": 95}
     )
-    with patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=completed)) as sapling:
+    with patch("router.media_router.GeminiTextAdapter.analyze", new=AsyncMock(return_value=completed)) as gemini:
         result = await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
 
-    sapling.assert_awaited_once_with(text.encode("utf-8"))
+    gemini.assert_awaited_once_with(text.encode("utf-8"))
     assert result["authenticity_index"] == 95
     assert store.transitions == ["consumed"]
 
@@ -221,32 +221,34 @@ async def test_aiornot_completed_result_consumes_quota_once():
     completed = _result(Verdict.FAKE)
     completed.model_used = ModelUsed.AIORNOT_TEXT
     with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock(return_value=completed)) as aiornot, patch(
-        "router.media_router.SaplingAdapter.analyze", new=AsyncMock()
-    ) as sapling:
+        "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
+    ) as gemini:
         result = await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
     assert store.transitions == ["consumed"]
     aiornot.assert_awaited_once()
-    sapling.assert_not_awaited()
+    gemini.assert_not_awaited()
     assert result["model_used"] == "aiornot_text"
     assert result["verdict"] == "FAKE"
     assert json.loads(json.dumps(result)) == result
 
 
 @pytest.mark.asyncio
-async def test_aiornot_technical_failure_then_sapling_success_consumes_quota_once():
+async def test_aiornot_technical_failure_refunds_without_gemini_fallback():
     store = _QuotaStore()
     text = " ".join(["word"] * 64)
     with patch(
         "router.media_router.AIOrNotTextAdapter.analyze",
         new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "timeout")),
-    ), patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=_result(Verdict.REAL))) as sapling:
-        await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
-    assert store.transitions == ["consumed"]
-    sapling.assert_awaited_once()
+    ), patch("router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()) as gemini:
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+    assert (raised.value.service, raised.value.kind) == ("aiornot", "timeout")
+    assert store.transitions == ["refunded"]
+    gemini.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_boundary_failure_then_sapling_success_consumes_one_reservation():
+async def test_boundary_failure_refunds_one_reservation_without_gemini_fallback():
     store = _QuotaStore()
     text = " ".join(["word"] * 64)
     boundary_error = "Invalid `boundary` for `multipart/form-data` request"
@@ -256,17 +258,18 @@ async def test_boundary_failure_then_sapling_success_consumes_one_reservation():
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client), patch(
-        "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=_result(Verdict.REAL))
-    ) as sapling:
-        result = await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+        "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
+    ) as gemini:
+        with pytest.raises(ProviderInfrastructureError) as raised:
+            await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
     assert store.reserve_calls == 1
-    assert store.transitions == ["consumed"]
-    sapling.assert_awaited_once()
-    assert result["model_used"] == "sapling"
+    assert store.transitions == ["refunded"]
+    assert (raised.value.service, raised.value.kind) == ("aiornot", "unavailable")
+    gemini.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_boundary_failure_then_technical_sapling_failure_refunds_one_reservation():
+async def test_boundary_failure_refunds_one_reservation_without_calling_gemini():
     store = _QuotaStore()
     text = " ".join(["word"] * 64)
     response = httpx.Response(
@@ -279,30 +282,28 @@ async def test_boundary_failure_then_technical_sapling_failure_refunds_one_reser
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=client), patch(
-        "router.media_router.SaplingAdapter.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("sapling", "unavailable")),
-    ):
+        "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
+    ) as gemini:
         with pytest.raises(ProviderInfrastructureError) as raised:
             await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
-    assert (raised.value.service, raised.value.kind) == ("sapling", "unavailable")
+    assert (raised.value.service, raised.value.kind) == ("aiornot", "unavailable")
     assert store.reserve_calls == 1
     assert store.transitions == ["refunded"]
+    gemini.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_aiornot_and_sapling_technical_failures_refund_once():
+async def test_aiornot_technical_failure_refunds_once_without_calling_gemini():
     store = _QuotaStore()
     text = " ".join(["word"] * 64)
     with patch(
         "router.media_router.AIOrNotTextAdapter.analyze",
         new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "timeout")),
-    ), patch(
-        "router.media_router.SaplingAdapter.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("sapling", "unavailable")),
-    ):
+    ), patch("router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()) as gemini:
         with pytest.raises(ProviderInfrastructureError):
             await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
     assert store.transitions == ["refunded"]
+    gemini.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -128,6 +128,8 @@ def _provider_for_model(model: str) -> str | None:
         return "resemble"
     if normalized.startswith("sapling"):
         return "sapling"
+    if normalized.startswith("gemini"):
+        return "gemini"
     if normalized.startswith("hf_"):
         return "huggingface"
     if normalized.startswith("aiornot"):

@@ -36,11 +36,11 @@ const faqData: FAQCategory[] = [
     items: [
       {
         question: 'Насколько точна система?',
-        answer: 'Точность зависит от типа контента: фото — 94.4% (Sightengine), аудио — 99.5% (Resemble Detect), текст — 98% (Sapling AI). Это средние показатели на тестовых датасетах.',
+        answer: 'Точность зависит от типа контента: фото — 94.4% (Sightengine), аудио — 99.5% (Resemble Detect). Для текстового Gemini-анализа система показывает вероятностную оценку и может вернуть UNCERTAIN при недостатке контекста.',
       },
       {
         question: 'Какие модели используются?',
-        answer: 'Мы используем комбинацию коммерческих API (Sightengine, Resemble, Sapling) и open-source моделей с HuggingFace как fallback. Это обеспечивает высокую надёжность и отказоустойчивость.',
+        answer: 'Мы используем комбинацию коммерческих API (Sightengine, Resemble, Gemini, AIOrNot) и open-source моделей с HuggingFace как fallback. Это обеспечивает высокую надёжность и отказоустойчивость.',
       },
       {
         question: 'Что такое Индекс подлинности?',

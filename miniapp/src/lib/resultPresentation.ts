@@ -16,5 +16,7 @@ export function displayAuthenticityIndex(
 }
 
 export function displayModelName(model: string): string {
-  return model === 'gemini_video_verification' ? 'Gemini Video Verification' : model
+  if (model === 'gemini_video_verification') return 'Gemini Video Verification'
+  if (model === 'gemini_text_verification') return 'Gemini Text Verification'
+  return model
 }

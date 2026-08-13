@@ -20,8 +20,8 @@ MAX_MODEL = 128
 MAX_DETAILS_BYTES = 16 * 1024
 MAX_EXTERNAL_URL = 2_048
 MAX_FACT_CHECK_ITEMS = 20
-# Normal text is routed to Sapling below AIOrNot's own eligibility threshold.
-# Sapling accepts non-empty text, while accuracy guidance is presentation-only.
+# Normal text is routed to Gemini below AIOrNot's own eligibility threshold.
+# Gemini accepts non-empty text, while accuracy guidance is presentation-only.
 NORMAL_TEXT_MIN = 1
 HYBRID_TEXT_MIN = 200
 MAX_TEXT_LENGTH = 10_000

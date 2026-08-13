@@ -1,18 +1,20 @@
 import { Card, CardHeader, Button } from '../../components/ui';
 
 const CONTACT_EMAIL = 'yav.app@yandex.ru';
-const ENTERPRISE_EMAIL_SUBJECT = 'Заявка на Enterprise-тариф ЯВЬ';
+const ENTERPRISE_EMAIL_SUBJECT = 'Заявка на корпоративный тариф ЯВЬ';
 const ENTERPRISE_EMAIL_BODY = `Здравствуйте, команда ЯВЬ!
 
-Хотим обсудить подключение Enterprise-тарифа.
+Хочу обсудить подключение корпоративного тарифа ЯВЬ.
 
 Компания:
 Имя и должность:
 Количество пользователей:
 Примерное количество проверок в месяц:
-Комментарий:
+Какие возможности необходимы:
 
-Контактный телефон:`;
+Контактный телефон:
+
+Буду ждать вашего ответа.`;
 
 const ENTERPRISE_MAILTO_LINK = `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(ENTERPRISE_EMAIL_SUBJECT)}&body=${encodeURIComponent(ENTERPRISE_EMAIL_BODY)}`;
 
@@ -62,9 +64,6 @@ export function ApiSettingsPage() {
               ))}
             </ul>
 
-            <Button fullWidth variant="secondary" className="mt-6" disabled>
-              Доступен по умолчанию
-            </Button>
           </div>
 
           <div className="p-6 md:p-8 rounded-xl border border-mv-border hover:border-mv-text-muted transition-colors">
@@ -75,7 +74,10 @@ export function ApiSettingsPage() {
               </span>
             </div>
 
-            <div className="mt-4 text-3xl font-bold text-mv-text">999 ₽</div>
+            <div className="mt-4 text-3xl font-bold text-mv-text">По запросу</div>
+            <p className="mt-2 text-sm text-mv-text-muted">
+              Стоимость зависит от задач и объёма проверок
+            </p>
 
             <ul className="mt-6 space-y-3">
               {enterpriseFeatures.map((feature) => (
@@ -93,7 +95,7 @@ export function ApiSettingsPage() {
               className="mt-6"
               onClick={() => { window.location.href = ENTERPRISE_MAILTO_LINK; }}
             >
-              Подключить
+              Обсудить подключение
             </Button>
           </div>
         </div>

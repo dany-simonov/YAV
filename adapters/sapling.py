@@ -17,7 +17,7 @@ from src.provider_protection import admit_provider_operation
 # Following best practices
 logger = logging.getLogger(__name__)
 
-MIN_TEXT_LENGTH = 50
+MIN_TEXT_LENGTH = 1
 MAX_TEXT_LENGTH = 10_000
 
 
@@ -32,7 +32,7 @@ class SaplingAdapter(BaseAdapter):
                 verdict=Verdict.UNCERTAIN,
                 confidence=0.0,
                 model_used=ModelUsed.SAPLING,
-                explanation=f"Текст слишком короткий для анализа (минимум {MIN_TEXT_LENGTH} символов).",
+                explanation="Текст слишком короткий для анализа.",
                 media_type=MediaType.TEXT,
             )
 
@@ -44,6 +44,9 @@ class SaplingAdapter(BaseAdapter):
                 explanation="Текст превышает лимит в 10 000 символов.",
                 media_type=MediaType.TEXT,
             )
+
+        if not settings.sapling_api_key:
+            raise ProviderInfrastructureError("sapling", "unavailable")
 
         payload = {"key": settings.sapling_api_key, "text": text}
 

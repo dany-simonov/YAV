@@ -238,6 +238,33 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
         assert sensitive_value not in logged
 
 
+def test_main_sanitizes_sapling_auth_error_without_logging_provider_data():
+    context = _context(
+        {"text": "Привет"},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    error = ExternalAPIError(
+        "sapling",
+        "request_error",
+        status_code=401,
+        provider_message="invalid key test_sapling_key",
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        payload, status = main(context)
+
+    assert (payload, status) == (
+        {"detail": "Сервис анализа временно недоступен.", "code": "provider_unavailable"},
+        503,
+    )
+    assert "test_sapling_key" not in context.log.call_args.args[0]
+
+
 def test_external_api_error_log_never_renders_untrusted_service_or_detail():
     context = _context({"text": "x" * 50})
     error = ExternalAPIError(

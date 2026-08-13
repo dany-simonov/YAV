@@ -57,6 +57,21 @@ async def test_completed_result_finalizes_quota_exactly_once(verdict):
 
 
 @pytest.mark.asyncio
+async def test_short_text_sapling_result_consumes_quota_once():
+    store = _QuotaStore()
+    text = "Привет"
+    completed = _result(Verdict.REAL).model_copy(
+        update={"confidence": 0.05, "authenticity_index": 95}
+    )
+    with patch("router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=completed)) as sapling:
+        result = await _analyze(TextAnalyzeRequest(text=text), "jwt", quota_store=store, user_id="user")
+
+    sapling.assert_awaited_once_with(text.encode("utf-8"))
+    assert result["authenticity_index"] == 95
+    assert store.transitions == ["consumed"]
+
+
+@pytest.mark.asyncio
 async def test_completed_hybrid_result_consumes_quota_once():
     store = _QuotaStore()
     hybrid_result = {

@@ -293,7 +293,7 @@ class TestRoute:
 
     @pytest.mark.asyncio
     async def test_short_valid_text_bypasses_aiornot_and_routes_to_sapling(self):
-        text = "x" * 50
+        text = "Привет"
         fallback = AnalysisResult(
             verdict=Verdict.UNCERTAIN,
             confidence=0.5,
@@ -307,6 +307,24 @@ class TestRoute:
             result = await MediaRouter().route(MediaType.TEXT, b"", text)
         aiornot.assert_not_awaited()
         sapling.assert_awaited_once()
+        assert result.model_used == ModelUsed.SAPLING
+
+    @pytest.mark.asyncio
+    async def test_long_but_under_word_threshold_still_routes_to_sapling(self):
+        text = "x" * 250
+        fallback = AnalysisResult(
+            verdict=Verdict.UNCERTAIN,
+            confidence=0.5,
+            model_used=ModelUsed.SAPLING,
+            explanation="safe",
+            media_type=MediaType.TEXT,
+        )
+        with patch("router.media_router.AIOrNotTextAdapter.analyze", new=AsyncMock()) as aiornot, patch(
+            "router.media_router.SaplingAdapter.analyze", new=AsyncMock(return_value=fallback)
+        ) as sapling:
+            result = await MediaRouter().route(MediaType.TEXT, b"", text)
+        aiornot.assert_not_awaited()
+        sapling.assert_awaited_once_with(text.encode("utf-8"))
         assert result.model_used == ModelUsed.SAPLING
 
     @pytest.mark.asyncio

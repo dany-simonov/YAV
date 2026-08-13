@@ -122,7 +122,7 @@ export function NewCheckPage() {
 
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
-    : text.length >= 50 && text.length <= 10000;
+    : text.trim().length >= 1 && text.length <= 10000;
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;

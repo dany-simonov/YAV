@@ -89,6 +89,30 @@ def test_ai_probability_v2_persists_canonical_fields_without_double_inversion():
     assert row["authenticity_index"] != 80
 
 
+def test_short_sapling_result_persists_its_canonical_authenticity_index():
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            verdict="REAL",
+            confidence=0.05,
+            model_used="sapling",
+            media_type="text",
+            ai_probability=0.05,
+            authenticity_index=95,
+            provider_evidence={
+                "provider": "sapling",
+                "model": "aidetect",
+                "raw_score": 0.05,
+                "score_kind": "ai_probability",
+                "predicted_label": "REAL",
+                "safe_details": {"score_field": "score"},
+            },
+        ),
+        "authenticated-user",
+    )
+
+    assert row["authenticity_index"] == 95
+
+
 def test_gemini_video_persists_its_canonical_authenticity_index_without_inversion():
     row = map_analysis_to_check_row(
         _canonical_result(

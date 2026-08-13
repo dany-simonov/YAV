@@ -7,6 +7,7 @@ import type { CheckResult } from '../types';
 const result = (overrides: Partial<CheckResult> = {}): CheckResult => ({
   verdict: 'FAKE',
   confidence: 20,
+  authenticity_index: null,
   model_used: 'sapling',
   explanation: 'Пояснение провайдера',
   processing_ms: 120,
@@ -36,5 +37,19 @@ describe('CheckResultCard short report', () => {
 
     expect(markup).toContain(report);
     expect(markup).toContain('Экспортировать PDF');
+  });
+
+  it('renders the canonical Gemini index and readable model name without recomputing it', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      verdict: 'FAKE',
+      confidence: 0.95,
+      authenticity_index: 10,
+      model_used: 'gemini_video_verification',
+    })} />);
+
+    expect(markup).toContain('>10<span');
+    expect(markup).not.toContain('>5<span');
+    expect(markup).toContain('Gemini Video Verification');
+    expect(markup).not.toContain('gemini_video_verification');
   });
 });

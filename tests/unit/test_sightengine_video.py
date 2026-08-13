@@ -156,31 +156,34 @@ async def test_direct_success_routes_result():
     result = AnalysisResult(
         verdict=Verdict.FAKE,
         confidence=0.9,
-        model_used=ModelUsed.SIGHTENGINE_VIDEO_DIRECT,
+        model_used=ModelUsed.GEMINI_VIDEO,
         explanation="safe",
         media_type=MediaType.VIDEO,
     )
 
     with patch(
-        "router.media_router.SightengineVideoAdapter.analyze",
+        "router.media_router.GeminiVideoAdapter.analyze",
         new=AsyncMock(return_value=result),
-    ) as sightengine, patch.object(VideoPipeline, "analyze", new=AsyncMock()) as legacy_pipeline:
+    ) as gemini, patch.object(VideoPipeline, "analyze", new=AsyncMock()) as legacy_pipeline, patch(
+        "adapters.sightengine_video.SightengineVideoAdapter.analyze", new=AsyncMock()
+    ) as sightengine:
         routed = await MediaRouter().route(MediaType.VIDEO, VIDEO)
 
     assert routed is result
-    sightengine.assert_awaited_once_with(VIDEO)
+    gemini.assert_awaited_once_with(VIDEO, mime_type="video/mp4")
+    sightengine.assert_not_awaited()
     legacy_pipeline.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_direct_technical_failure_propagates():
     with patch(
-        "router.media_router.SightengineVideoAdapter.analyze",
+        "router.media_router.GeminiVideoAdapter.analyze",
         new=AsyncMock(
-            side_effect=ProviderInfrastructureError("sightengine", "timeout")
+            side_effect=ProviderInfrastructureError("gemini", "timeout")
         ),
     ):
         with pytest.raises(ProviderInfrastructureError) as raised:
             await MediaRouter().route(MediaType.VIDEO, VIDEO)
 
-    assert (raised.value.service, raised.value.kind) == ("sightengine", "timeout")
+    assert (raised.value.service, raised.value.kind) == ("gemini", "timeout")

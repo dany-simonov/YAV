@@ -394,13 +394,13 @@ async def test_direct_video_success_consumes_quota():
     direct_result = AnalysisResult(
         verdict=Verdict.FAKE,
         confidence=0.9,
-        model_used=ModelUsed.SIGHTENGINE_VIDEO_DIRECT,
+        model_used=ModelUsed.GEMINI_VIDEO,
         explanation="safe",
         media_type=MediaType.VIDEO,
     )
 
     with patch("src.main.MediaRouter.route", new=video_route), patch(
-        "router.media_router.SightengineVideoAdapter.analyze",
+        "router.media_router.GeminiVideoAdapter.analyze",
         new=AsyncMock(return_value=direct_result),
     ):
         await _analyze(
@@ -422,9 +422,9 @@ async def test_direct_video_technical_failure_refunds_quota_once():
         return await real_route(router, MediaType.VIDEO, b"validated-video")
 
     with patch("src.main.MediaRouter.route", new=video_route), patch(
-        "router.media_router.SightengineVideoAdapter.analyze",
+        "router.media_router.GeminiVideoAdapter.analyze",
         new=AsyncMock(
-            side_effect=ProviderInfrastructureError("sightengine", "timeout")
+            side_effect=ProviderInfrastructureError("gemini", "timeout")
         ),
     ):
         with pytest.raises(ProviderInfrastructureError) as raised:
@@ -435,7 +435,7 @@ async def test_direct_video_technical_failure_refunds_quota_once():
                 user_id="user",
             )
 
-    assert (raised.value.service, raised.value.kind) == ("sightengine", "timeout")
+    assert (raised.value.service, raised.value.kind) == ("gemini", "timeout")
     assert store.transitions == ["refunded"]
 
 
@@ -448,9 +448,9 @@ async def test_direct_video_unavailable_refunds_once():
         return await real_route(router, MediaType.VIDEO, b"validated-video")
 
     with patch("src.main.MediaRouter.route", new=video_route), patch(
-        "router.media_router.SightengineVideoAdapter.analyze",
+        "router.media_router.GeminiVideoAdapter.analyze",
         new=AsyncMock(
-            side_effect=ProviderInfrastructureError("sightengine", "unavailable")
+            side_effect=ProviderInfrastructureError("gemini", "unavailable")
         ),
     ):
         with pytest.raises(ProviderInfrastructureError):

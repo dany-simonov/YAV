@@ -2,6 +2,7 @@ import { AppwriteException, Query, type Models } from 'appwrite';
 
 import { APPWRITE_CONFIG, tablesDB } from './appwrite';
 import type { Check, MediaType, Verdict } from '../types';
+import { displayModelName } from './resultPresentation';
 
 const MAX_ITEMS = 200;
 const PAGE_SIZE = 100;
@@ -55,7 +56,8 @@ export function mapHistoryRow(row: CheckRow): Check {
     media_type: asMediaType(row.media_type),
     verdict: asVerdict(row.verdict),
     confidence: clampIndex(row.authenticity_index),
-    model_used: row.model || row.provider || 'Unknown model',
+    authenticity_index: clampIndex(row.authenticity_index),
+    model_used: displayModelName(row.model || row.provider || 'Unknown model'),
     explanation: row.source_label || row.explanation || 'Проверка',
     processing_ms: Number(row.processing_ms || 0),
     created_at: row.$createdAt,

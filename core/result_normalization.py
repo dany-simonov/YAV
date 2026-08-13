@@ -42,6 +42,8 @@ def canonicalize_result(
     authenticity_index = None
     if ai_probability is not None:
         authenticity_index = authenticity_index_from_ai_probability(ai_probability)
+    elif evidence.score_kind == ScoreKind.AUTHENTICITY_SCORE:
+        authenticity_index = round(evidence.raw_score * 100)
     elif decision_confidence is not None and use_decision_based_authenticity_index:
         authenticity_index = authenticity_index_from_class_decision(
             result.verdict, decision_confidence

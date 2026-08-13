@@ -6,6 +6,7 @@ export interface Check {
   media_type: MediaType
   verdict: Verdict
   confidence: number
+  authenticity_index?: number | null
   model_used: string
   explanation: string
   processing_ms: number

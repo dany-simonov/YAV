@@ -45,6 +45,7 @@ describe('server-backed check history', () => {
       media_type: 'text',
       verdict: 'REAL',
       confidence: 81,
+      authenticity_index: 81,
       model_used: 'sapling',
       explanation: 'Материал',
       processing_ms: 120,

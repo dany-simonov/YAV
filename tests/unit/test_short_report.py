@@ -29,8 +29,7 @@ def _result(
 def test_fake_text_report_uses_ai_probability_without_claiming_proof():
     report = build_short_report(_result())
 
-    assert "В тексте обнаружены признаки AI-генерации" in report
-    assert "вероятность составила 98%" in report
+    assert "В тексте обнаружены признаки AI-генерации: вероятность составила 98%" in report
     assert "вероятное использование генеративной модели" in report
     assert "доказ" not in report.lower()
     assert "точно" not in report.lower()
@@ -97,7 +96,7 @@ def test_report_can_omit_a_metric_when_canonical_values_are_unavailable():
     )
 
     assert "%" not in report
-    assert "В видео обнаружены признаки AI-генерации." in report
+    assert "В видео обнаружены признаки синтетической генерации или изменения." in report
 
 
 @pytest.mark.parametrize(

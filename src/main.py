@@ -9,6 +9,7 @@ It supports two payload shapes from frontend:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import re
@@ -28,8 +29,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.enums import MediaType  # noqa: E402
+from core.config import settings  # noqa: E402
 from core.analyzer import HybridTextAnalyzer  # noqa: E402
-from core.exceptions import ExternalAPIError, ProviderInfrastructureError  # noqa: E402
+from core.exceptions import (  # noqa: E402
+    ExternalAPIError,
+    ProviderInfrastructureError,
+)
 from core.short_report import build_short_report  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
@@ -39,8 +44,17 @@ from src.appwrite_store import (  # noqa: E402
     persist_check_result,
 )
 from src.media_validation import validate_media_bytes  # noqa: E402
+from src.gemini_smoke import run_gemini_smoke_test  # noqa: E402
 from src.rate_limit import AppwriteTablesRateLimitStore, RateLimitError, enforce_admission  # noqa: E402
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
+from src.execution_deadline import (  # noqa: E402
+    ExecutionDeadline,
+    ExecutionDeadlineExceeded,
+    bounded_timeout,
+    current_execution_deadline,
+    reset_execution_deadline,
+    set_execution_deadline,
+)
 from src.validation import (  # noqa: E402
     FileAnalyzeRequest,
     SecurityValidationError,
@@ -265,7 +279,7 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
     if not callable(log):
         return
 
-    known_providers = {"aiornot", "sapling", "sightengine", "resemble", "huggingface"}
+    known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
     known_codes = {"request_error", "rate_limit"}
     provider = exc.service if exc.service in known_providers else "unknown"
     error_code = exc.detail if exc.detail in known_codes else "unknown"
@@ -327,7 +341,7 @@ async def _get_file_metadata(file_id: str, bucket_id: str, user_jwt: str) -> dic
         raise RuntimeError("Storage configuration is unavailable")
     url = f"{endpoint}/storage/buckets/{quote(bucket_id, safe='')}/files/{quote(file_id, safe='')}"
     headers = {"X-Appwrite-Project": project_id, "X-Appwrite-JWT": user_jwt}
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=bounded_timeout(15.0)) as client:
         response = await client.get(url, headers=headers)
     if response.status_code in (401, 403, 404):
         raise SecurityValidationError("file_not_accessible", "Файл недоступен.", 404)
@@ -361,7 +375,7 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
 
     chunks: list[bytes] = []
     total = 0
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=bounded_timeout(60.0)) as client:
         async with client.stream("GET", url, headers=headers) as response:
             if response.status_code in (401, 403, 404):
                 raise SecurityValidationError("file_not_accessible", "Файл недоступен.", 404)
@@ -390,22 +404,54 @@ async def _analyze(
     async def _with_quota(operation: Any):
         if quota_store is None:
             return await operation()
-        reservation = await quota_store.reserve_quota(user_id)
+        deadline = current_execution_deadline()
+
+        async def _within_deadline(awaitable: Any) -> Any:
+            return await deadline.run(awaitable) if deadline is not None else await awaitable
+
+        async def _within_persistence_deadline(awaitable: Any) -> Any:
+            return await deadline.run_persistence(awaitable) if deadline is not None else await awaitable
+
+        reservation = await _within_deadline(quota_store.reserve_quota(user_id))
+        reservations_finalized = False
         budget_token = begin_provider_budget(quota_store.guard_provider)
+
+        async def _finalize(target: str) -> None:
+            """Terminally settle both reservations exactly once."""
+            nonlocal reservations_finalized
+            if reservations_finalized:
+                return
+            await _within_persistence_deadline(quota_store.transition_quota(reservation, target))
+            reservations_finalized = True
+
+        async def _run_operation():
+            deadline = current_execution_deadline()
+            operation_result = operation()
+            return await deadline.run(operation_result) if deadline is not None else await operation_result
+
         try:
-            result = await operation()
-        except ProviderInfrastructureError:
-            await quota_store.transition_quota(reservation, "refunded")
+            result = await _run_operation()
+        except (ProviderInfrastructureError, ExternalAPIError) as exc:
+            if isinstance(exc, ProviderInfrastructureError):
+                await _finalize("refunded")
+            else:
+                await _finalize("consumed")
+            raise
+        except ExecutionDeadlineExceeded:
+            await _finalize("refunded")
+            raise
+        except RateLimitError:
+            await _finalize("refunded")
             raise
         except Exception:
             # The provider request was admitted and reached a non-technical
             # terminal outcome (for example a provider 4xx).  Do not leave a
             # reservation indefinitely pending, and never refund it here.
-            await quota_store.transition_quota(reservation, "consumed")
+            await _finalize("consumed")
             raise
         finally:
             end_provider_budget(budget_token)
-        await quota_store.transition_quota(reservation, "consumed")
+        await _finalize("consumed")
         return result
 
     if isinstance(request, TextAnalyzeRequest):
@@ -421,10 +467,13 @@ async def _analyze(
             or os.getenv("UPLOADS_BUCKET_ID")
             or "uploads"
         )
-        metadata = await _get_file_metadata(request.file_id, bucket_id, user_jwt)
+        deadline = current_execution_deadline()
+        metadata_operation = _get_file_metadata(request.file_id, bucket_id, user_jwt)
+        metadata = await deadline.run(metadata_operation) if deadline is not None else await metadata_operation
         if diagnostic_log:
             diagnostic_log("media_validation stage=metadata result=ok")
-        file_bytes = await _download_file_bytes(request.file_id, bucket_id, user_jwt)
+        download_operation = _download_file_bytes(request.file_id, bucket_id, user_jwt)
+        file_bytes = await deadline.run(download_operation) if deadline is not None else await download_operation
         if diagnostic_log:
             diagnostic_log("media_validation stage=download result=ok")
             diagnostic_log(
@@ -433,12 +482,20 @@ async def _analyze(
                 f"ffmpeg={'present' if shutil.which('ffmpeg') else 'missing'}"
             )
         expected = MediaType(request.media_type) if request.media_type else None
-        media_info = await asyncio.to_thread(validate_media_bytes, file_bytes, expected, diagnostic_log)
+        validation_operation = asyncio.to_thread(validate_media_bytes, file_bytes, expected, diagnostic_log)
+        media_info = await deadline.run(validation_operation) if deadline is not None else await validation_operation
         if _metadata_media_type(metadata) != media_info.media_type:
             raise SecurityValidationError(
                 "media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415
             )
-        result = await _with_quota(lambda: router.route(media_info.media_type, file_bytes, ""))
+        result = await _with_quota(
+            lambda: router.route(
+                media_info.media_type,
+                file_bytes,
+                "",
+                mime_type=metadata["mimeType"].split(";", 1)[0].strip().lower(),
+            ),
+        )
 
     processing_ms = int((time.perf_counter() - started) * 1000)
     if isinstance(result, dict):
@@ -457,7 +514,10 @@ async def _analyze(
 
 async def _execute_request(
     payload: dict[str, Any] | ValidatedRequest, api_key: str, user_id: str, user_jwt: str,
-    diagnostic_log: Any = None, client_ip: str = "",
+    diagnostic_log: Any = None, client_ip: str = "", *,
+    execution_deadline: ExecutionDeadline | None = None,
+    request_started_at: float | None = None,
+    diagnostic_authorization: str = "",
 ) -> dict[str, Any]:
     """Authorize the execution, ensure its profile, and persist trusted results."""
     if not api_key:
@@ -465,29 +525,68 @@ async def _execute_request(
     if not user_id or not user_jwt:
         raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
     request = validate_request_payload(payload) if isinstance(payload, dict) else payload
+    is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest))
+    if execution_deadline is None and request_started_at is not None and is_analyze:
+        try:
+            execution_deadline = ExecutionDeadline.from_execution_timeout(
+                settings.synchronous_analyze_execution_timeout_seconds,
+                settings.synchronous_analyze_safety_margin_seconds,
+                settings.synchronous_analyze_response_safety_margin_seconds,
+                request_start=request_started_at,
+            )
+        except ValueError as exc:
+            raise RuntimeError("Synchronous analysis deadline is not configured") from exc
 
-    account = await get_authenticated_account(user_id, user_jwt)
-    profile = await ensure_user_profile(account, api_key)
+    async def _within_deadline(awaitable: Any) -> Any:
+        return await execution_deadline.run(awaitable) if execution_deadline is not None else await awaitable
 
-    if request.action == "ensure_profile":
-        return {"profile_id": str(profile.get("$id") or user_id)}
+    deadline_token = set_execution_deadline(execution_deadline) if execution_deadline is not None else None
+    try:
+        account = await _within_deadline(get_authenticated_account(user_id, user_jwt))
 
-    if account.get("emailVerification") is not True:
-        raise EmailNotVerifiedError("Подтвердите email перед запуском анализа.")
+        if request.action == "ensure_profile":
+            profile = await _within_deadline(ensure_user_profile(account, api_key))
+            return {"profile_id": str(profile.get("$id") or user_id)}
 
-    if not isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest)):
-        raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
-    rate_store = AppwriteTablesRateLimitStore(api_key)
-    await enforce_admission(rate_store, user_id, client_ip)
-    result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
-    check_id = await persist_check_result(
-        result,
-        user_id,
-        request.source_label or "",
-        api_key,
-    )
-    result["check_id"] = check_id
-    return result
+        if account.get("emailVerification") is not True:
+            raise EmailNotVerifiedError("Подтвердите email перед запуском анализа.")
+
+        if request.action == "gemini_smoke_test":
+            configured_secret = settings.gemini_smoke_diagnostic_secret
+            if (
+                not settings.gemini_smoke_enabled
+                or not configured_secret
+                or not hmac.compare_digest(diagnostic_authorization, configured_secret)
+            ):
+                raise SecurityValidationError("diagnostic_access_denied", "Доступ к диагностике запрещён.", 403)
+            return await run_gemini_smoke_test(diagnostic_log)
+
+        profile = await _within_deadline(ensure_user_profile(account, api_key))
+
+        if not is_analyze:
+            raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
+        rate_store = AppwriteTablesRateLimitStore(api_key)
+        await _within_deadline(enforce_admission(rate_store, user_id, client_ip))
+        result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
+        check_id = await (
+            execution_deadline.run_persistence(
+                persist_check_result(
+                    result,
+                    user_id,
+                    request.source_label or "",
+                    api_key,
+                )
+            )
+            if execution_deadline is not None
+            else persist_check_result(result, user_id, request.source_label or "", api_key)
+        )
+        result["check_id"] = check_id
+        if execution_deadline is not None:
+            execution_deadline.remaining_root_time()
+        return result
+    finally:
+        if deadline_token is not None:
+            reset_execution_deadline(deadline_token)
 
 
 def _run_coro_sync(coro: Any) -> Any:
@@ -518,8 +617,23 @@ def _run_coro_sync(coro: Any) -> Any:
 def main(context: Any):
     """Appwrite function handler."""
     try:
+        request_start = time.monotonic()
         payload = _extract_payload(context.req)
         request = validate_request_payload(payload)
+        execution_deadline = None
+        if request.action == "analyze":
+            try:
+                execution_deadline = ExecutionDeadline.from_execution_timeout(
+                    settings.synchronous_analyze_execution_timeout_seconds,
+                    settings.synchronous_analyze_safety_margin_seconds,
+                    settings.synchronous_analyze_response_safety_margin_seconds,
+                    request_start=request_start,
+                )
+            except ValueError:
+                # _execute_request owns fail-closed configuration validation;
+                # leave its existing boundary intact when no outer deadline can
+                # be constructed here.
+                pass
         api_key = _extract_dynamic_api_key(context.req) or os.getenv(
             "APPWRITE_FUNCTION_API_KEY", ""
         )
@@ -527,15 +641,25 @@ def main(context: Any):
         user_jwt = _extract_request_header(context.req, "x-appwrite-user-jwt")
         result = _run_coro_sync(
             _execute_request(request, api_key, user_id, user_jwt, _media_diagnostic_logger(context),
-                             _extract_request_header(context.req, "x-appwrite-client-ip"))
+                             _extract_request_header(context.req, "x-appwrite-client-ip"),
+                             execution_deadline=execution_deadline,
+                             request_started_at=request_start,
+                             diagnostic_authorization=_extract_request_header(
+                                 context.req, "x-yav-diagnostic-authorization"
+                             ))
         )
-        if request.action != "ensure_profile":
-            try:
-                media_type = MediaType(str(result.get("media_type", "text")))
-            except (TypeError, ValueError):
-                media_type = MediaType.TEXT
-            _log_analysis_result(context, result, media_type)
-        return _response_json(context, result, 200)
+        def _build_success_response():
+            if request.action == "analyze":
+                try:
+                    media_type = MediaType(str(result.get("media_type", "text")))
+                except (TypeError, ValueError):
+                    media_type = MediaType.TEXT
+                _log_analysis_result(context, result, media_type)
+            return _response_json(context, result, 200)
+
+        if execution_deadline is not None:
+            return execution_deadline.run_final_stage(_build_success_response)
+        return _build_success_response()
     except EmailNotVerifiedError:
         return _response_json(
             context,
@@ -552,6 +676,15 @@ def main(context: Any):
         if exc.retry_after is not None:
             payload["retry_after"] = exc.retry_after
         return _response_json(context, payload, exc.status_code)
+    except ExecutionDeadlineExceeded:
+        return _response_json(
+            context,
+            {
+                "detail": "Сервис анализа временно недоступен. Попробуйте позже.",
+                "code": "provider_temporarily_unavailable",
+            },
+            503,
+        )
     except ProviderInfrastructureError:
         return _response_json(
             context,

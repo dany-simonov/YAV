@@ -1,6 +1,7 @@
 """Unit tests for trusted Appwrite TablesDB persistence."""
 
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from src.appwrite_store import (
     persist_check_result,
     serialize_check_details,
 )
+from src.execution_deadline import ExecutionDeadline, reset_execution_deadline, set_execution_deadline
 
 
 def _client_with(*responses):
@@ -85,6 +87,33 @@ def test_ai_probability_v2_persists_canonical_fields_without_double_inversion():
     assert row["decision_confidence"] is None
     assert row["authenticity_index"] == 20
     assert row["authenticity_index"] != 80
+
+
+def test_gemini_video_persists_its_canonical_authenticity_index_without_inversion():
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            verdict="FAKE",
+            confidence=0.95,
+            model_used="gemini_video_verification",
+            media_type="video",
+            ai_probability=None,
+            authenticity_index=10,
+            provider_evidence={
+                "provider": "gemini",
+                "model": "gemini-test-model",
+                "raw_score": 0.1,
+                "score_kind": "authenticity_score",
+                "predicted_label": "FAKE",
+                "safe_details": {"structured_response": True},
+            },
+        ),
+        "authenticated-user",
+    )
+
+    assert row["provider"] == "gemini"
+    assert row["model"] == "gemini-test-model"
+    assert row["authenticity_index"] == 10
+    assert row["authenticity_index"] != 5
 
 
 def test_class_confidence_v2_persists_decision_semantics_and_canonical_provider_model():
@@ -421,6 +450,36 @@ async def test_check_creation_uses_exact_owner_permissions():
         'read("user:user-1")',
         'delete("user:user-1")',
     ]
+
+
+@pytest.mark.asyncio
+async def test_check_persistence_http_timeout_is_bounded_by_request_persistence_budget():
+    client = _client_with(
+        _response("post", 201, {"$id": "check-1"}),
+        _response("patch", 200),
+        _response("patch", 200),
+    )
+    now = time.monotonic()
+    deadline = ExecutionDeadline(
+        request_start=now,
+        root_absolute_deadline=now + 0.5,
+        analysis_deadline=now + 0.1,
+        persistence_deadline=now + 0.4,
+    )
+    token = set_execution_deadline(deadline)
+    try:
+        with patch("src.appwrite_store.httpx.AsyncClient", return_value=client) as http_client:
+            await persist_check_result(
+                {"verdict": "REAL", "confidence": 0.2, "media_type": "text"},
+                "user-1",
+                "source",
+                "dynamic-key",
+            )
+    finally:
+        reset_execution_deadline(token)
+
+    timeout = http_client.call_args.kwargs["timeout"]
+    assert 0 < timeout < 0.4
 
 
 @pytest.mark.asyncio

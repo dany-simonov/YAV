@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     resemble_api_key: str = ""
     hf_api_token: str = ""
     aiornot_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_api_url: str = "https://generativelanguage.googleapis.com"
+    gemini_model: str = "gemini-3.1-flash-lite"
+    # Developer-only diagnostic.  It remains unavailable unless both values
+    # are explicitly configured in the Function environment.
+    gemini_smoke_enabled: bool = False
+    gemini_smoke_diagnostic_secret: str = ""
+
+    # Must match the configured Appwrite synchronous Function timeout.  No
+    # default is supplied because that platform setting is deployment-specific.
+    synchronous_analyze_execution_timeout_seconds: float = 0.0
+    synchronous_analyze_safety_margin_seconds: float = 0.0
+    synchronous_analyze_response_safety_margin_seconds: float = 0.0
 
     # Rate limits
     free_daily_limit: int = 3

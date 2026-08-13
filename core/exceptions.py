@@ -1,6 +1,5 @@
 """Custom application exceptions."""
 
-
 class RateLimitExceeded(Exception):
 # Reduced complexity
 # Edge cases handled
@@ -42,7 +41,11 @@ class ExternalAPIError(Exception):
 class ProviderInfrastructureError(ExternalAPIError):
     """Typed technical failure that permits a reserved quota refund."""
 
-    def __init__(self, service: str, kind: str) -> None:
+    def __init__(
+        self,
+        service: str,
+        kind: str,
+    ) -> None:
         self.kind = kind
         super().__init__(service, kind)
 

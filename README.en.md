@@ -57,7 +57,7 @@ YAV can be used to check publications, academic work, and material from public s
 | Text | Checks text for signs of AI generation. |
 | Images | Checks images, with a fallback model if the primary provider is unavailable. |
 | Audio | Detects synthesized speech through a separate analysis pipeline. |
-| Video | Sends the file directly to Sightengine Video for analysis. |
+| Video | Sends the file to Gemini Video Verification for analysis. |
 | Extended text analysis | AI detection, fact-checking, source links, and highlighting of matching passages. |
 | History and account | Statistics, search, filters, and management of previous checks. |
 | Report | Verdict, authenticity index, explanation, provider, model, and processing time; reports can be saved as PDF through the browser's print dialog. |
@@ -151,7 +151,7 @@ The frontend is hosted on Appwrite Sites. Auth manages sessions and email verifi
 | Images | Hugging Face | `dima806/deepfake-vs-real-image-detection` | Fallback analyzer |
 | Audio | Resemble Detect | `detect_v1` | Primary analyzer |
 | Audio | Hugging Face | `mo-gg/wav2vec2-large-xlsr-deepfake-detection` | Fallback analyzer |
-| Video | Sightengine Video | `genai` | Primary analyzer |
+| Video | Gemini | `GEMINI_MODEL` | Primary analyzer |
 
 The table lists the model identifiers and API modes currently used in the code.
 
@@ -189,7 +189,7 @@ YAV/
 - The backend checks email verification before running an analysis.
 - Results are written by the server. Row Security and owner ACL keep each user's history separate.
 - Files are limited to 20 MB; the backend validates their type and signature. Images are also decoded with Pillow and checked for size.
-- Audio gets an additional ffprobe check. Video does not depend on FFmpeg or ffprobe: after size, signature, and type validation, the file is sent directly to Sightengine Video.
+- Audio gets an additional ffprobe check. Video does not depend on FFmpeg or ffprobe: after size, signature, and type validation, the server uploads it to a temporary Gemini File API resource for Gemini Video Verification.
 - Quotas and rate limits apply to users, IP addresses, and external providers. Where supported, a fallback takes over if the primary analyzer fails.
 - Users receive a safe error message. Secrets, source material, and full provider responses are not included in client errors or logs.
 
@@ -215,6 +215,8 @@ npm run dev
 Vite starts the frontend at `http://localhost:3001`. The Appwrite Function entry point is `src/main.py`; its Appwrite resources must be configured before it can run an analysis.
 
 Public frontend configuration is documented in [`web/.env.example`](./web/.env.example). Provider secrets are stored in the Appwrite Function settings or a local `.env` file and are not committed to Git.
+
+Synchronous analysis also requires the server-side `SYNCHRONOUS_ANALYZE_EXECUTION_TIMEOUT_SECONDS`, `SYNCHRONOUS_ANALYZE_SAFETY_MARGIN_SECONDS`, and `SYNCHRONOUS_ANALYZE_RESPONSE_SAFETY_MARGIN_SECONDS` settings. The first must match the Function's real timeout; the second reserves time for persistence and the third for response construction. Analysis fails closed until all three are configured. VIDEO requires `GEMINI_API_KEY`, an HTTPS `GEMINI_API_URL`, and `GEMINI_MODEL`; only the backend uploads the already validated Appwrite file. Gemini smoke is disabled by default. Internal diagnostics require `GEMINI_SMOKE_ENABLED=true`, a separate `GEMINI_SMOKE_DIAGNOSTIC_SECRET`, and the `X-YAV-Diagnostic-Authorization` header; an ordinary user cannot invoke it merely by knowing the action name.
 
 Frontend checks:
 

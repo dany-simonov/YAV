@@ -318,7 +318,9 @@ class TestSaplingAdapter:
         with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=429)):
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x" * 60)
-        assert (raised.value.service, raised.value.kind) == ("sapling", "unavailable")
+        assert (raised.value.service, raised.value.kind, raised.value.stage, raised.value.status_code) == (
+            "sapling", "unavailable", "request", 429
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status_code", [500, 502, 503])
@@ -328,7 +330,9 @@ class TestSaplingAdapter:
         with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=status_code)):
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x")
-        assert (raised.value.service, raised.value.kind) == ("sapling", "unavailable")
+        assert (raised.value.service, raised.value.kind, raised.value.stage, raised.value.status_code) == (
+            "sapling", "unavailable", "request", status_code
+        )
 
     @pytest.mark.asyncio
     async def test_real_verdict(self):
@@ -361,7 +365,9 @@ class TestSaplingAdapter:
         with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client(body)):
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x")
-        assert (raised.value.service, raised.value.kind) == ("sapling", "invalid_response")
+        assert (raised.value.service, raised.value.kind, raised.value.stage) == (
+            "sapling", "invalid_response", "response"
+        )
 
     @pytest.mark.asyncio
     async def test_malformed_json_is_a_safe_typed_failure(self):
@@ -372,7 +378,9 @@ class TestSaplingAdapter:
         with patch("adapters.sapling.httpx.AsyncClient", return_value=client):
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x")
-        assert (raised.value.service, raised.value.kind) == ("sapling", "invalid_response")
+        assert (raised.value.service, raised.value.kind, raised.value.stage) == (
+            "sapling", "invalid_response", "response"
+        )
 
     @pytest.mark.asyncio
     async def test_missing_api_key_fails_without_provider_request(self, monkeypatch):
@@ -383,7 +391,9 @@ class TestSaplingAdapter:
         with patch("adapters.sapling.httpx.AsyncClient") as client:
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x")
-        assert raised.value.kind == "unavailable"
+        assert (raised.value.kind, raised.value.stage, raised.value.reason) == (
+            "config", "config", "api_key_missing"
+        )
         client.assert_not_called()
 
     @pytest.mark.asyncio
@@ -409,7 +419,7 @@ class TestSaplingAdapter:
         with patch("httpx.AsyncClient", return_value=mock_instance):
             with pytest.raises(ProviderInfrastructureError) as raised:
                 await SaplingAdapter().analyze(b"x" * 60)
-        assert raised.value.kind == "timeout"
+        assert (raised.value.kind, raised.value.stage) == ("timeout", "request")
 
     @pytest.mark.asyncio
     async def test_long_text_is_rejected_without_silent_truncation(self):

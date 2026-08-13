@@ -45,9 +45,15 @@ class ProviderInfrastructureError(ExternalAPIError):
         self,
         service: str,
         kind: str,
+        *,
+        stage: str | None = None,
+        reason: str | None = None,
+        status_code: int | None = None,
     ) -> None:
         self.kind = kind
-        super().__init__(service, kind)
+        self.stage = stage
+        self.reason = reason
+        super().__init__(service, kind, status_code=status_code)
 
 
 class FileTooLarge(Exception):

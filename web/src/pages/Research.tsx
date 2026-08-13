@@ -140,8 +140,8 @@ function ArcticAnalysisWidget() {
     event.preventDefault();
     setNotice(null);
     if (!user || verificationBlocked) return;
-    if (article.trim().length < 50) {
-      setError('Добавьте текст статьи или поста — минимум 50 символов.');
+    if (!article.trim()) {
+      setError('Добавьте текст статьи или поста.');
       return;
     }
     setError(null);
@@ -156,8 +156,8 @@ function ArcticAnalysisWidget() {
       setError('Выберите один файл для проверки.');
       return;
     }
-    if (quickMode === 'text' && quickText.trim().length < 50) {
-      setError('Введите минимум 50 символов.');
+    if (quickMode === 'text' && !quickText.trim()) {
+      setError('Введите текст для проверки.');
       return;
     }
     setError(null);
@@ -212,7 +212,7 @@ function ArcticAnalysisWidget() {
             {quickMode === 'file' ? <div className="mt-5">
               <input ref={quickFileInput} type="file" accept={ACCEPTED_FILE_TYPES} className="sr-only" onChange={(event) => setQuickFile(validateFiles(Array.from(event.target.files ?? []))[0] ?? null)} />
               <button type="button" onClick={() => quickFileInput.current?.click()} className="w-full min-h-[220px] rounded-2xl border border-dashed border-black/20 bg-black/[.018] hover:bg-black/[.035] transition flex flex-col items-center justify-center text-center px-6"><Paperclip size={24} /><span className="mt-4 text-lg font-semibold">{quickFile ? quickFile.name : 'Перетащите файл или выберите на устройстве'}</span><span className="mt-2 text-sm text-mv-text-secondary">Изображение, видео, аудио или документ · до 20 МБ</span></button>
-            </div> : <textarea value={quickText} onChange={(event) => setQuickText(event.target.value)} rows={9} placeholder="Введите текст для проверки — минимум 50 символов…" className="mt-5 w-full resize-y rounded-xl border border-black/[.1] bg-white p-4 leading-7 shadow-sm focus:border-black outline-none" />}
+            </div> : <textarea value={quickText} onChange={(event) => setQuickText(event.target.value)} rows={9} placeholder="Введите текст для проверки…" className="mt-5 w-full resize-y rounded-xl border border-black/[.1] bg-white p-4 leading-7 shadow-sm focus:border-black outline-none" />}
 
             <AccessAndSubmit userExists={!!user} verificationBlocked={false} submitLabel="Продолжить быструю проверку" loginReturnPath="/research/arctic" />
             <FormFeedback error={error} notice={notice} quickLink />

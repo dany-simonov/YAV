@@ -18,7 +18,7 @@ const endpoints = [
   },
   {
     method: 'POST', path: '/analyze/text/hybrid', title: 'Глубокая проверка текста',
-    description: 'Выполняет детекцию AI-признаков и фактчекинг текста. Минимальная длина — 50 символов.',
+    description: 'Выполняет детекцию AI-признаков и фактчекинг текста. Минимальная длина — 200 символов.',
     params: [['text','string (JSON)','обязательный','Текст для гибридного анализа']],
     response: `{
   "verdict": "UNCERTAIN",

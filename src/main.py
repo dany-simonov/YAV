@@ -46,7 +46,7 @@ from src.appwrite_store import (  # noqa: E402
     persist_check_result,
 )
 from src.media_validation import validate_media_bytes  # noqa: E402
-from src.gemini_smoke import run_gemini_smoke_test  # noqa: E402
+from src.gemini_smoke import run_gemini_list_models, run_gemini_smoke_test  # noqa: E402
 from src.rate_limit import AppwriteTablesRateLimitStore, RateLimitError, enforce_admission  # noqa: E402
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
 from src.execution_deadline import (  # noqa: E402
@@ -682,7 +682,7 @@ async def _execute_request(
         if account.get("emailVerification") is not True:
             raise EmailNotVerifiedError("Подтвердите email перед запуском анализа.")
 
-        if request.action == "gemini_smoke_test":
+        if request.action in {"gemini_smoke_test", "gemini_list_models"}:
             configured_secret = settings.gemini_smoke_diagnostic_secret
             if (
                 not settings.gemini_smoke_enabled
@@ -690,6 +690,8 @@ async def _execute_request(
                 or not hmac.compare_digest(diagnostic_authorization, configured_secret)
             ):
                 raise SecurityValidationError("diagnostic_access_denied", "Доступ к диагностике запрещён.", 403)
+            if request.action == "gemini_list_models":
+                return await run_gemini_list_models(diagnostic_log)
             return await run_gemini_smoke_test(diagnostic_log)
 
         profile = await _within_deadline(ensure_user_profile(account, api_key))

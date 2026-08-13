@@ -20,6 +20,13 @@ TIMEOUT = httpx.Timeout(connect=3.0, read=8.0, write=8.0, pool=3.0)
 TOTAL_TIMEOUT_SECONDS = 10.0
 _CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 _SENSITIVE = re.compile(r"(?i)(?:x-goog-api-key|authorization|api[-_ ]?key|bearer)\s*[:= ]\s*\S+")
+_MODEL_FIELD = re.compile(r"[A-Za-z0-9 ._/-]{1,160}")
+_METHOD = re.compile(r"[A-Za-z][A-Za-z0-9]{0,63}")
+_TARGET_MODELS = (
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-3.1-flash-lite",
+)
 
 
 def _safe_message(value: Any) -> str:
@@ -81,6 +88,64 @@ def _response_text(response: httpx.Response) -> str | None:
     except (AttributeError, TypeError, ValueError):
         return None
     return text.strip() if isinstance(text, str) else None
+
+
+def _safe_model_field(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if _MODEL_FIELD.fullmatch(value) else None
+
+
+def _safe_generation_methods(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value[:32] if isinstance(item, str) and _METHOD.fullmatch(item)]
+
+
+def _safe_flash_models(body: Any) -> list[dict[str, str | list[str]]]:
+    """Return only curated model metadata needed for a generateContent probe."""
+    models = body.get("models") if isinstance(body, dict) else None
+    if not isinstance(models, list):
+        return []
+    result: list[dict[str, str | list[str]]] = []
+    for item in models[:1000]:
+        if not isinstance(item, dict):
+            continue
+        name = _safe_model_field(item.get("name"))
+        base_model_id = _safe_model_field(item.get("baseModelId"))
+        searchable = " ".join(value.casefold() for value in (name, base_model_id) if value)
+        if "gemini" not in searchable or "flash" not in searchable:
+            continue
+        if name is None:
+            continue
+        model: dict[str, str | list[str]] = {
+            "name": name,
+            "supportedGenerationMethods": _safe_generation_methods(item.get("supportedGenerationMethods")),
+        }
+        if base_model_id is not None:
+            model["baseModelId"] = base_model_id
+        display_name = _safe_model_field(item.get("displayName"))
+        if display_name is not None:
+            model["displayName"] = display_name
+        result.append(model)
+    return result
+
+
+def _model_capability(models: list[dict[str, str | list[str]]], model_id: str) -> dict[str, bool]:
+    accepted = {model_id, f"models/{model_id}"}
+    matched = next(
+        (
+            item for item in models
+            if item.get("name") in accepted or item.get("baseModelId") == model_id
+        ),
+        None,
+    )
+    methods = matched.get("supportedGenerationMethods", []) if matched else []
+    return {
+        "present": matched is not None,
+        "generateContent": isinstance(methods, list) and "generateContent" in methods,
+    }
 
 
 def _log(diagnostic_log: Callable[[str], None] | None, *, model: str, duration_ms: int, status: int | str, code: str | None = None) -> None:
@@ -151,5 +216,79 @@ async def run_gemini_smoke_test(
         duration_ms=int((time.perf_counter() - started) * 1000),
         status=status,
         code=code if isinstance(code, str) else None,
+    )
+    return result
+
+
+async def run_gemini_list_models(
+    diagnostic_log: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """List only allowlisted Gemini Flash model metadata for an authorized diagnostic."""
+    started = time.perf_counter()
+    if not settings.gemini_api_key:
+        return {
+            "ok": False, "provider": PROVIDER, "operation": "list_models",
+            "provider_code": "MISSING_API_KEY",
+        }
+    base_url = safe_gemini_base_url()
+    if base_url is None:
+        return {
+            "ok": False, "provider": PROVIDER, "operation": "list_models",
+            "provider_code": "INVALID_CONFIGURATION",
+        }
+    status: int | str = "network"
+    code: str | None = None
+    try:
+        async with asyncio.timeout(TOTAL_TIMEOUT_SECONDS):
+            async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+                response = await client.get(
+                    f"{base_url}/v1beta/models?pageSize=1000", headers=gemini_headers(),
+                )
+    except (TimeoutError, httpx.TimeoutException):
+        code, status = "TIMEOUT", "timeout"
+        result: dict[str, Any] = {
+            "ok": False, "provider": PROVIDER, "operation": "list_models", "provider_code": code,
+        }
+    except httpx.TransportError:
+        code = "NETWORK_ERROR"
+        result = {"ok": False, "provider": PROVIDER, "operation": "list_models", "provider_code": code}
+    else:
+        if response.status_code != 200:
+            status = response.status_code
+            provider = _provider_error(response, "models")
+            code = provider.get("provider_code") if isinstance(provider.get("provider_code"), str) else None
+            result = {
+                "ok": False, "provider": PROVIDER, "operation": "list_models",
+                "provider_status": response.status_code,
+                **({"provider_code": code} if code is not None else {}),
+            }
+        else:
+            status = 200
+            try:
+                all_flash_models = _safe_flash_models(response.json())
+            except (TypeError, ValueError):
+                code = "INVALID_RESPONSE"
+                result = {
+                    "ok": False, "provider": PROVIDER, "operation": "list_models",
+                    "provider_status": 200, "provider_code": code,
+                }
+            else:
+                models = [
+                    item for item in all_flash_models
+                    if "generateContent" in item["supportedGenerationMethods"]
+                ]
+                result = {
+                    "ok": True,
+                    "provider": PROVIDER,
+                    "operation": "list_models",
+                    "models": models,
+                    "requested_models": {
+                        model: _model_capability(all_flash_models, model) for model in _TARGET_MODELS
+                    },
+                    "generate_content_models": [item["name"] for item in models],
+                }
+    _log(
+        diagnostic_log, model="models", duration_ms=int((time.perf_counter() - started) * 1000),
+        status=status, code=code,
     )
     return result

@@ -190,10 +190,116 @@ def _serialize_canonical_details(result: AnalysisResult) -> str:
         details["provider_evidence_v2"] = evidence_details
     if result.short_report is not None:
         details["short_report"] = result.short_report
-    encoded = json.dumps(details, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    if len(encoded.encode("utf-8")) > MAX_DETAILS_BYTES:
-        return '{"truncated":true}'
-    return encoded
+    if result.ai_status == "unavailable":
+        details["ai_status"] = result.ai_status
+    if result.credibility is not None:
+        details["credibility"] = result.credibility.model_dump(mode="json")
+    return _serialize_canonical_details_bounded(details)
+
+
+def _encode_details(details: dict[str, Any]) -> str | None:
+    """Encode once and enforce the TablesDB byte limit, including UTF-8."""
+    try:
+        encoded = json.dumps(details, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return None
+    return encoded if len(encoded.encode("utf-8")) <= MAX_DETAILS_BYTES else None
+
+
+def _compact_credibility_sources(
+    credibility: dict[str, Any], kept_indexes: list[int],
+) -> dict[str, Any]:
+    """Keep selected sources and deterministically remap all issue refs."""
+    sources = credibility.get("sources")
+    issues = credibility.get("issues")
+    if not isinstance(sources, list) or not isinstance(issues, list):
+        return credibility
+    mapping = {old: new for new, old in enumerate(kept_indexes)}
+    compacted = dict(credibility)
+    compacted["sources"] = [sources[index] for index in kept_indexes if 0 <= index < len(sources)]
+    repaired_issues: list[dict[str, Any]] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        refs = issue.get("source_refs")
+        canonical_refs = sorted({
+            mapping[ref]
+            for ref in refs if isinstance(ref, int) and not isinstance(ref, bool) and ref in mapping
+        }) if isinstance(refs, list) else []
+        repaired = dict(issue)
+        repaired["source_refs"] = canonical_refs
+        repaired_issues.append(repaired)
+    compacted["issues"] = repaired_issues
+    return compacted
+
+
+def _credibility_priority_indexes(credibility: dict[str, Any]) -> list[int]:
+    """Prefer sources actually cited by retained issues, then source order."""
+    sources = credibility.get("sources")
+    issues = credibility.get("issues")
+    if not isinstance(sources, list):
+        return []
+    referenced: set[int] = set()
+    if isinstance(issues, list):
+        for issue in issues:
+            refs = issue.get("source_refs") if isinstance(issue, dict) else None
+            if isinstance(refs, list):
+                referenced.update(
+                    ref for ref in refs
+                    if isinstance(ref, int) and not isinstance(ref, bool) and 0 <= ref < len(sources)
+                )
+    return sorted(referenced) + [index for index in range(len(sources)) if index not in referenced]
+
+
+def _compact_credibility_details(details: dict[str, Any]) -> str | None:
+    """Retain a valid combined report instead of replacing it with truncation."""
+    credibility = details.get("credibility")
+    if not isinstance(credibility, dict):
+        return None
+
+    base = dict(details)
+    base["details_compacted"] = True
+    # Provider evidence and the derived report are optional details; canonical
+    # AI table fields remain untouched and credibility has priority here.
+    base.pop("provider_evidence_v2", None)
+    base.pop("short_report", None)
+    encoded = _encode_details(base)
+    if encoded is not None:
+        return encoded
+
+    issues = credibility.get("issues")
+    sources = credibility.get("sources")
+    if not isinstance(issues, list) or not isinstance(sources, list):
+        return None
+    severity_rank = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    ordered_issues = sorted(
+        (item for item in issues if isinstance(item, dict)),
+        key=lambda item: severity_rank.get(item.get("severity"), 3),
+    )
+
+    # Try high-to-low issue prefixes; each candidate retains cited sources
+    # before optional sources and repairs every source_refs index.
+    for issue_count in range(len(ordered_issues), -1, -1):
+        candidate_credibility = dict(credibility)
+        candidate_credibility["issues"] = ordered_issues[:issue_count]
+        priority = _credibility_priority_indexes(candidate_credibility)
+        for source_count in range(len(priority), -1, -1):
+            candidate = dict(base)
+            candidate["credibility"] = _compact_credibility_sources(
+                candidate_credibility, priority[:source_count]
+            )
+            encoded = _encode_details(candidate)
+            if encoded is not None:
+                return encoded
+    return None
+
+
+def _serialize_canonical_details_bounded(details: dict[str, Any]) -> str:
+    encoded = _encode_details(details)
+    if encoded is not None:
+        return encoded
+    compacted = _compact_credibility_details(details)
+    return compacted if compacted is not None else '{"truncated":true}'
 
 
 def _map_hybrid_v2_to_check_row(

@@ -39,6 +39,47 @@ describe('CheckResultCard short report', () => {
     expect(markup).toContain('Экспортировать PDF');
   });
 
+  it('renders a compact credibility block with direct index and safe source link', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      credibility: {
+        status: 'completed', credibility_index: 34, verdict: 'LOW_CREDIBILITY', confidence: 0.8,
+        summary: 'Ключевые утверждения требуют проверки.',
+        issues: [{ type: 'UNSUPPORTED_CLAIM', severity: 'MEDIUM', claim: 'Сильное утверждение', explanation: 'Нет достаточного подтверждения.', source_refs: [1] }],
+        sources: [{ title: 'Надёжный источник', url: 'https://example.org/source' }],
+      },
+    })} />);
+    expect(markup).toContain('Достоверность');
+    expect(markup).toContain('>34<span');
+    expect(markup).toContain('Ключевые несоответствия');
+    expect(markup).toContain('https://example.org/source');
+  });
+
+  it('renders unavailable credibility without an invented score', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      credibility: { status: 'unavailable', summary: 'Проверка достоверности временно недоступна.', issues: [], sources: [] },
+    })} />);
+    expect(markup).toContain('Проверка временно недоступна');
+    expect(markup).not.toContain('>0<span');
+  });
+
+  it('does not invent an authenticity index when only the AI-origin branch is unavailable', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      verdict: 'UNCERTAIN', confidence: 0.5, ai_status: 'unavailable',
+      credibility: { status: 'completed', credibility_index: 81, verdict: 'HIGH_CREDIBILITY', confidence: 0.8, summary: 'Проверка доступна.', issues: [], sources: [] },
+    })} />);
+    expect(markup).toContain('Проверка AI-происхождения временно недоступна');
+    expect(markup).not.toContain('>50<span');
+    expect(markup).toContain('>81<span');
+  });
+
+  it('does not make an unsafe historical source URL clickable', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      credibility: { status: 'completed', credibility_index: 81, verdict: 'HIGH_CREDIBILITY', confidence: 0.8, summary: 'Проверка доступна.', issues: [], sources: [{ title: 'Локальный адрес', url: 'http://127.0.0.1/admin' }] },
+    })} />);
+    expect(markup).toContain('Локальный адрес');
+    expect(markup).not.toContain('href="http://127.0.0.1/admin"');
+  });
+
   it('renders the canonical Gemini index and readable model name without recomputing it', () => {
     const markup = renderToStaticMarkup(<CheckResultCard result={result({
       verdict: 'FAKE',

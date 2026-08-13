@@ -1,6 +1,6 @@
 """Deterministic, user-facing summaries for canonical analysis results."""
 
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, CredibilityAssessment
 from core.enums import MediaType, Verdict
 
 
@@ -26,6 +26,27 @@ def build_short_report(result: AnalysisResult) -> str:
     if result.verdict == Verdict.FAKE:
         return _fake_report(result.media_type, metric)
     return _real_report(result.media_type, metric)
+
+
+def build_combined_text_report(
+    ai_result: AnalysisResult, credibility: CredibilityAssessment,
+) -> str:
+    """Join two independent text branches without another model request."""
+    ai_report = build_short_report(ai_result)
+    if credibility.status == "unavailable":
+        return f"{ai_report} Проверка достоверности временно недоступна."[:600]
+    labels = {
+        "VERY_LOW_CREDIBILITY": "крайне низкая",
+        "LOW_CREDIBILITY": "низкая",
+        "MIXED_CREDIBILITY": "спорная",
+        "MOSTLY_CREDIBLE": "преимущественно высокая",
+        "HIGH_CREDIBILITY": "высокая",
+    }
+    label = labels[credibility.verdict or "MIXED_CREDIBILITY"]
+    return (
+        f"{ai_report} Достоверность материала оценена как {label} "
+        f"({credibility.credibility_index}/100). {credibility.summary}"
+    )[:600]
 
 
 def _fake_report(media_type: MediaType, metric: str) -> str:

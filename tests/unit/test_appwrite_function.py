@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, CredibilityAssessment
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.appwrite_store import ChecksPersistenceError
@@ -589,12 +589,19 @@ async def test_function_response_adds_short_report_after_canonical_analysis():
     router = MagicMock()
     router.route = AsyncMock(return_value=canonical)
 
-    with patch("src.main.MediaRouter", return_value=router):
+    credibility = CredibilityAssessment(
+        status="completed", credibility_index=80, verdict="MOSTLY_CREDIBLE", confidence=0.8,
+        summary="Ключевые утверждения в целом подтверждаются доступными источниками.",
+    )
+    with patch("src.main.MediaRouter", return_value=router), patch(
+        "src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(return_value=credibility)
+    ):
         response = await _analyze(
             validate_request_payload({"text": "x" * 50}), "runtime-jwt"
         )
 
-    assert response["short_report"].count(".") == 2
+    assert response["credibility"]["credibility_index"] == 80
+    assert "80/100" in response["short_report"]
     assert "вероятность составила 80%" in response["short_report"]
     assert response["verdict"] == "FAKE"
 

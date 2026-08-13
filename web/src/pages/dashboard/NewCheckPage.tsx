@@ -83,6 +83,9 @@ export function NewCheckPage() {
       processing_ms: Number(source?.processing_ms ?? source?.processingTime ?? 0),
       media_type: source?.media_type ?? mediaType,
       short_report: typeof source?.short_report === 'string' ? source.short_report : undefined,
+      credibility: source?.credibility && typeof source.credibility === 'object'
+        ? source.credibility : undefined,
+      ai_status: source?.ai_status === 'unavailable' ? 'unavailable' : 'completed',
     };
   };
 

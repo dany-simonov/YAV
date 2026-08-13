@@ -16,6 +16,7 @@ from src.appwrite_store import (
     serialize_check_details,
 )
 from src.execution_deadline import ExecutionDeadline, reset_execution_deadline, set_execution_deadline
+from src.validation import MAX_DETAILS_BYTES
 
 
 def _client_with(*responses):
@@ -111,6 +112,70 @@ def test_gemini_text_result_persists_its_canonical_authenticity_index():
     )
 
     assert row["authenticity_index"] == 95
+
+
+def test_combined_text_credibility_is_persisted_in_the_same_safe_details_record():
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            verdict="REAL",
+            model_used="gemini_text_verification",
+            media_type="text",
+            ai_probability=0.05,
+            authenticity_index=95,
+            credibility={
+                "status": "completed",
+                "credibility_index": 34,
+                "verdict": "LOW_CREDIBILITY",
+                "confidence": 0.8,
+                "summary": "Ключевые утверждения требуют дополнительной проверки.",
+                "issues": [],
+                "sources": [{"title": "Источник", "url": "https://example.org/source"}],
+            },
+        ),
+        "authenticated-user",
+    )
+    details = json.loads(row["details"])
+    assert details["credibility"]["credibility_index"] == 34
+    assert row["authenticity_index"] == 95
+
+
+def _maximum_credibility_payload():
+    issue = {
+        "type": "UNSUPPORTED_CLAIM", "severity": "LOW", "claim": "Ж" * 300,
+        "explanation": "Я" * 500, "source_refs": [0, 1, 2, 3, 4],
+    }
+    return {
+        "status": "completed", "credibility_index": 34, "verdict": "LOW_CREDIBILITY",
+        "confidence": 0.8, "summary": "Д" * 500, "issues": [issue] * 5,
+        "sources": [{"title": "И" * 180, "url": f"https://example.org/{index}/" + "a" * 740} for index in range(5)],
+    }
+
+
+def test_maximum_unicode_credibility_payload_is_compacted_not_lost_and_references_are_repaired():
+    row = map_analysis_to_check_row(_canonical_result(
+        credibility=_maximum_credibility_payload(),
+        provider_evidence={
+            **_canonical_result()["provider_evidence"],
+            "safe_details": {f"optional_{index}": "x" * 256 for index in range(16)},
+        },
+    ), "user")
+    assert len(row["details"].encode("utf-8")) <= MAX_DETAILS_BYTES
+    details = json.loads(row["details"])
+    assert details["credibility"]["credibility_index"] == 34
+    assert details["credibility"]["verdict"] == "LOW_CREDIBILITY"
+    assert details["credibility"]["summary"] == "Д" * 500
+    assert details["details_compacted"] is True
+    sources = details["credibility"]["sources"]
+    assert all(0 <= ref < len(sources) for issue in details["credibility"]["issues"] for ref in issue["source_refs"])
+    assert details != {"truncated": True}
+
+
+def test_credibility_compaction_preserves_high_severity_issues_before_low_issues():
+    payload = _maximum_credibility_payload()
+    payload["issues"][0] = {**payload["issues"][0], "severity": "HIGH", "claim": "Важная проблема"}
+    row = map_analysis_to_check_row(_canonical_result(credibility=payload), "user")
+    details = json.loads(row["details"])
+    assert any(issue["severity"] == "HIGH" for issue in details["credibility"]["issues"])
 
 
 def test_gemini_video_persists_its_canonical_authenticity_index_without_inversion():

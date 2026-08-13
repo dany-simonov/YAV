@@ -60,6 +60,37 @@ describe('server-backed check history', () => {
     });
   });
 
+  it('round-trips the combined credibility report from safe details', () => {
+    const check = mapHistoryRow(row({
+      details: JSON.stringify({
+        short_report: 'Общий вывод.',
+        credibility: {
+          status: 'completed', credibility_index: 34, verdict: 'LOW_CREDIBILITY',
+          confidence: 0.8, summary: 'Требуется дополнительная проверка.', issues: [],
+          sources: [{ title: 'Источник', url: 'https://example.org/source' }],
+        },
+      }),
+    }) as never);
+    expect(check.short_report).toBe('Общий вывод.');
+    expect(check.credibility?.credibility_index).toBe(34);
+  });
+
+  it('keeps repaired source refs from a compacted combined report', () => {
+    const check = mapHistoryRow(row({
+      details: JSON.stringify({
+        details_compacted: true,
+        credibility: {
+          status: 'completed', credibility_index: 34, verdict: 'LOW_CREDIBILITY',
+          confidence: 0.8, summary: 'Требуется дополнительная проверка.',
+          issues: [{ type: 'UNSUPPORTED_CLAIM', severity: 'HIGH', claim: 'Утверждение', explanation: 'Пояснение', source_refs: [0] }],
+          sources: [{ title: 'Источник', url: 'https://example.org/source' }],
+        },
+      }),
+    }) as never);
+    expect(check.credibility?.issues[0].source_refs).toEqual([0]);
+    expect(check.credibility?.sources).toHaveLength(1);
+  });
+
   it('uses the authenticated TablesDB client with owner, order, pagination, and projection queries', async () => {
     tablesDBMock.listRows.mockResolvedValue({ rows: [row(), row({ $id: 'foreign', user_id: 'user-2' })], total: 0 });
 
@@ -76,7 +107,7 @@ describe('server-backed check history', () => {
         Query.offset(0),
         Query.select([
           '$id', '$createdAt', 'user_id', 'media_type', 'verdict', 'authenticity_index',
-          'provider', 'model', 'explanation', 'source_label', 'processing_ms',
+          'provider', 'model', 'explanation', 'source_label', 'processing_ms', 'details',
         ]),
       ],
       total: false,

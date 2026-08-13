@@ -1,7 +1,7 @@
 import { AppwriteException, Query, type Models } from 'appwrite';
 
 import { APPWRITE_CONFIG, tablesDB } from './appwrite';
-import type { Check, MediaType, Verdict } from '../types';
+import type { Check, CredibilityAssessment, MediaType, Verdict } from '../types';
 import { displayModelName } from './resultPresentation';
 
 const MAX_ITEMS = 200;
@@ -18,6 +18,7 @@ const HISTORY_FIELDS = [
   'explanation',
   'source_label',
   'processing_ms',
+  'details',
 ];
 
 interface CheckRow extends Models.Row {
@@ -30,6 +31,7 @@ interface CheckRow extends Models.Row {
   explanation?: string | null;
   source_label?: string | null;
   processing_ms?: number | null;
+  details?: string | null;
 }
 
 export interface HistoryStats {
@@ -51,6 +53,7 @@ const clampIndex = (value: number): number => {
 };
 
 export function mapHistoryRow(row: CheckRow): Check {
+  const details = parseDetails(row.details);
   return {
     id: row.$id,
     media_type: asMediaType(row.media_type),
@@ -58,10 +61,43 @@ export function mapHistoryRow(row: CheckRow): Check {
     confidence: clampIndex(row.authenticity_index),
     authenticity_index: clampIndex(row.authenticity_index),
     model_used: displayModelName(row.model || row.provider || 'Unknown model'),
-    explanation: row.source_label || row.explanation || 'Проверка',
+    explanation: row.explanation || row.source_label || 'Проверка',
     processing_ms: Number(row.processing_ms || 0),
     created_at: row.$createdAt,
+    short_report: details.short_report,
+    credibility: details.credibility,
+    ai_status: details.ai_status,
   };
+}
+
+function parseDetails(value: string | null | undefined): {
+  short_report?: string;
+  credibility?: CredibilityAssessment;
+  ai_status?: 'completed' | 'unavailable';
+} {
+  if (typeof value !== 'string' || value.length > 16_384) return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const item = parsed as Record<string, unknown>;
+    const credibility = item.credibility;
+    return {
+      short_report: typeof item.short_report === 'string' ? item.short_report : undefined,
+      credibility: isCredibilityAssessment(credibility) ? credibility : undefined,
+      ai_status: item.ai_status === 'unavailable' ? 'unavailable' : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function isCredibilityAssessment(value: unknown): value is CredibilityAssessment {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  return (item.status === 'completed' || item.status === 'unavailable')
+    && typeof item.summary === 'string'
+    && Array.isArray(item.issues)
+    && Array.isArray(item.sources);
 }
 
 function historyError(error: unknown): Error {

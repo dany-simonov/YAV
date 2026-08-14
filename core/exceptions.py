@@ -24,6 +24,7 @@ class ExternalAPIError(Exception):
         response_length: int | None = None,
         response_keys: tuple[str, ...] = (),
         response_paths: tuple[str, ...] = (),
+        operation: str | None = None,
     ) -> None:
         self.service = service
         self.detail = detail
@@ -35,6 +36,7 @@ class ExternalAPIError(Exception):
         self.response_length = response_length
         self.response_keys = response_keys
         self.response_paths = response_paths
+        self.operation = operation
         super().__init__(f"{service}: {detail}")
 
 

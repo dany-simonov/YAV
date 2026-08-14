@@ -80,14 +80,14 @@ class GeminiVideoAdapter(BaseAdapter):
         return body
 
     @classmethod
-    def _raise_for_status(cls, response: httpx.Response) -> None:
+    def _raise_for_status(cls, response: httpx.Response, operation: str) -> None:
         if response.status_code < 400:
             return
         if response.status_code == 429 or response.status_code >= 500:
             raise ProviderInfrastructureError(cls.PROVIDER, "unavailable")
-        raise ExternalAPIError(cls.PROVIDER, "request_error", status_code=response.status_code)
+        raise ExternalAPIError(cls.PROVIDER, "request_error", status_code=response.status_code, operation=operation)
 
-    async def _request(self, method: str, client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+    async def _request(self, operation: str, method: str, client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
         try:
             await admit_provider_operation(self.PROVIDER)
             response = await getattr(client, method)(url, timeout=self._request_timeout(), **kwargs)
@@ -95,7 +95,7 @@ class GeminiVideoAdapter(BaseAdapter):
             raise ProviderInfrastructureError(self.PROVIDER, "timeout") from exc
         except httpx.TransportError as exc:
             raise ProviderInfrastructureError(self.PROVIDER, "transport") from exc
-        self._raise_for_status(response)
+        self._raise_for_status(response, operation)
         return response
 
     @classmethod
@@ -137,7 +137,7 @@ class GeminiVideoAdapter(BaseAdapter):
             if time.monotonic() >= deadline:
                 raise ProviderInfrastructureError(self.PROVIDER, "processing_timeout")
             response = await self._request(
-                "get", client, f"{base_url}/v1beta/{file_name}", headers=gemini_headers()
+                "files_poll", "get", client, f"{base_url}/v1beta/{file_name}", headers=gemini_headers()
             )
             name, uri, state = self._file_details(self._json_object(response), mime_type)
             if name != file_name:
@@ -226,7 +226,7 @@ class GeminiVideoAdapter(BaseAdapter):
                 deadline = time.monotonic() + timeout
                 async with httpx.AsyncClient(timeout=self.REQUEST_TIMEOUT) as client:
                     start = await self._request(
-                        "post",
+                        "files_start", "post",
                         client,
                         f"{base_url}/upload/v1beta/files",
                         headers={
@@ -243,7 +243,7 @@ class GeminiVideoAdapter(BaseAdapter):
                     if not isinstance(upload_url, str) or not self._is_https_url(upload_url):
                         raise ProviderInfrastructureError(self.PROVIDER, "invalid_response")
                     uploaded = await self._request(
-                        "post",
+                        "upload_finalize", "post",
                         client,
                         upload_url,
                         headers={
@@ -261,7 +261,7 @@ class GeminiVideoAdapter(BaseAdapter):
                         elif state != "ACTIVE":
                             raise ProviderInfrastructureError(self.PROVIDER, "invalid_response")
                         generated = await self._request(
-                            "post",
+                            "generate_content", "post",
                             client,
                             f"{base_url}/v1beta/models/{model}:generateContent",
                             headers={**gemini_headers(), "Content-Type": "application/json"},

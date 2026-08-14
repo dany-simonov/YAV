@@ -253,6 +253,7 @@ async def test_gemini_4xx_is_a_provider_request_error():
         "request_error",
         400,
     )
+    assert raised.value.operation == "files_start"
 
 
 @pytest.mark.asyncio

@@ -324,10 +324,15 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
             category = "auth_configuration"
         elif safe_status == 400:
             category = "request_rejected"
+    operation = "unknown"
+    if provider == "gemini":
+        candidate = getattr(exc, "operation", None)
+        if candidate in {"files_start", "upload_finalize", "files_poll", "generate_content"}:
+            operation = candidate
     message = (
         "provider_external_api_error operation=provider.external_api_error "
         f"provider={provider} safe_error_code={error_code} "
-        f"stage=request category={category} status_code={safe_status} "
+        f"stage=request category={category} gemini_operation={operation} status_code={safe_status} "
         f"exception_class={type(exc).__name__}"
     )
     if provider == "aiornot" and error_code == "request_error":

@@ -20,6 +20,8 @@ export const buildComplexPayload = (text: string, user: User) => ({
   sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
 });
 
+// Kept for the server-side source-analysis API. The current UI intentionally
+// uses the restored text-based complex analysis.
 export const isComplexSourceSubmittable = (value: string, isAnalyzing: boolean): boolean => {
   try {
     const url = new URL(value.trim());

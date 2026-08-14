@@ -19,6 +19,7 @@ import {
   ApiSettingsPage,
   Research,
   ArcticResearch,
+  ResearchCasePage,
   EmailVerificationPendingPage
 } from './pages';
 import { useAuthStore } from './store';
@@ -71,6 +72,7 @@ function AppContent() {
         { path: '/terms', element: <Terms /> },
         { path: '/research', element: <Research /> },
         { path: '/research/arctic', element: <ArcticResearch /> },
+        { path: '/research/arctic/:caseSlug', element: <ResearchCasePage /> },
       ].map(({ path, element }) => (
         <Route
           key={path}

@@ -34,9 +34,18 @@ const process=[
 ];
 const faqs=[['Какие форматы поддерживаются?','Изображения, аудио, видео и текст. Точный список форматов и лимиты показываются перед загрузкой.'],['Как долго выполняется проверка?','Обычно несколько секунд. Для больших видео и сложного анализа может потребоваться больше времени.'],['Сохраняются ли загруженные файлы?','Файл удаляется из временного хранилища после анализа. В истории сохраняется только результат проверки.'],['Может ли система ошибаться?','Да. Анализ вероятностный, поэтому отчёт показывает уверенность модели и ограничения результата.'],['Что означает уровень уверенности?','Это оценка надёжности вывода модели, а не абсолютное доказательство происхождения файла.'],['Можно ли использовать отчёт в работе?','Да, как вспомогательный материал для редакционной, образовательной и аналитической работы.']];
 
-export function Home(){const [open,setOpen]=useState(0);return <div className="pt-[90px] overflow-hidden">
+export function Home(){
+  const [open,setOpen]=useState(0);
+  const scrollToReport=()=>{
+    const report=document.getElementById('report');
+    if(!report)return;
+    const top=report.getBoundingClientRect().top+window.scrollY-96;
+    window.scrollTo({top,behavior:'smooth'});
+  };
+
+  return <div className="pt-[90px] overflow-hidden">
   <section className="border-b border-black/[.055]"><div className="container py-20 lg:py-28 grid lg:grid-cols-[.88fr_1.12fr] items-center gap-14 lg:gap-20">
-    <div><p className="eyebrow mb-7">ПРОВЕРКА ПОДЛИННОСТИ ЦИФРОВОГО КОНТЕНТА</p><h1 className="display-title">Проверяйте<br/>подлинность<br/>медиа за<br/>секунды</h1><p className="mt-7 text-[17px] leading-7 text-mv-text-secondary max-w-[500px]">Загрузите изображение, видео, аудио или текст и получите понятный отчёт о возможных изменениях и признаках генерации искусственным интеллектом.</p><div className="flex flex-col sm:flex-row gap-3 mt-9"><a href="od://app/api/projects/14172975-5261-4c56-b5a4-6eed0548cf61/raw/upload.html" className="btn-black">Проверить медиа <ArrowRight size={16}/></a><a href="od://app/api/projects/14172975-5261-4c56-b5a4-6eed0548cf61/raw/report.html" className="btn-light">Посмотреть пример отчёта</a></div></div>
+    <div><p className="eyebrow mb-7">ПРОВЕРКА ПОДЛИННОСТИ ЦИФРОВОГО КОНТЕНТА</p><h1 className="display-title">Проверяйте<br/>подлинность<br/>медиа за<br/>секунды</h1><p className="mt-7 text-[17px] leading-7 text-mv-text-secondary max-w-[500px]">Загрузите изображение, видео, аудио или текст и получите понятный отчёт о возможных изменениях и признаках генерации искусственным интеллектом.</p><div className="flex flex-col sm:flex-row gap-3 mt-9"><Link to="/dashboard/check" className="btn-black">Проверить медиа <ArrowRight size={16}/></Link><button type="button" onClick={scrollToReport} aria-controls="report" className="btn-light">Посмотреть пример отчёта</button></div></div>
     <ProductPreview/>
   </div></section>
 
@@ -150,7 +159,7 @@ export function Home(){const [open,setOpen]=useState(0);return <div className="p
   <section id="report" className="container section-space border-t border-black/[.06]">
     <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-8 mb-14">
       <h2 className="section-title">Отчёт, который<br/>читается без<br/>расшифровки</h2>
-      <a href="od://app/api/projects/14172975-5261-4c56-b5a4-6eed0548cf61/raw/report.html" className="btn-light self-start md:self-auto">Открыть полный пример</a>
+      <Link to="/dashboard/check" className="btn-light self-start md:self-auto">Проверить свой материал</Link>
     </div>
     <article className="bg-white border border-black/[.075] rounded-[20px] p-7 sm:p-9 lg:p-10 shadow-[0_2px_3px_rgba(0,0,0,.045),0_22px_54px_rgba(0,0,0,.08)]">
       <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 pb-7 border-b border-black/[.075]">

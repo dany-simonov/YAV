@@ -12,7 +12,7 @@ export { Docs } from './Docs';
 export { Privacy } from './Privacy';
 export { Terms } from './Terms';
 export { NotFound } from './NotFound';
-export { Research, ArcticResearch } from './Research';
+export { Research, ArcticResearch, ResearchCasePage } from './Research';
 export { Dashboard } from './Dashboard';
 
 // Auth pages

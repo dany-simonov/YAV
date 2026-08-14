@@ -47,7 +47,10 @@ from src.appwrite_store import (  # noqa: E402
 )
 from src.media_validation import validate_media_bytes  # noqa: E402
 from src.gemini_smoke import run_gemini_list_models, run_gemini_smoke_test  # noqa: E402
-from src.rate_limit import AppwriteTablesRateLimitStore, RateLimitError, enforce_admission  # noqa: E402
+from src.rate_limit import (  # noqa: E402
+    AppwriteTablesRateLimitStore, RateLimitError, build_admission_plan,
+    enforce_admission,  # retained as a test-compatibility import; production uses AdmissionPlan.
+)
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
 from src.execution_deadline import (  # noqa: E402
     ExecutionDeadline,
@@ -532,14 +535,35 @@ async def _analyze_combined_normal_text(
 
 async def _analyze(
     request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
-    quota_store: AppwriteTablesRateLimitStore | None = None, user_id: str = ""
+    quota_store: AppwriteTablesRateLimitStore | None = None, user_id: str = "",
+    account_created_at: Any = None, client_ip: str = "",
 ) -> dict[str, Any]:
     router = MediaRouter()
     started = time.perf_counter()
 
-    async def _with_quota(operation: Any):
+    async def _with_quota(operation: Any, admission_plan: Any = None):
         if quota_store is None:
             return await operation()
+        if admission_plan is not None:
+            deadline = current_execution_deadline()
+
+            async def _within_deadline(awaitable: Any) -> Any:
+                return await deadline.run(awaitable) if deadline is not None else await awaitable
+
+            # Admission is deliberately final: a provider 429, timeout or an
+            # invalid response never refunds any of the committed counters.
+            await _within_deadline(quota_store.admit(admission_plan))
+            prepaid = {provider: admission_plan.units_for(provider) for provider, _ in admission_plan.provider_units}
+
+            async def _admit_unplanned_provider(provider: str, units: int) -> None:
+                await _within_deadline(quota_store.admit_provider_units(provider, units))
+
+            budget_token = begin_provider_budget(_admit_unplanned_provider, prepaid)
+            try:
+                operation_result = operation()
+                return await _within_deadline(operation_result)
+            finally:
+                end_provider_budget(budget_token)
         deadline = current_execution_deadline()
 
         async def _within_deadline(awaitable: Any) -> Any:
@@ -550,6 +574,8 @@ async def _analyze(
 
         reservation = await _within_deadline(quota_store.reserve_quota(user_id))
         reservations_finalized = False
+        # Compatibility path for direct unit tests of the retired reservation
+        # lifecycle.  Production requests always pass ``admission_plan``.
         budget_token = begin_provider_budget(quota_store.guard_provider)
 
         async def _finalize(target: str) -> None:
@@ -593,10 +619,16 @@ async def _analyze(
     if isinstance(request, TextAnalyzeRequest):
         text = request.text
         mode = request.mode or request.analysis_type
+        admission_plan = (
+            build_admission_plan(
+                quota_store, user_id=user_id, client_ip=client_ip, account_created_at=account_created_at,
+                media_type=MediaType.TEXT.value, input_size=len(text), text=text, hybrid=bool(mode),
+            ) if quota_store is not None and account_created_at is not None else None
+        )
         if mode:
-            result = await _with_quota(lambda: hybrid_analyzer.analyze(text))
+            result = await _with_quota(lambda: hybrid_analyzer.analyze(text), admission_plan)
         else:
-            result = await _with_quota(lambda: _analyze_combined_normal_text(router, text, diagnostic_log))
+            result = await _with_quota(lambda: _analyze_combined_normal_text(router, text, diagnostic_log), admission_plan)
     else:
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
@@ -624,13 +656,19 @@ async def _analyze(
             raise SecurityValidationError(
                 "media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415
             )
+        admission_plan = (
+            build_admission_plan(
+                quota_store, user_id=user_id, client_ip=client_ip, account_created_at=account_created_at,
+                media_type=media_info.media_type.value, input_size=len(file_bytes),
+            ) if quota_store is not None and account_created_at is not None else None
+        )
         result = await _with_quota(
             lambda: router.route(
                 media_info.media_type,
                 file_bytes,
                 "",
                 mime_type=metadata["mimeType"].split(";", 1)[0].strip().lower(),
-            ),
+            ), admission_plan,
         )
 
     processing_ms = int((time.perf_counter() - started) * 1000)
@@ -719,8 +757,10 @@ async def _execute_request(
         if not is_analyze:
             raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
         rate_store = AppwriteTablesRateLimitStore(api_key)
-        await _within_deadline(enforce_admission(rate_store, user_id, client_ip))
-        result = await _analyze(request, user_jwt, diagnostic_log, rate_store, user_id)
+        result = await _analyze(
+            request, user_jwt, diagnostic_log, rate_store, user_id,
+            account_created_at=account.get("$createdAt"), client_ip=client_ip,
+        )
         is_gemini_text = result.get("model_used") == "gemini_text_verification"
         persistence_started = time.monotonic()
         if is_gemini_text:

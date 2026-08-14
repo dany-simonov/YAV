@@ -53,7 +53,7 @@ class SaplingAdapter(BaseAdapter):
         payload = {"key": settings.sapling_api_key, "text": text}
 
         try:
-            await admit_provider_operation("sapling")
+            await admit_provider_operation("sapling", len(text))
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(
                     self.URL,

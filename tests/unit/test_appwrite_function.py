@@ -21,6 +21,7 @@ from src.main import (
     main,
 )
 from src.validation import SecurityValidationError, validate_request_payload
+from src.source_ingestion import SourceDocument
 
 
 def _context(payload, headers=None):
@@ -126,6 +127,61 @@ def test_main_uses_only_runtime_client_ip_for_admission():
         main(context)
 
     assert execute_mock.call_args.args[5] == "2001:db8::1"
+
+
+def test_main_handles_url_only_unified_complex_through_source_ingest_and_persistence():
+    class UrlOnlyIngestor:
+        async def ingest(self, url: str) -> SourceDocument:
+            assert url == "https://example.com/article"
+            return SourceDocument(
+                url=url,
+                title="Публичная статья",
+                description="",
+                site_name="Example",
+                text="Текст публичной статьи для комплексного анализа. " * 12,
+                image_urls=(),
+                video_urls=(),
+                text_truncated=False,
+            )
+
+    context = _context(
+        {"mode": "complex", "sourceUrl": "https://example.com/article", "fileIds": []},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    now = time.monotonic()
+    deadline = ExecutionDeadline(now, now + 10, now + 8, now + 9)
+    complex_result = AnalysisResult(
+        verdict=Verdict.REAL,
+        confidence=0.9,
+        model_used=ModelUsed.GEMINI_TEXT,
+        explanation="Текст проанализирован.",
+        media_type=MediaType.TEXT,
+        authenticity_index=95,
+        analysis_mode="complex",
+    )
+    with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
+        "src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})
+    ), patch("src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})), patch(
+        "src.main.AppwriteTablesRateLimitStore"
+    ), patch("src.main.SourceIngestor", return_value=UrlOnlyIngestor()) as ingestor, patch(
+        "src.main._analyze_complex_text", new=AsyncMock(return_value=complex_result)
+    ), patch("src.main.persist_check_result", new=AsyncMock(return_value="check-1")) as persist:
+        payload, status = main(context)
+
+    assert status == 200
+    assert payload["check_id"] == "check-1"
+    assert payload["analysis_mode"] == "complex"
+    assert payload["source"]["url"] == "https://example.com/article"
+    ingestor.assert_called_once_with()
+    persist.assert_awaited_once()
+    logs = [call.args[0] for call in context.log.call_args_list]
+    assert "complex_stage=request_validated source_present=yes manual_text_present=no manual_file_count=0" in logs
+    assert "complex_stage=source_start" in logs
+    assert any(log.startswith("complex_stage=source_ingested text_present=yes") for log in logs)
 
 
 def test_main_builds_analyze_response_with_the_same_root_deadline():

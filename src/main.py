@@ -263,7 +263,7 @@ def _safe_diagnostic_log(diagnostic_log: Any, message: str) -> None:
         pass
 
 
-def _log_internal_error(context: Any, exc: BaseException) -> None:
+def _log_internal_error(context: Any, exc: BaseException, *, operation: str = "unclassified") -> None:
     """Emit bounded runtime diagnostics without rendering exception text or request data."""
     log = getattr(context, "log", None)
     if not callable(log):
@@ -277,7 +277,8 @@ def _log_internal_error(context: Any, exc: BaseException) -> None:
             f"string_lengths={exc.string_lengths}"
         )
     else:
-        message = f"internal_error operation=unclassified exception_class={type(exc).__name__}"
+        safe_operation = operation if operation in {"complex_url_only", "unclassified"} else "unclassified"
+        message = f"internal_error operation={safe_operation} exception_class={type(exc).__name__}"
     try:
         log(message)
     except Exception:
@@ -599,7 +600,15 @@ async def _analyze_complex_source(
 ) -> AnalysisResult:
     """Ingest one public source and deterministically combine existing analyzers."""
     ingestor = SourceIngestor()
+    _safe_diagnostic_log(diagnostic_log, "complex_stage=source_start")
     document = await ingestor.ingest(source_url)
+    _safe_diagnostic_log(
+        diagnostic_log,
+        "complex_stage=source_ingested "
+        f"text_present={'yes' if bool(document.text.strip()) else 'no'} "
+        f"images_present={'yes' if bool(document.image_urls) else 'no'} "
+        f"video_present={'yes' if bool(document.video_urls) else 'no'}",
+    )
     router = MediaRouter()
 
     def _child_timeout() -> float | None:
@@ -1075,10 +1084,19 @@ def _run_coro_sync(coro: Any) -> Any:
 
 def main(context: Any):
     """Appwrite function handler."""
+    request: ValidatedRequest | None = None
     try:
         request_start = time.monotonic()
         payload = _extract_payload(context.req)
         request = validate_request_payload(payload)
+        if isinstance(request, ComplexAnalyzeRequest):
+            _safe_diagnostic_log(
+                _media_diagnostic_logger(context),
+                "complex_stage=request_validated "
+                f"source_present={'yes' if bool(request.source_url) else 'no'} "
+                f"manual_text_present={'yes' if bool(request.text) else 'no'} "
+                f"manual_file_count={len(request.file_ids)}",
+            )
         execution_deadline = None
         if request.action == "analyze":
             try:
@@ -1165,7 +1183,17 @@ def main(context: Any):
             503,
         )
     except Exception as exc:
-        _log_internal_error(context, exc)
+        is_url_only_complex = (
+            isinstance(request, ComplexAnalyzeRequest)
+            and request.source_url is not None
+            and request.text is None
+            and not request.file_ids
+        )
+        _log_internal_error(
+            context,
+            exc,
+            operation="complex_url_only" if is_url_only_complex else "unclassified",
+        )
         return _response_json(
             context,
             {"detail": "Внутренняя ошибка сервиса.", "code": "internal_error"},

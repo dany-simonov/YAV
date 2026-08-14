@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Map } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Mail, Map } from 'lucide-react';
 import { useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
@@ -19,6 +19,21 @@ const toneDot: Record<ResearchTone, string> = {
   neutral: 'bg-black/35',
 };
 
+const researchSubmissionMailto = `mailto:yav.app@yandex.ru?subject=${encodeURIComponent('Предложение исследования для платформы ЯВЬ')}&body=${encodeURIComponent('Здравствуйте, команда ЯВЬ!\n\nХочу предложить исследование для раздела «Исследования».\n\nНазвание:\n\nКраткое описание и ключевой вывод:\n\nСсылка на материал / папку с файлами:\n\nИсточники и данные:\n\nПочему это важно для проверки цифрового контента:\n\nКак с вами связаться:\n')}`;
+
+function ResearchSubmissionCta() {
+  return (
+    <section className="mt-12 grid gap-6 rounded-2xl border border-black/[.09] bg-[#fafaf9] p-7 sm:p-9 lg:grid-cols-[1fr_auto] lg:items-end">
+      <div>
+        <p className="eyebrow">Открытые исследования</p>
+        <h2 className="mt-4 text-2xl font-semibold tracking-[-.035em] sm:text-3xl">Есть материал для проверки?</h2>
+        <p className="mt-3 max-w-2xl text-sm leading-6 text-mv-text-secondary">Пришлите исследование, ссылку на публикацию или подборку источников. В письме уже будет готовый шаблон — заполните только нужные поля.</p>
+      </div>
+      <a href={researchSubmissionMailto} className="btn-black shrink-0"><Mail size={16} /> Предложить исследование</a>
+    </section>
+  );
+}
+
 export function Research() {
   return (
     <div className="pt-32 pb-24 lg:pb-32">
@@ -35,6 +50,7 @@ export function Research() {
           </div>
           <span className="flex h-11 w-11 items-center justify-center rounded-xl border border-black/[.1] bg-white shadow-sm transition-transform group-hover:translate-x-1"><ArrowRight size={18} /></span>
         </Link>
+        <ResearchSubmissionCta />
       </section>
     </div>
   );
@@ -75,6 +91,7 @@ export function ArcticResearch() {
             </Link>
           ))}
         </div>
+        <ResearchSubmissionCta />
       </section>
     </div>
   );

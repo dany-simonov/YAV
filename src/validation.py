@@ -143,9 +143,16 @@ class FileAnalyzeRequest(_RequestModel):
         return self
 
 
+class SourceAnalyzeRequest(_RequestModel):
+    """A public URL is the sole input for source-based Complex analysis."""
+    action: Literal["analyze"] = "analyze"
+    mode: Literal["complex_source"]
+    source_url: str = Field(alias="sourceUrl", min_length=8, max_length=2_048)
+
+
 ValidatedRequest = (
     EnsureProfileRequest | GeminiSmokeTestRequest | GeminiListModelsRequest
-    | TextAnalyzeRequest | FileAnalyzeRequest
+    | TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest
 )
 
 
@@ -201,11 +208,17 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
     elif action == "analyze" or "action" not in payload:
         has_text = "text" in payload
         has_file = "fileId" in payload
-        if has_text == has_file:
+        has_source = "sourceUrl" in payload
+        if has_source:
+            if has_text or has_file or payload.get("mode") != "complex_source":
+                raise SecurityValidationError("conflicting_input", "Передайте один источник для комплексного анализа.")
+            model = SourceAnalyzeRequest
+        elif has_text == has_file:
             raise SecurityValidationError(
                 "conflicting_input", "Передайте текст или файл, но не оба."
             )
-        model = TextAnalyzeRequest if has_text else FileAnalyzeRequest
+        else:
+            model = TextAnalyzeRequest if has_text else FileAnalyzeRequest
     else:
         raise SecurityValidationError("unsupported_action", "Неподдерживаемое действие.")
     try:

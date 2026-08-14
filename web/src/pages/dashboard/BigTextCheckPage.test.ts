@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildComplexPayload,
+  buildComplexSourcePayload,
   COMPLEX_MAX_LENGTH,
   COMPLEX_MIN_LENGTH,
   COMPLEX_ANALYSIS_ROUTE,
   isComplexTextSubmittable,
+  isComplexSourceSubmittable,
 } from '../../lib/complexAnalysis';
 import { BIG_TEXT_REDIRECT_TARGET } from './BigTextCheckPage';
 
@@ -41,5 +43,18 @@ describe('BigTextCheckPage Complex input contract', () => {
   it('keeps the retired big-text URL as an alias for the Complex tab', () => {
     expect(COMPLEX_ANALYSIS_ROUTE).toBe('/dashboard/check?tab=complex');
     expect(BIG_TEXT_REDIRECT_TARGET).toBe(COMPLEX_ANALYSIS_ROUTE);
+  });
+
+  it('builds the source-only Complex request and rejects invalid URLs while loading', () => {
+    expect(buildComplexSourcePayload('https://example.com/post', user)).toMatchObject({
+      sourceUrl: 'https://example.com/post', mode: 'complex_source', userId: 'user-1',
+    });
+    expect(isComplexSourceSubmittable('https://example.com/post', false)).toBe(true);
+    expect(isComplexSourceSubmittable('http://example.com:80/post', false)).toBe(true);
+    expect(isComplexSourceSubmittable('https://example.com:443/post', false)).toBe(true);
+    expect(isComplexSourceSubmittable('file:///etc/passwd', false)).toBe(false);
+    expect(isComplexSourceSubmittable('https://user:pass@example.com/post', false)).toBe(false);
+    expect(isComplexSourceSubmittable('https://example.com:8080/post', false)).toBe(false);
+    expect(isComplexSourceSubmittable('https://example.com/post', true)).toBe(false);
   });
 });

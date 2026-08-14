@@ -1,7 +1,7 @@
 import { AppwriteException, Query, type Models } from 'appwrite';
 
 import { APPWRITE_CONFIG, tablesDB } from './appwrite';
-import type { AIOriginDetails, Check, CredibilityAssessment, MediaType, Verdict } from '../types';
+import type { AIOriginDetails, Check, CredibilityAssessment, MediaType, SourceAnalysisDetails, Verdict } from '../types';
 import { displayModelName } from './resultPresentation';
 
 const MAX_ITEMS = 200;
@@ -73,6 +73,7 @@ export function mapHistoryRow(row: CheckRow): Check {
     ai_status: details.ai_status,
     analysis_mode: details.analysis_mode,
     ai_details: details.ai_details,
+    source: details.source,
   };
 }
 
@@ -83,6 +84,7 @@ function parseDetails(value: string | null | undefined): {
   analysis_mode?: 'complex';
   ai_details?: AIOriginDetails;
   ai_confidence?: number;
+  source?: SourceAnalysisDetails;
 } {
   if (typeof value !== 'string' || value.length > 16_384) return {};
   try {
@@ -97,6 +99,7 @@ function parseDetails(value: string | null | undefined): {
       analysis_mode: item.analysis_mode === 'complex' ? 'complex' : undefined,
       ai_details: isAIOriginDetails(item.ai_details) ? item.ai_details : undefined,
       ai_confidence: isUnitConfidence(item.ai_confidence) ? item.ai_confidence : undefined,
+      source: isSourceAnalysisDetails(item.source) ? item.source : undefined,
     };
   } catch {
     return {};
@@ -111,6 +114,16 @@ function isAIOriginDetails(value: unknown): value is AIOriginDetails {
   if (!value || typeof value !== 'object') return false;
   const item = value as Record<string, unknown>;
   return Array.isArray(item.signals) && Array.isArray(item.human_signals);
+}
+
+function isSourceAnalysisDetails(value: unknown): value is SourceAnalysisDetails {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.url === 'string' && typeof item.title === 'string'
+    && typeof item.description === 'string' && typeof item.site_name === 'string'
+    && typeof item.text_found === 'boolean' && typeof item.text_truncated === 'boolean'
+    && typeof item.images_analyzed === 'number' && typeof item.video_analyzed === 'boolean'
+    && Array.isArray(item.media);
 }
 
 function isCredibilityAssessment(value: unknown): value is CredibilityAssessment {

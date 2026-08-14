@@ -200,6 +200,50 @@ class CredibilityAssessment(BaseModel):
         return self
 
 
+class SourceDetails(BaseModel):
+    """Bounded provenance from server-side source ingestion, never raw HTML."""
+    model_config = ConfigDict(extra="forbid")
+    url: str = Field(min_length=1, max_length=2_048)
+    title: str = Field(default="", max_length=300)
+    description: str = Field(default="", max_length=600)
+    site_name: str = Field(default="", max_length=160)
+    text_found: bool
+    text_truncated: bool = False
+    images_analyzed: StrictInt = Field(default=0, ge=0, le=3)
+    video_analyzed: bool = False
+    images_discovered: StrictInt = Field(default=0, ge=0, le=3)
+    video_discovered: bool = False
+    media: list["SourceMediaResult"] = Field(default_factory=list, max_length=4)
+
+
+class SourceMediaResult(BaseModel):
+    """One independently analysed media item; unavailable never has a score."""
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["image", "video"]
+    ordinal: StrictInt = Field(ge=1, le=3)
+    status: Literal["completed", "unavailable"]
+    authenticity_index: StrictInt | None = Field(default=None, ge=0, le=100)
+    verdict: Verdict | None = None
+    confidence: float | None = None
+    model: str | None = Field(default=None, max_length=128)
+    explanation: str | None = Field(default=None, max_length=600)
+    processing_ms: StrictInt | None = Field(default=None, ge=0, le=60_000)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_confidence(cls, value: float | None) -> float | None:
+        return _finite_unit_interval(value, "confidence")
+
+    @model_validator(mode="after")
+    def validate_state(self) -> "SourceMediaResult":
+        scored = (self.authenticity_index, self.verdict, self.confidence)
+        if self.status == "completed" and any(value is None for value in scored):
+            raise ValueError("completed source media requires score fields")
+        if self.status == "unavailable" and any(value is not None for value in scored):
+            raise ValueError("unavailable source media must not contain score fields")
+        return self
+
+
 class AnalysisResult(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     
@@ -220,6 +264,7 @@ class AnalysisResult(BaseModel):
     ai_details: AIOriginDetails | None = None
     ai_status: Literal["completed", "unavailable"] | None = None
     credibility: CredibilityAssessment | None = None
+    source: SourceDetails | None = None
     provider_evidence: ProviderEvidence | None = None
     component_evidence: list[ComponentEvidence] | None = Field(default=None, max_length=2)
 

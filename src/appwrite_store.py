@@ -203,6 +203,8 @@ def _serialize_canonical_details(result: AnalysisResult) -> str:
         details["ai_status"] = result.ai_status
     if result.credibility is not None:
         details["credibility"] = result.credibility.model_dump(mode="json")
+    if result.source is not None:
+        details["source"] = result.source.model_dump(mode="json")
     return _serialize_canonical_details_bounded(details)
 
 
@@ -321,10 +323,62 @@ def _compact_credibility_details(details: dict[str, Any]) -> str | None:
     return None
 
 
+def _compact_source_details(details: dict[str, Any]) -> str | None:
+    """Keep source identity and every media status before optional prose."""
+    source = details.get("source")
+    if not isinstance(source, dict):
+        return None
+    base = dict(details)
+    base["details_compacted"] = True
+    base.pop("provider_evidence_v2", None)
+    base.pop("short_report", None)
+    source_copy = dict(source)
+    media = source_copy.get("media")
+    if isinstance(media, list):
+        # Scores/status are canonical; explanations are expendable prose.
+        source_copy["media"] = [
+            {key: value for key, value in item.items() if key != "explanation"}
+            for item in media if isinstance(item, dict)
+        ]
+    source_copy["description"] = ""
+    base["source"] = source_copy
+    encoded = _encode_details(base)
+    if encoded is not None:
+        return encoded
+    # Preserve a completed credibility branch's canonical values even when all
+    # of its user-facing evidence must be removed.  ``summary`` is required by
+    # the schema, so retain a small neutral replacement rather than dropping
+    # the object or inventing score values.
+    credibility = base.get("credibility")
+    if isinstance(credibility, dict):
+        canonical_keys = ("status", "model", "credibility_index", "verdict", "confidence", "processing_ms")
+        canonical_credibility = {
+            key: credibility[key] for key in canonical_keys if key in credibility and credibility[key] is not None
+        }
+        canonical_credibility["summary"] = "Подробное обоснование сокращено при сохранении истории."
+        canonical_credibility["issues"] = []
+        canonical_credibility["credible_points"] = []
+        canonical_credibility["sources"] = []
+        base["credibility"] = canonical_credibility
+        encoded = _encode_details(base)
+        if encoded is not None:
+            return encoded
+    # AI details are optional evidence. Canonical AI verdict/index/confidence
+    # stay in the table columns/details and source/media identity stays here.
+    base.pop("ai_details", None)
+    encoded = _encode_details(base)
+    if encoded is not None:
+        return encoded
+    return None
+
+
 def _serialize_canonical_details_bounded(details: dict[str, Any]) -> str:
     encoded = _encode_details(details)
     if encoded is not None:
         return encoded
+    source_compacted = _compact_source_details(details)
+    if source_compacted is not None:
+        return source_compacted
     compacted = _compact_credibility_details(details)
     if compacted is not None:
         return compacted

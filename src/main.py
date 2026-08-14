@@ -37,7 +37,7 @@ from core.exceptions import (  # noqa: E402
 from core.short_report import build_combined_text_report, build_short_report  # noqa: E402
 from adapters.gemini_credibility import GeminiCredibilityAdapter  # noqa: E402
 from adapters.gemini_text import GeminiTextAdapter  # noqa: E402
-from api.schemas import AnalysisResult, CredibilityAssessment  # noqa: E402
+from api.schemas import AnalysisResult, CredibilityAssessment, SourceDetails, SourceMediaResult  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
     ChecksPersistenceError,
@@ -48,7 +48,7 @@ from src.appwrite_store import (  # noqa: E402
 from src.media_validation import validate_media_bytes  # noqa: E402
 from src.gemini_smoke import run_gemini_list_models, run_gemini_smoke_test  # noqa: E402
 from src.rate_limit import (  # noqa: E402
-    AppwriteTablesRateLimitStore, RateLimitError, build_admission_plan,
+    AppwriteTablesRateLimitStore, RateLimitError, build_admission_plan, build_source_media_admission_plan,
     enforce_admission,  # retained as a test-compatibility import; production uses AdmissionPlan.
 )
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
@@ -62,6 +62,7 @@ from src.execution_deadline import (  # noqa: E402
 )
 from src.validation import (  # noqa: E402
     FileAnalyzeRequest,
+    SourceAnalyzeRequest,
     SecurityValidationError,
     TextAnalyzeRequest,
     ValidatedRequest,
@@ -70,6 +71,7 @@ from src.validation import (  # noqa: E402
     parse_json_object,
     validate_request_payload,
 )
+from src.source_ingestion import SourceIngestor, validate_source_url  # noqa: E402
 
 
 class EmailNotVerifiedError(PermissionError):
@@ -577,8 +579,117 @@ async def _analyze_complex_text(text: str, diagnostic_log: Any) -> AnalysisResul
     })
 
 
+async def _analyze_complex_source(
+    source_url: str, diagnostic_log: Any, *, quota_store: AppwriteTablesRateLimitStore | None = None,
+    user_id: str = "", client_ip: str = "", account_created_at: Any = None,
+) -> AnalysisResult:
+    """Ingest one public source and deterministically combine existing analyzers."""
+    ingestor = SourceIngestor()
+    document = await ingestor.ingest(source_url)
+    router = MediaRouter()
+
+    def _child_timeout() -> float | None:
+        deadline = current_execution_deadline()
+        if deadline is None:
+            return None
+        # ``analysis_deadline`` already reserves persistence and response time.
+        # Retain a final aggregation/cancellation window inside that budget.
+        return max(0.01, deadline.remaining_analysis_time() - 0.5)
+
+    async def _branch_outcome(operation: Any, *, timeout_seconds: float | None = None) -> Any:
+        """Finish source branches before the shared analysis deadline expires."""
+        deadline = current_execution_deadline()
+        if deadline is None:
+            return await operation
+        # Keep a small window for cancellation/normalization so completed
+        # sibling branches can still become a partial response.
+        try:
+            timeout = timeout_seconds if timeout_seconds is not None else _child_timeout()
+            assert timeout is not None
+        except ExecutionDeadlineExceeded:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            return None
+        try:
+            async with asyncio.timeout(timeout):
+                return await operation
+        except TimeoutError:
+            return None
+
+    async def _media_result(kind: MediaType, ordinal: int, url: str) -> SourceMediaResult:
+        try:
+            child_timeout = _child_timeout()
+            acquired = await _branch_outcome(
+                ingestor.download_media(url, timeout_seconds=child_timeout), timeout_seconds=child_timeout,
+            )
+            if not isinstance(acquired, tuple):
+                return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model=("gemini_video_verification" if kind == MediaType.VIDEO else "sightengine"))
+            data, mime_type = acquired
+            info = validate_media_bytes(data)
+            if info.media_type != kind:
+                return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model="unsupported_media")
+            provider_timeout = _child_timeout()
+            result = await _branch_outcome(router.route(info.media_type, data, mime_type=mime_type, diagnostic_log=diagnostic_log), timeout_seconds=provider_timeout)
+            if not isinstance(result, AnalysisResult):
+                return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model=("gemini_video_verification" if kind == MediaType.VIDEO else "sightengine"))
+            return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="completed", authenticity_index=result.authenticity_index,
+                verdict=result.verdict, confidence=result.confidence, model=result.model_used.value, explanation=result.explanation,
+                processing_ms=max(0, min(60_000, result.processing_ms)))
+        except asyncio.CancelledError:
+            raise
+        except (SecurityValidationError, ExternalAPIError, ProviderInfrastructureError, ExecutionDeadlineExceeded):
+            return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model=("gemini_video_verification" if kind == MediaType.VIDEO else "sightengine"))
+
+    has_images, has_video = bool(document.image_urls), bool(document.video_urls)
+    if quota_store is not None and account_created_at is not None and (has_images or has_video):
+        plan = build_source_media_admission_plan(quota_store, user_id=user_id, client_ip=client_ip,
+            account_created_at=account_created_at, has_image=has_images, has_video=has_video)
+        deadline = current_execution_deadline()
+        if deadline is None: await quota_store.admit(plan)
+        else: await deadline.run(quota_store.admit(plan))
+    media_task = asyncio.gather(*(
+        [_media_result(MediaType.IMAGE, index + 1, url) for index, url in enumerate(document.image_urls)]
+        + [_media_result(MediaType.VIDEO, 1, url) for url in document.video_urls]
+    ), return_exceptions=True)
+    has_text = len(document.text.strip()) >= 200
+    text_task = _analyze_complex_text(document.text, diagnostic_log) if has_text else None
+    if text_task is None:
+        media_outcomes = await media_task
+        text_result = None
+    else:
+        # Media's child timeout belongs exclusively to media acquisition.  A
+        # completed text branch must not be downgraded when a sibling media
+        # download exhausts its own child budget; the outer execution deadline
+        # remains the root cancellation boundary for the whole request.
+        text_outcome, media_outcomes = await asyncio.gather(text_task, media_task, return_exceptions=True)
+        text_result = text_outcome if isinstance(text_outcome, AnalysisResult) else None
+    media_results = [item for item in media_outcomes if isinstance(item, SourceMediaResult)]
+    completed_media = [item for item in media_results if item.status == "completed"]
+    if text_result is None and not completed_media:
+        raise SecurityValidationError("source_unavailable", "Источник не содержит пригодного текста или медиа.", 422)
+
+    source = SourceDetails(
+        url=document.url, title=document.title[:300], description=document.description[:600],
+        site_name=document.site_name[:160], text_found=has_text, text_truncated=document.text_truncated,
+        images_discovered=len(document.image_urls), video_discovered=has_video,
+        images_analyzed=sum(1 for item in completed_media if item.kind == "image"),
+        video_analyzed=any(item.kind == "video" for item in completed_media), media=media_results,
+    )
+    if text_result is not None:
+        return text_result.model_copy(update={"source": source})
+    # A source with no usable text still exposes a real media result; no score
+    # is fabricated or blended with unavailable text branches.
+    primary = next(item for item in completed_media if item.authenticity_index is not None)
+    return AnalysisResult(verdict=primary.verdict, confidence=primary.confidence or 0.5,
+        model_used=next((model for model in ModelUsed if model.value == primary.model), ModelUsed.SIGHTENGINE),
+        explanation=primary.explanation or "Доступен частичный результат медиаанализа.", media_type=MediaType.TEXT,
+        authenticity_index=primary.authenticity_index, analysis_mode="complex", source=source,
+        short_report="Текст источника недостаточен для расширенного анализа; показаны результаты доступного медиа.")
+
+
 async def _analyze(
-    request: TextAnalyzeRequest | FileAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
+    request: TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
     quota_store: AppwriteTablesRateLimitStore | None = None, user_id: str = "",
     account_created_at: Any = None, client_ip: str = "",
 ) -> dict[str, Any]:
@@ -660,7 +771,17 @@ async def _analyze(
         await _finalize("consumed")
         return result
 
-    if isinstance(request, TextAnalyzeRequest):
+    if isinstance(request, SourceAnalyzeRequest):
+        source_url = await validate_source_url(request.source_url)
+        admission_plan = (
+            build_admission_plan(
+                quota_store, user_id=user_id, client_ip=client_ip, account_created_at=account_created_at,
+                media_type=MediaType.TEXT.value, input_size=len(source_url), text="", hybrid=True,
+            ) if quota_store is not None and account_created_at is not None else None
+        )
+        result = await _with_quota(lambda: _analyze_complex_source(source_url, diagnostic_log, quota_store=quota_store,
+            user_id=user_id, client_ip=client_ip, account_created_at=account_created_at), admission_plan)
+    elif isinstance(request, TextAnalyzeRequest):
         text = request.text
         mode = request.mode or request.analysis_type
         admission_plan = (
@@ -749,7 +870,7 @@ async def _execute_request(
     # the Function API key.  Keep analysis and profile operations fail-closed.
     if not api_key and not is_diagnostic:
         raise RuntimeError("Missing Appwrite Function API key")
-    is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest))
+    is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest, SourceAnalyzeRequest))
     if execution_deadline is None and request_started_at is not None and is_analyze:
         try:
             execution_deadline = ExecutionDeadline.from_execution_timeout(
@@ -815,12 +936,12 @@ async def _execute_request(
                     persist_check_result(
                         result,
                         user_id,
-                        request.source_label or "",
+                        (result.get("source", {}).get("url", "") if isinstance(request, SourceAnalyzeRequest) else request.source_label or ""),
                         api_key,
                     )
                 )
                 if execution_deadline is not None
-                else persist_check_result(result, user_id, request.source_label or "", api_key)
+                else persist_check_result(result, user_id, (result.get("source", {}).get("url", "") if isinstance(request, SourceAnalyzeRequest) else request.source_label or ""), api_key)
             )
         except Exception:
             if is_gemini_text:

@@ -823,6 +823,33 @@ def build_admission_plan(
     return AdmissionPlan(user_id, tuple(dimensions), tuple(provider_units))
 
 
+def build_source_media_admission_plan(
+    store: AppwriteTablesRateLimitStore, *, user_id: str, client_ip: str,
+    account_created_at: Any, has_image: bool, has_video: bool,
+) -> AdmissionPlan:
+    """Reserve only source dimensions learned after safe extraction.
+
+    The initial source plan already owns total/IP/complex counters.  This plan
+    intentionally never repeats them, and counts heavy media once per source.
+    """
+    now = store.now
+    created_at = _parse_created_at(account_created_at)
+    is_new_user = now < created_at + timedelta(days=settings.new_user_period_days)
+    day = _window(now, "day")
+    dimensions: list[AdmissionDimension] = []
+    if has_image or has_video:
+        dimensions.append(_dimension("ip_heavy_media_daily", store.ip_subject(client_ip), day, 1,
+            settings.ip_heavy_media_daily, "daily_quota_exceeded", "Достигнут дневной лимит проверок."))
+    if is_new_user and has_image:
+        dimensions.append(_dimension("new_user_image_daily", user_id, day, 1, settings.new_user_image_daily,
+            "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа."))
+    if is_new_user and has_video:
+        first7 = Window(created_at.strftime("%Y-%m-%dT%H"), created_at + timedelta(days=settings.new_user_period_days))
+        dimensions.append(_dimension("new_user_video_first7d", user_id, first7, 1, settings.new_user_video_first_7d,
+            "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа."))
+    return AdmissionPlan(user_id, tuple(dimensions), (), create_reservation=False)
+
+
 async def enforce_admission(store: AppwriteTablesRateLimitStore, user_id: str, client_ip: str) -> None:
     checks = (("ip_minute", store.ip_subject(client_ip), "minute", store.limit("RATE_LIMIT_IP_PER_MINUTE", 10)), ("user_minute", user_id, "minute", store.limit("RATE_LIMIT_USER_PER_MINUTE", 6)), ("user_hour", user_id, "hour", store.limit("RATE_LIMIT_USER_PER_HOUR", 30)))
     for dimension, subject, period, limit in checks:

@@ -13,6 +13,7 @@ import {
   RegisterPage,
   DashboardOverview,
   NewCheckPage,
+  BigTextCheckPage,
   HistoryPage,
   HistoryDetailPage,
   ApiSettingsPage,
@@ -123,6 +124,7 @@ function AppContent() {
       >
         <Route index element={<DashboardOverview />} />
         <Route path="check" element={<VerifiedRoute><NewCheckPage /></VerifiedRoute>} />
+        <Route path="big-text" element={<VerifiedRoute><BigTextCheckPage /></VerifiedRoute>} />
         <Route path="history" element={<VerifiedRoute><HistoryPage /></VerifiedRoute>} />
         <Route path="history/:checkId" element={<VerifiedRoute><HistoryDetailPage /></VerifiedRoute>} />
         <Route path="api" element={<ApiSettingsPage />} />

@@ -92,6 +92,47 @@ describe('server-backed check history', () => {
     expect(check.credibility?.sources).toHaveLength(1);
   });
 
+  it('round-trips all persisted Complex fields without treating authenticity index as AI confidence', () => {
+    const check = mapHistoryRow(row({
+      verdict: 'FAKE', authenticity_index: 0, processing_ms: 0,
+      details: JSON.stringify({
+        analysis_mode: 'complex', ai_confidence: 0, short_report: 'Итог.',
+        ai_details: { signals: [{ type: 'GENERIC_FORMULATION', severity: 'LOW', title: 'Шаблон', explanation: 'Пояснение.' }], human_signals: ['Авторская деталь.'] },
+        credibility: {
+          status: 'completed', credibility_index: 0, verdict: 'VERY_LOW_CREDIBILITY', confidence: 0,
+          processing_ms: 0, summary: 'Недостаточно оснований.', issues: [], credible_points: [], sources: [],
+        },
+      }),
+    }) as never);
+
+    expect(check).toMatchObject({
+      analysis_mode: 'complex', authenticity_index: 0, confidence: 0, processing_ms: 0,
+      short_report: 'Итог.', ai_details: { human_signals: ['Авторская деталь.'] },
+      credibility: { credibility_index: 0, confidence: 0, processing_ms: 0 },
+    });
+  });
+
+  it('restores the persisted live Complex confidence independently from authenticity index', () => {
+    const check = mapHistoryRow(row({
+      verdict: 'FAKE', authenticity_index: 4,
+      details: JSON.stringify({ analysis_mode: 'complex', ai_confidence: 0.96 }),
+    }) as never);
+
+    expect(check.verdict).toBe('FAKE');
+    expect(check.authenticity_index).toBe(4);
+    expect(check.confidence).toBe(0.96);
+  });
+
+  it('leaves Complex AI confidence absent when persistence did not store it', () => {
+    const check = mapHistoryRow(row({
+      authenticity_index: 86,
+      details: JSON.stringify({ analysis_mode: 'complex' }),
+    }) as never);
+
+    expect(check.confidence).toBeNull();
+    expect(check.authenticity_index).toBe(86);
+  });
+
   it('uses the authenticated TablesDB client with owner, order, pagination, and projection queries', async () => {
     tablesDBMock.listRows.mockResolvedValue({ rows: [row(), row({ $id: 'foreign', user_id: 'user-2' })], total: 0 });
 

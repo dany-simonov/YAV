@@ -104,6 +104,37 @@ class CredibilityIssue(BaseModel):
         return value
 
 
+class AIOriginSignal(BaseModel):
+    """One allowlisted stylistic signal for the expanded complex text mode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[
+        "STRUCTURAL_UNIFORMITY", "LEXICAL_PREDICTABILITY", "SYNTACTIC_UNIFORMITY",
+        "REPETITIVE_PATTERNS", "OVERLY_REGULAR_COMPOSITION", "GENERIC_FORMULATION",
+        "STYLE_INCONSISTENCY",
+    ]
+    severity: Literal["LOW", "MEDIUM", "HIGH"]
+    title: str = Field(min_length=1, max_length=160)
+    explanation: str = Field(min_length=1, max_length=400)
+
+
+class AIOriginDetails(BaseModel):
+    """Optional extended evidence, emitted only by complex text analysis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    signals: list[AIOriginSignal] = Field(default_factory=list, max_length=5)
+    human_signals: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("human_signals")
+    @classmethod
+    def validate_human_signals(cls, values: list[str]) -> list[str]:
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 250 for value in values):
+            raise ValueError("human_signals must contain bounded non-empty strings")
+        return values
+
+
 class CredibilitySource(BaseModel):
     """A source copied only from Gemini grounding metadata."""
 
@@ -130,14 +161,22 @@ class CredibilityAssessment(BaseModel):
     ] | None = None
     confidence: float | None = None
     processing_ms: StrictInt | None = Field(default=None, ge=0, le=60_000)
-    summary: str = Field(min_length=1, max_length=500)
-    issues: list[CredibilityIssue] = Field(default_factory=list, max_length=5)
+    summary: str = Field(min_length=1, max_length=600)
+    issues: list[CredibilityIssue] = Field(default_factory=list, max_length=8)
+    credible_points: list[str] = Field(default_factory=list, max_length=4)
     sources: list[CredibilitySource] = Field(default_factory=list, max_length=5)
 
     @field_validator("confidence", mode="before")
     @classmethod
     def validate_confidence(cls, value: float | None) -> float | None:
         return _finite_unit_interval(value, "confidence")
+
+    @field_validator("credible_points")
+    @classmethod
+    def validate_credible_points(cls, values: list[str]) -> list[str]:
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 250 for value in values):
+            raise ValueError("credible_points must contain bounded non-empty strings")
+        return values
 
     @field_validator("summary", "issues", "sources")
     @classmethod
@@ -177,10 +216,17 @@ class AnalysisResult(BaseModel):
     decision_confidence: float | None = None
     authenticity_index: StrictInt | None = Field(default=None, ge=0, le=100)
     short_report: str | None = Field(default=None, max_length=600)
+    analysis_mode: Literal["complex"] | None = None
+    ai_details: AIOriginDetails | None = None
     ai_status: Literal["completed", "unavailable"] | None = None
     credibility: CredibilityAssessment | None = None
     provider_evidence: ProviderEvidence | None = None
     component_evidence: list[ComponentEvidence] | None = Field(default=None, max_length=2)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_confidence(cls, value: float) -> float:
+        return _finite_unit_interval(value, "confidence")  # type: ignore[return-value]
 
     @field_validator("ai_probability", "decision_confidence", mode="before")
     @classmethod

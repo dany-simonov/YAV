@@ -18,9 +18,28 @@ export type CredibilityVerdict =
   | 'MOSTLY_CREDIBLE'
   | 'HIGH_CREDIBILITY';
 
+export type Severity = 'LOW' | 'MEDIUM' | 'HIGH';
+
+export type AIOriginSignalType =
+  | 'STRUCTURAL_UNIFORMITY'
+  | 'LEXICAL_PREDICTABILITY'
+  | 'SYNTACTIC_UNIFORMITY'
+  | 'REPETITIVE_PATTERNS'
+  | 'OVERLY_REGULAR_COMPOSITION'
+  | 'GENERIC_FORMULATION'
+  | 'STYLE_INCONSISTENCY';
+
+export type CredibilityIssueType =
+  | 'FACTUAL_CONTRADICTION'
+  | 'UNSUPPORTED_CLAIM'
+  | 'LOGICAL_INCONSISTENCY'
+  | 'MISLEADING_INFERENCE'
+  | 'OUTDATED_INFORMATION'
+  | 'INSUFFICIENT_EVIDENCE';
+
 export interface CredibilityIssue {
-  type: 'FACTUAL_CONTRADICTION' | 'UNSUPPORTED_CLAIM' | 'LOGICAL_INCONSISTENCY' | 'MISLEADING_INFERENCE' | 'OUTDATED_INFORMATION' | 'INSUFFICIENT_EVIDENCE';
-  severity: 'LOW' | 'MEDIUM' | 'HIGH';
+  type: CredibilityIssueType;
+  severity: Severity;
   claim: string;
   explanation: string;
   source_refs: number[];
@@ -37,6 +56,7 @@ export interface CredibilityAssessment {
   processing_ms?: number | null;
   summary: string;
   issues: CredibilityIssue[];
+  credible_points?: string[];
   sources: CredibilitySource[];
 }
 
@@ -48,7 +68,7 @@ export interface Check {
   id: string;
   media_type: MediaType;
   verdict: Verdict;
-  confidence: number;
+  confidence: number | null;
   authenticity_index?: number | null;
   model_used: string;
   explanation: string;
@@ -57,6 +77,8 @@ export interface Check {
   short_report?: string | null;
   credibility?: CredibilityAssessment | null;
   ai_status?: 'completed' | 'unavailable';
+  analysis_mode?: 'complex';
+  ai_details?: AIOriginDetails | null;
 }
 
 export interface CheckResult {
@@ -70,7 +92,12 @@ export interface CheckResult {
   short_report?: string | null;
   credibility?: CredibilityAssessment | null;
   ai_status?: 'completed' | 'unavailable';
+  analysis_mode?: 'complex';
+  ai_details?: AIOriginDetails | null;
 }
+
+export interface AIOriginSignal { type: AIOriginSignalType; severity: Severity; title: string; explanation: string; }
+export interface AIOriginDetails { signals: AIOriginSignal[]; human_signals: string[]; }
 
 // Backward-compatible type for older components/hooks.
 export interface AnalyzeResult {

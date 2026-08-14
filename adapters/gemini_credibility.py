@@ -29,6 +29,7 @@ class GeminiCredibilityAdapter(BaseAdapter):
     TRANSPORT_SAFETY_SECONDS = 2.0
     REQUEST_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0)
     MAX_OUTPUT_TOKENS = 700
+    COMPLEX_MAX_OUTPUT_TOKENS = 1200
     _ISSUE_TYPES = {
         "FACTUAL_CONTRADICTION",
         "UNSUPPORTED_CLAIM",
@@ -62,6 +63,29 @@ class GeminiCredibilityAdapter(BaseAdapter):
   }]
 }
 issues — максимум 5.
+
+ТЕКСТ:
+"""
+    _COMPLEX_PROMPT = """Оцени общую достоверность текста по шкале от 0 до 100.
+Оцени только достоверность: внутреннюю логическую согласованность, общеизвестные
+факты, научную и физическую правдоподобность, причинно-следственные связи,
+неподтверждённые сильные утверждения, misleading inference и очевидно устаревшую
+информацию. Не оценивай стиль письма или вероятность создания текста ИИ.
+Не используй интернет, поиск, grounding или инструменты; не утверждай, что искал
+источники, и не возвращай URL либо sources. Не создавай проблемы или положительные
+пункты ради количества. Если факт нельзя уверенно проверить по общеизвестным
+знаниям, используй INSUFFICIENT_EVIDENCE или UNSUPPORTED_CLAIM, а не утверждай ложь.
+
+Верни только JSON без Markdown со следующими ключами:
+{
+  "credibility_index": integer 0..100,
+  "confidence": number 0..1,
+  "summary": "до 600 символов на русском",
+  "issues": [{"type":"FACTUAL_CONTRADICTION|UNSUPPORTED_CLAIM|LOGICAL_INCONSISTENCY|MISLEADING_INFERENCE|OUTDATED_INFORMATION|INSUFFICIENT_EVIDENCE","severity":"LOW|MEDIUM|HIGH","claim":"до 250 символов","explanation":"до 400 символов на русском"}],
+  "credible_points": ["до 250 символов"]
+}
+issues — максимум 8; credible_points — максимум 4. Если уверенно положительных
+пунктов нет, верни пустой массив.
 
 ТЕКСТ:
 """
@@ -138,7 +162,7 @@ issues — максимум 5.
         return "HIGH_CREDIBILITY"
 
     @classmethod
-    def _parse_json_text(cls, value: str) -> dict[str, Any]:
+    def _parse_json_text(cls, value: str, *, complex_mode: bool = False) -> dict[str, Any]:
         stripped = value.strip()
         if stripped.startswith("```") and stripped.endswith("```"):
             stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped, flags=re.IGNORECASE)
@@ -146,14 +170,15 @@ issues — максимум 5.
             parsed = json.loads(stripped)
         except (TypeError, ValueError) as exc:
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response") from exc
-        if not isinstance(parsed, dict) or set(parsed) != {
-            "credibility_index", "confidence", "summary", "issues"
-        }:
+        expected = {"credibility_index", "confidence", "summary", "issues"}
+        if complex_mode:
+            expected.add("credible_points")
+        if not isinstance(parsed, dict) or set(parsed) != expected:
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
         return parsed
 
     @classmethod
-    def _result(cls, response: httpx.Response) -> CredibilityAssessment:
+    def _result(cls, response: httpx.Response, *, complex_mode: bool = False) -> CredibilityAssessment:
         try:
             body = response.json()
             text = body["candidates"][0]["content"]["parts"][0]["text"]
@@ -161,17 +186,17 @@ issues — максимум 5.
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response") from exc
         if not isinstance(text, str):
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
-        parsed = cls._parse_json_text(text)
+        parsed = cls._parse_json_text(text, complex_mode=complex_mode)
         index = parsed["credibility_index"]
         confidence = parsed["confidence"]
-        summary = cls._clean_text(parsed["summary"], 500)
+        summary = cls._clean_text(parsed["summary"], 600 if complex_mode else 500)
         raw_issues = parsed["issues"]
         if (
             isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= 100
             or isinstance(confidence, bool) or not isinstance(confidence, (int, float))
             or not math.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1
             or summary is None or not re.search(r"[А-Яа-яЁё]", summary)
-            or not isinstance(raw_issues, list) or len(raw_issues) > 5
+            or not isinstance(raw_issues, list) or len(raw_issues) > (8 if complex_mode else 5)
         ):
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
         issues: list[CredibilityIssue] = []
@@ -184,8 +209,8 @@ issues — максимум 5.
                     or item.get("severity") not in cls._SEVERITIES
                 ):
                     raise ValueError("invalid issue")
-                claim = cls._clean_text(item.get("claim"), 300)
-                explanation = cls._clean_text(item.get("explanation"), 500)
+                claim = cls._clean_text(item.get("claim"), 250 if complex_mode else 300)
+                explanation = cls._clean_text(item.get("explanation"), 400 if complex_mode else 500)
                 if claim is None or explanation is None:
                     raise ValueError("invalid issue fields")
                 issues.append(CredibilityIssue(
@@ -194,14 +219,22 @@ issues — максимум 5.
                 ))
         except (TypeError, ValueError) as exc:
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response") from exc
+        credible_points: list[str] = []
+        if complex_mode:
+            raw_points = parsed["credible_points"]
+            if not isinstance(raw_points, list) or len(raw_points) > 4:
+                raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
+            credible_points = [point for item in raw_points if (point := cls._clean_text(item, 250)) is not None]
+            if len(credible_points) != len(raw_points):
+                raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
         return CredibilityAssessment(
             status="completed", model=cls.MODEL, credibility_index=index,
             verdict=cls._verdict(index), confidence=float(confidence), summary=summary,
-            issues=issues, sources=[],
+            issues=issues, credible_points=credible_points, sources=[],
         )
 
     async def analyze(
-        self, data: bytes, *, diagnostic_log: Callable[[str], None] | None = None
+        self, data: bytes, *, diagnostic_log: Callable[[str], None] | None = None, complex_mode: bool = False,
     ) -> CredibilityAssessment:
         text = data.decode("utf-8", errors="replace").strip()
         if not text:
@@ -226,8 +259,8 @@ issues — максимум 5.
                         f"{base_url}/v1beta/models/{model}:generateContent",
                         headers={**gemini_headers(), "Content-Type": "application/json"},
                         json={
-                            "contents": [{"parts": [{"text": f"{self._PROMPT}{text}"}]}],
-                            "generationConfig": {"temperature": 0.1, "maxOutputTokens": self.MAX_OUTPUT_TOKENS},
+                            "contents": [{"parts": [{"text": f"{self._COMPLEX_PROMPT if complex_mode else self._PROMPT}{text}"}]}],
+                            "generationConfig": {"temperature": 0.1, "maxOutputTokens": self.COMPLEX_MAX_OUTPUT_TOKENS if complex_mode else self.MAX_OUTPUT_TOKENS},
                         },
                     )
         except TimeoutError as exc:
@@ -249,4 +282,4 @@ issues — максимум 5.
         self._raise_for_status(response)
         self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_success "
                        f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
-        return self._result(response)
+        return self._result(response, complex_mode=complex_mode)

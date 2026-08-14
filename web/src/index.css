@@ -105,3 +105,20 @@ button, input, textarea { font: inherit; }
     padding: 0 16px;
   }
 }
+
+@media print {
+  @page { margin: 14mm; }
+  body { background: #fff; font-size: 11pt; }
+  body:has(.complex-check-report) * { visibility: hidden; }
+  .complex-check-report, .complex-check-report * { visibility: visible; }
+  .complex-check-report {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    overflow: visible !important;
+    box-shadow: none !important;
+  }
+  .complex-export-control { display: none !important; }
+  .complex-print-section, .complex-print-keep { break-inside: avoid; page-break-inside: avoid; }
+  .complex-check-report p, .complex-check-report li { overflow-wrap: anywhere; }
+}

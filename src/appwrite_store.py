@@ -205,6 +205,8 @@ def _serialize_canonical_details(result: AnalysisResult) -> str:
         details["credibility"] = result.credibility.model_dump(mode="json")
     if result.source is not None:
         details["source"] = result.source.model_dump(mode="json")
+    if result.complex_media is not None:
+        details["complex_media"] = [item.model_dump(mode="json") for item in result.complex_media]
     return _serialize_canonical_details_bounded(details)
 
 

@@ -67,3 +67,21 @@ def test_source_complex_contract_accepts_only_a_source_url():
     with pytest.raises(SecurityValidationError) as raised:
         validate_request_payload({"mode": "complex_source", "sourceUrl": "https://example.com", "text": "x" * 200})
     assert raised.value.code == "conflicting_input"
+
+
+@pytest.mark.parametrize("payload", [
+    {"mode": "complex", "sourceUrl": "https://example.com/post"},
+    {"mode": "complex", "text": "x" * 200},
+    {"mode": "complex", "fileIds": ["valid-file-id"]},
+    {"mode": "complex", "sourceUrl": "https://example.com/post", "text": "x" * 200, "fileIds": ["valid-file-id"]},
+])
+def test_unified_complex_contract_accepts_each_supported_input_combination(payload):
+    request = validate_request_payload(payload)
+    assert request.mode == "complex"
+
+
+def test_unified_complex_contract_rejects_empty_or_duplicate_files():
+    with pytest.raises(SecurityValidationError):
+        validate_request_payload({"mode": "complex"})
+    with pytest.raises(SecurityValidationError):
+        validate_request_payload({"mode": "complex", "fileIds": ["same", "same"]})

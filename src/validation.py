@@ -150,9 +150,32 @@ class SourceAnalyzeRequest(_RequestModel):
     source_url: str = Field(alias="sourceUrl", min_length=8, max_length=2_048)
 
 
+class ComplexAnalyzeRequest(_RequestModel):
+    """Unified Complex input: each source is optional, one is required."""
+    action: Literal["analyze"] = "analyze"
+    mode: Literal["complex"]
+    source_url: str | None = Field(default=None, alias="sourceUrl", min_length=8, max_length=2_048)
+    text: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    file_ids: list[str] = Field(default_factory=list, alias="fileIds", max_length=4)
+
+    @model_validator(mode="after")
+    def _validate_complex_request(self) -> "ComplexAnalyzeRequest":
+        self.file_ids = [validate_file_id(file_id) for file_id in self.file_ids]
+        if len(set(self.file_ids)) != len(self.file_ids):
+            raise ValueError("duplicate fileIds")
+        if self.text is not None:
+            if not self.text.strip():
+                self.text = None
+            else:
+                validate_text(self.text, hybrid=True)
+        if not self.source_url and not self.text and not self.file_ids:
+            raise ValueError("complex request needs at least one source")
+        return self
+
+
 ValidatedRequest = (
     EnsureProfileRequest | GeminiSmokeTestRequest | GeminiListModelsRequest
-    | TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest
+    | TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest | ComplexAnalyzeRequest
 )
 
 
@@ -209,7 +232,9 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         has_text = "text" in payload
         has_file = "fileId" in payload
         has_source = "sourceUrl" in payload
-        if has_source:
+        if payload.get("mode") == "complex":
+            model = ComplexAnalyzeRequest
+        elif has_source:
             if has_text or has_file or payload.get("mode") != "complex_source":
                 raise SecurityValidationError("conflicting_input", "Передайте один источник для комплексного анализа.")
             model = SourceAnalyzeRequest

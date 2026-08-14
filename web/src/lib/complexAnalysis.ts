@@ -39,3 +39,13 @@ export const buildComplexSourcePayload = (sourceUrl: string, user: User) => ({
   firstName: user.name.split(' ')[0] || '',
   mode: 'complex_source' as const,
 });
+
+export const buildUnifiedComplexPayload = (input: { sourceUrl?: string; text?: string; fileIds?: string[] }, user: User) => ({
+  sourceUrl: input.sourceUrl?.trim() || undefined,
+  text: input.text?.trim() || undefined,
+  fileIds: input.fileIds || [],
+  userId: user.$id,
+  username: user.name,
+  firstName: user.name.split(' ')[0] || '',
+  mode: 'complex' as const,
+});

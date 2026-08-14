@@ -62,11 +62,12 @@ from src.execution_deadline import (  # noqa: E402
 )
 from src.validation import (  # noqa: E402
     FileAnalyzeRequest,
-    SourceAnalyzeRequest,
+    ComplexAnalyzeRequest, SourceAnalyzeRequest,
     SecurityValidationError,
     TextAnalyzeRequest,
     ValidatedRequest,
     MAX_FILE_BYTES,
+    MAX_TEXT_LENGTH,
     MAX_FILENAME_LENGTH,
     parse_json_object,
     validate_request_payload,
@@ -590,7 +591,7 @@ async def _analyze_complex_text(text: str, diagnostic_log: Any) -> AnalysisResul
 
 async def _analyze_complex_source(
     source_url: str, diagnostic_log: Any, *, quota_store: AppwriteTablesRateLimitStore | None = None,
-    user_id: str = "", client_ip: str = "", account_created_at: Any = None,
+    user_id: str = "", client_ip: str = "", account_created_at: Any = None, additional_text: str = "",
 ) -> AnalysisResult:
     """Ingest one public source and deterministically combine existing analyzers."""
     ingestor = SourceIngestor()
@@ -661,8 +662,20 @@ async def _analyze_complex_source(
         [_media_result(MediaType.IMAGE, index + 1, url) for index, url in enumerate(document.image_urls)]
         + [_media_result(MediaType.VIDEO, 1, url) for url in document.video_urls]
     ), return_exceptions=True)
-    has_text = len(document.text.strip()) >= 200
-    text_task = _analyze_complex_text(document.text, diagnostic_log) if has_text else None
+    source_text, manual_text = document.text.strip(), additional_text.strip()
+    if source_text and manual_text:
+        # Preserve provenance and a bounded part of each input instead of
+        # silently dropping the later manual text behind a long article.
+        half = (MAX_TEXT_LENGTH - 80) // 2
+        combined_text = f"[Текст публикации]\n{source_text[:half]}\n\n[Дополнительный текст пользователя]\n{manual_text[:half]}"
+    elif source_text:
+        combined_text = "[Текст публикации]\n" + source_text[:MAX_TEXT_LENGTH]
+    elif manual_text:
+        combined_text = "[Дополнительный текст пользователя]\n" + manual_text[:MAX_TEXT_LENGTH]
+    else:
+        combined_text = ""
+    has_text = len(combined_text) >= 200
+    text_task = _analyze_complex_text(combined_text, diagnostic_log) if has_text else None
     if text_task is None:
         media_outcomes = await media_task
         text_result = None
@@ -698,7 +711,7 @@ async def _analyze_complex_source(
 
 
 async def _analyze(
-    request: TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
+    request: TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest | ComplexAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
     quota_store: AppwriteTablesRateLimitStore | None = None, user_id: str = "",
     account_created_at: Any = None, client_ip: str = "",
 ) -> dict[str, Any]:
@@ -780,7 +793,38 @@ async def _analyze(
         await _finalize("consumed")
         return result
 
-    if isinstance(request, SourceAnalyzeRequest):
+    if isinstance(request, ComplexAnalyzeRequest):
+        # The unified request keeps the old source-only path intact while
+        # allowing trusted Storage files and manual text to run alongside it.
+        source_result = None
+        if request.source_url:
+            source_result = await _analyze_complex_source(request.source_url, diagnostic_log, quota_store=quota_store,
+                user_id=user_id, client_ip=client_ip, account_created_at=account_created_at, additional_text=request.text or "")
+        text_result = await _analyze_complex_text(request.text, diagnostic_log) if request.text and not request.source_url else None
+        manual_results: list[AnalysisResult] = []
+        manual_media: list[SourceMediaResult] = []
+        bucket_id = os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID") or os.getenv("UPLOADS_BUCKET_ID") or "uploads"
+        for file_id in request.file_ids:
+            metadata = await _get_file_metadata(file_id, bucket_id, user_jwt)
+            file_bytes = await _download_file_bytes(file_id, bucket_id, user_jwt)
+            info = validate_media_bytes(file_bytes)
+            if _metadata_media_type(metadata) != info.media_type:
+                raise SecurityValidationError("media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415)
+            try:
+                item = await router.route(info.media_type, file_bytes, mime_type=metadata["mimeType"].split(";", 1)[0].lower())
+                manual_results.append(item)
+                manual_media.append(SourceMediaResult(kind=info.media_type.value, origin="manual", ordinal=len(manual_media) + 1, status="completed",
+                    authenticity_index=item.authenticity_index, verdict=item.verdict, confidence=item.confidence,
+                    model=item.model_used.value, explanation=item.explanation, processing_ms=item.processing_ms))
+            except (ExternalAPIError, ProviderInfrastructureError, ExecutionDeadlineExceeded):
+                manual_media.append(SourceMediaResult(kind=info.media_type.value, origin="manual", ordinal=len(manual_media) + 1, status="unavailable",
+                    model="gemini_video_verification" if info.media_type == MediaType.VIDEO else info.media_type.value))
+        result = source_result or text_result or (manual_results[0] if manual_results else None)
+        if result is None:
+            raise SecurityValidationError("source_unavailable", "Нет пригодного материала для анализа.", 422)
+        if manual_media:
+            result = result.model_copy(update={"analysis_mode": "complex", "complex_media": manual_media})
+    elif isinstance(request, SourceAnalyzeRequest):
         source_url = await validate_source_url(request.source_url)
         admission_plan = (
             build_admission_plan(
@@ -879,7 +923,7 @@ async def _execute_request(
     # the Function API key.  Keep analysis and profile operations fail-closed.
     if not api_key and not is_diagnostic:
         raise RuntimeError("Missing Appwrite Function API key")
-    is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest, SourceAnalyzeRequest))
+    is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest, SourceAnalyzeRequest, ComplexAnalyzeRequest))
     if execution_deadline is None and request_started_at is not None and is_analyze:
         try:
             execution_deadline = ExecutionDeadline.from_execution_timeout(

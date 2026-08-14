@@ -4,8 +4,10 @@ import {
   buildComplexPayload,
   COMPLEX_MAX_LENGTH,
   COMPLEX_MIN_LENGTH,
+  COMPLEX_ANALYSIS_ROUTE,
   isComplexTextSubmittable,
-} from './BigTextCheckPage';
+} from '../../lib/complexAnalysis';
+import { BIG_TEXT_REDIRECT_TARGET } from './BigTextCheckPage';
 
 const user = { $id: 'user-1', email: 'user@example.test', name: 'Иван Петров' };
 
@@ -18,6 +20,10 @@ describe('BigTextCheckPage Complex input contract', () => {
       mediaType: 'text',
       mode: 'hybrid_text',
     });
+    expect(buildComplexPayload(text, user)).not.toHaveProperty('url');
+    expect(buildComplexPayload(text, user)).not.toHaveProperty('fileId');
+    expect(buildComplexPayload(text, user)).not.toHaveProperty('articleUrl');
+    expect(buildComplexPayload(text, user)).not.toHaveProperty('complexFiles');
   });
 
   it('accepts the exact meaningful minimum and maximum', () => {
@@ -30,5 +36,10 @@ describe('BigTextCheckPage Complex input contract', () => {
     expect(isComplexTextSubmittable(' '.repeat(COMPLEX_MIN_LENGTH), false)).toBe(false);
     expect(isComplexTextSubmittable('а'.repeat(COMPLEX_MAX_LENGTH + 1), false)).toBe(false);
     expect(isComplexTextSubmittable('а'.repeat(COMPLEX_MIN_LENGTH), true)).toBe(false);
+  });
+
+  it('keeps the retired big-text URL as an alias for the Complex tab', () => {
+    expect(COMPLEX_ANALYSIS_ROUTE).toBe('/dashboard/check?tab=complex');
+    expect(BIG_TEXT_REDIRECT_TARGET).toBe(COMPLEX_ANALYSIS_ROUTE);
   });
 });

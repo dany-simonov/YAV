@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import { Plus, ArrowRight, ArrowUp, Shield, Clock, CheckCircle, FileText, Image, AudioWaveform, Video, Hand } from 'lucide-react';
 import { Card, CardHeader, Button } from '../../components/ui';
 import { getHistoryStats } from '../../lib/checkHistory';
+import { COMPLEX_ANALYSIS_ROUTE } from '../../lib/complexAnalysis';
 import { useAuthStore } from '../../store';
 
 export function DashboardOverview() {
@@ -206,7 +207,7 @@ export function DashboardOverview() {
               </p>
             </div>
           </div>
-          <Link to="/dashboard/big-text">
+          <Link to={COMPLEX_ANALYSIS_ROUTE}>
             <Button className="text-white" leftIcon={<FileText className="w-4 h-4" />}>
               Открыть проверку
             </Button>

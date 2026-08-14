@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertCircle, CheckCircle2, Clock, FileText, ShieldCheck, Sparkles } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, FileText, ShieldCheck } from 'lucide-react';
 
 import { Card, CardHeader, Button, Alert } from '../../components/ui';
 import { TextInput } from '../../components/upload';
@@ -57,7 +57,8 @@ const splitIntoWordSpans = (text: string, className: string, keyPrefix: string) 
   });
 };
 
-export function BigTextCheckPage() {
+/** Complex text mode rendered inside the "New check" workspace. */
+export function ComplexTextCheck() {
   const navigate = useNavigate();
   const { user } = useAuthStore();
 
@@ -163,22 +164,10 @@ export function BigTextCheckPage() {
   };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-bold text-mv-text flex items-center gap-2">
-          Большая проверка текста
-          <Sparkles className="w-5 h-5 text-mv-accent" />
-        </h1>
-        <p className="text-mv-text-secondary">
-          Двойная проверка: детекция ИИ + фактчек/заимствования с пословной подсветкой.
-          Рекомендуемый объем: {RECOMMENDED_RANGE.min}-{RECOMMENDED_RANGE.max} символов,
-          максимум {MAX_LENGTH.toLocaleString()}.
-        </p>
-      </div>
-
+    <div className="space-y-6">
       <Card>
         <CardHeader
-          title="Текст для глубокой проверки"
+          title="Комплексная проверка текста"
           description="Чем больше текста, тем точнее результат. Модель может ошибаться — используйте результат как ориентир."
         />
 

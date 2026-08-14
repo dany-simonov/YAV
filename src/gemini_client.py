@@ -17,6 +17,13 @@ def safe_gemini_model() -> str:
     return model if _MODEL.fullmatch(model) else "invalid-model"
 
 
+def safe_gemini_credibility_model() -> str:
+    """Return the dedicated grounded model, falling back to the shared model."""
+    configured = settings.gemini_credibility_model.strip()
+    model = configured or settings.gemini_model.strip()
+    return model if _MODEL.fullmatch(model) else "invalid-model"
+
+
 def safe_gemini_base_url() -> str | None:
     """Allow only an HTTPS server-side Gemini API origin."""
     value = settings.gemini_api_url.rstrip("/")

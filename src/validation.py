@@ -93,7 +93,7 @@ def normalize_source_label(value: str | None) -> str:
 class _RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
-    action: Literal["analyze", "ensure_profile", "gemini_smoke_test"] = "analyze"
+    action: Literal["analyze", "ensure_profile", "gemini_smoke_test", "gemini_list_models"] = "analyze"
     user_id: str | None = Field(default=None, alias="userId", max_length=128)
     username: str | None = Field(default=None, max_length=128)
     first_name: str | None = Field(default=None, alias="firstName", max_length=128)
@@ -105,6 +105,10 @@ class EnsureProfileRequest(_RequestModel):
 
 class GeminiSmokeTestRequest(_RequestModel):
     action: Literal["gemini_smoke_test"]
+
+
+class GeminiListModelsRequest(_RequestModel):
+    action: Literal["gemini_list_models"]
 
 
 class TextAnalyzeRequest(_RequestModel):
@@ -139,7 +143,10 @@ class FileAnalyzeRequest(_RequestModel):
         return self
 
 
-ValidatedRequest = EnsureProfileRequest | GeminiSmokeTestRequest | TextAnalyzeRequest | FileAnalyzeRequest
+ValidatedRequest = (
+    EnsureProfileRequest | GeminiSmokeTestRequest | GeminiListModelsRequest
+    | TextAnalyzeRequest | FileAnalyzeRequest
+)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -189,6 +196,8 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         model: type[BaseModel] = EnsureProfileRequest
     elif action == "gemini_smoke_test":
         model = GeminiSmokeTestRequest
+    elif action == "gemini_list_models":
+        model = GeminiListModelsRequest
     elif action == "analyze" or "action" not in payload:
         has_text = "text" in payload
         has_file = "fileId" in payload

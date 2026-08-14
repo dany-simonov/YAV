@@ -20,10 +20,10 @@ def _ai_result(model=ModelUsed.GEMINI_TEXT):
     )
 
 
-def _credibility_result():
+def _credibility_result(processing_ms: int | None = None):
     return CredibilityAssessment(
         status="completed", credibility_index=34, verdict="LOW_CREDIBILITY", confidence=0.8,
-        summary="Ключевые утверждения требуют дополнительной проверки.",
+        summary="Ключевые утверждения требуют дополнительной проверки.", processing_ms=processing_ms,
     )
 
 
@@ -50,8 +50,36 @@ async def test_combined_normal_text_runs_branches_concurrently_and_returns_one_r
     assert result.model_used == ModelUsed.GEMINI_TEXT
     assert result.credibility is not None and result.credibility.status == "completed"
     assert result.credibility.credibility_index == 34
+    assert result.credibility.model == "gemini_credibility"
+    assert result.credibility.processing_ms is not None
+    assert result.credibility.processing_ms >= 0
     assert "34/100" in (result.short_report or "")
     router.route.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_combined_credibility_processing_time_excludes_parallel_ai_branch_waiting():
+    credibility_finished = asyncio.Event()
+
+    async def ai_branch(*_args, **_kwargs):
+        await asyncio.wait_for(credibility_finished.wait(), timeout=0.2)
+        await asyncio.sleep(0.06)
+        return _ai_result()
+
+    async def credibility_branch(*_args, **_kwargs):
+        await asyncio.sleep(0.005)
+        credibility_finished.set()
+        return _credibility_result()
+
+    router = MagicMock()
+    router.route = AsyncMock(side_effect=ai_branch)
+
+    with patch("src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(side_effect=credibility_branch)):
+        result = await _analyze_combined_normal_text(router, "текст", None)
+
+    assert result.credibility is not None
+    assert result.credibility.processing_ms is not None
+    assert result.credibility.processing_ms < 50
 
 
 @pytest.mark.asyncio
@@ -81,6 +109,8 @@ async def test_partial_credibility_failure_preserves_ai_result():
         result = await _analyze_combined_normal_text(router, "текст", None)
     assert result.ai_status is None
     assert result.credibility is not None and result.credibility.status == "unavailable"
+    assert result.credibility.model == "gemini_credibility"
+    assert result.credibility.processing_ms is None
 
 
 @pytest.mark.asyncio
@@ -96,7 +126,7 @@ async def test_partial_ai_failure_preserves_credibility_result():
 @pytest.mark.asyncio
 async def test_combined_result_is_persisted_once():
     result = _ai_result().model_copy(update={
-        "credibility": _credibility_result(), "short_report": "Общий отчёт.",
+        "credibility": _credibility_result(processing_ms=8120), "short_report": "Общий отчёт.",
     }).model_dump(mode="json")
     with patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
         "src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "user"})
@@ -109,6 +139,8 @@ async def test_combined_result_is_persisted_once():
     persist.assert_awaited_once()
     assert response["check_id"] == "check-1"
     assert response["credibility"]["credibility_index"] == 34
+    assert response["credibility"]["processing_ms"] == 8120
+    assert persist.await_args.args[0]["credibility"]["processing_ms"] == 8120
 
 
 @pytest.mark.asyncio

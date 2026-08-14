@@ -119,7 +119,7 @@ class CredibilityAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["completed", "unavailable"]
-    model: str = Field(default="gemini_credibility_grounded", min_length=1, max_length=128)
+    model: str = Field(default="gemini_credibility", min_length=1, max_length=128)
     credibility_index: StrictInt | None = Field(default=None, ge=0, le=100)
     verdict: Literal[
         "VERY_LOW_CREDIBILITY",
@@ -129,6 +129,7 @@ class CredibilityAssessment(BaseModel):
         "HIGH_CREDIBILITY",
     ] | None = None
     confidence: float | None = None
+    processing_ms: StrictInt | None = Field(default=None, ge=0, le=60_000)
     summary: str = Field(min_length=1, max_length=500)
     issues: list[CredibilityIssue] = Field(default_factory=list, max_length=5)
     sources: list[CredibilitySource] = Field(default_factory=list, max_length=5)
@@ -148,7 +149,9 @@ class CredibilityAssessment(BaseModel):
         if self.status == "completed":
             if self.credibility_index is None or self.verdict is None or self.confidence is None:
                 raise ValueError("completed credibility assessment requires score fields")
-        elif any(value is not None for value in (self.credibility_index, self.verdict, self.confidence)):
+        elif any(value is not None for value in (
+            self.credibility_index, self.verdict, self.confidence,
+        )):
             raise ValueError("unavailable credibility assessment must not contain score fields")
         for issue in self.issues:
             if issue.source_refs != sorted(set(issue.source_refs)):

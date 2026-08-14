@@ -97,7 +97,14 @@ function isCredibilityAssessment(value: unknown): value is CredibilityAssessment
   return (item.status === 'completed' || item.status === 'unavailable')
     && typeof item.summary === 'string'
     && Array.isArray(item.issues)
-    && Array.isArray(item.sources);
+    && Array.isArray(item.sources)
+    && (item.model === undefined || (typeof item.model === 'string' && item.model.length > 0))
+    && (item.processing_ms === undefined || (
+      typeof item.processing_ms === 'number'
+      && Number.isInteger(item.processing_ms)
+      && item.processing_ms >= 0
+      && item.processing_ms <= 60_000
+    ));
 }
 
 function historyError(error: unknown): Error {

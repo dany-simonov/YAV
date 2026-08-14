@@ -46,7 +46,7 @@ from src.appwrite_store import (  # noqa: E402
     persist_check_result,
 )
 from src.media_validation import validate_media_bytes  # noqa: E402
-from src.gemini_smoke import run_gemini_smoke_test  # noqa: E402
+from src.gemini_smoke import run_gemini_list_models, run_gemini_smoke_test  # noqa: E402
 from src.rate_limit import AppwriteTablesRateLimitStore, RateLimitError, enforce_admission  # noqa: E402
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
 from src.execution_deadline import (  # noqa: E402
@@ -359,7 +359,7 @@ def _log_provider_infrastructure_error(context: Any, exc: ProviderInfrastructure
     known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
     known_kinds = {
         "capacity", "config", "invalid_configuration", "invalid_response", "missing_credentials", "model_loading", "processing_timeout",
-        "timeout", "transport", "unavailable",
+        "rate_limited", "timeout", "transport", "unavailable",
     }
     known_stages = {"admission", "config", "request", "response"}
     known_reasons = {"api_key_missing"}
@@ -478,13 +478,19 @@ async def _analyze_combined_normal_text(
     """Run independent normal-text branches concurrently and join their safe output."""
     text_bytes = text.encode("utf-8")
     ai_started = time.monotonic()
-    credibility_started = time.monotonic()
     _safe_diagnostic_log(diagnostic_log, "branch=ai_origin stage=branch_start")
     ai_diagnostic = _branch_diagnostic(diagnostic_log, "ai_origin") if diagnostic_log is not None else None
     ai_task = router.route(MediaType.TEXT, b"", text, diagnostic_log=ai_diagnostic)
-    credibility_task = GeminiCredibilityAdapter().analyze(
-        text_bytes, diagnostic_log=diagnostic_log,
-    )
+
+    async def _run_credibility_branch() -> CredibilityAssessment:
+        credibility_started = time.monotonic()
+        credibility = await GeminiCredibilityAdapter().analyze(text_bytes, diagnostic_log=diagnostic_log)
+        # This is deliberately only the credibility coroutine's elapsed time:
+        # it excludes waiting for the parallel AI-origin branch and persistence.
+        elapsed_ms = max(0, min(60_000, round((time.monotonic() - credibility_started) * 1000)))
+        return credibility.model_copy(update={"processing_ms": elapsed_ms})
+
+    credibility_task = _run_credibility_branch()
     ai_outcome, credibility_outcome = await asyncio.gather(
         ai_task, credibility_task, return_exceptions=True,
     )
@@ -497,7 +503,7 @@ async def _analyze_combined_normal_text(
         diagnostic_log,
         "branch=credibility stage=branch_"
         + ("error" if isinstance(credibility_outcome, BaseException) else "success")
-        + f" elapsed_ms={round((time.monotonic() - credibility_started) * 1000)}",
+        + (f" elapsed_ms={credibility_outcome.processing_ms}" if not isinstance(credibility_outcome, BaseException) else ""),
     )
 
     def _branch_error(value: Any) -> bool:
@@ -651,11 +657,16 @@ async def _execute_request(
     diagnostic_authorization: str = "",
 ) -> dict[str, Any]:
     """Authorize the execution, ensure its profile, and persist trusted results."""
-    if not api_key:
-        raise RuntimeError("Missing Appwrite Function API key")
     if not user_id or not user_jwt:
         raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
     request = validate_request_payload(payload) if isinstance(payload, dict) else payload
+    is_diagnostic = request.action in {"gemini_smoke_test", "gemini_list_models"}
+    if is_diagnostic:
+        _safe_diagnostic_log(diagnostic_log, f"diagnostic={request.action} stage=start")
+    # Diagnostics authenticate through the invoking user's JWT and do not use
+    # the Function API key.  Keep analysis and profile operations fail-closed.
+    if not api_key and not is_diagnostic:
+        raise RuntimeError("Missing Appwrite Function API key")
     is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest))
     if execution_deadline is None and request_started_at is not None and is_analyze:
         try:
@@ -673,7 +684,16 @@ async def _execute_request(
 
     deadline_token = set_execution_deadline(execution_deadline) if execution_deadline is not None else None
     try:
-        account = await _within_deadline(get_authenticated_account(user_id, user_jwt))
+        try:
+            account = await _within_deadline(get_authenticated_account(user_id, user_jwt))
+        except RuntimeError:
+            if is_diagnostic:
+                _safe_diagnostic_log(diagnostic_log, f"diagnostic={request.action} stage=auth_error category=unavailable")
+                return {
+                    "ok": False, "provider": "appwrite", "operation": request.action,
+                    "provider_code": "AUTHENTICATION_UNAVAILABLE",
+                }
+            raise
 
         if request.action == "ensure_profile":
             profile = await _within_deadline(ensure_user_profile(account, api_key))
@@ -682,7 +702,7 @@ async def _execute_request(
         if account.get("emailVerification") is not True:
             raise EmailNotVerifiedError("Подтвердите email перед запуском анализа.")
 
-        if request.action == "gemini_smoke_test":
+        if request.action in {"gemini_smoke_test", "gemini_list_models"}:
             configured_secret = settings.gemini_smoke_diagnostic_secret
             if (
                 not settings.gemini_smoke_enabled
@@ -690,6 +710,8 @@ async def _execute_request(
                 or not hmac.compare_digest(diagnostic_authorization, configured_secret)
             ):
                 raise SecurityValidationError("diagnostic_access_denied", "Доступ к диагностике запрещён.", 403)
+            if request.action == "gemini_list_models":
+                return await run_gemini_list_models(diagnostic_log)
             return await run_gemini_smoke_test(diagnostic_log)
 
         profile = await _within_deadline(ensure_user_profile(account, api_key))

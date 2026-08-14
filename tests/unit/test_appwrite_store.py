@@ -127,6 +127,7 @@ def test_combined_text_credibility_is_persisted_in_the_same_safe_details_record(
                 "credibility_index": 34,
                 "verdict": "LOW_CREDIBILITY",
                 "confidence": 0.8,
+                "processing_ms": 8120,
                 "summary": "Ключевые утверждения требуют дополнительной проверки.",
                 "issues": [],
                 "sources": [{"title": "Источник", "url": "https://example.org/source"}],
@@ -136,6 +137,7 @@ def test_combined_text_credibility_is_persisted_in_the_same_safe_details_record(
     )
     details = json.loads(row["details"])
     assert details["credibility"]["credibility_index"] == 34
+    assert details["credibility"]["processing_ms"] == 8120
     assert row["authenticity_index"] == 95
 
 

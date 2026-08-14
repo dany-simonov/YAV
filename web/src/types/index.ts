@@ -30,9 +30,11 @@ export interface CredibilitySource { title: string; url: string; }
 
 export interface CredibilityAssessment {
   status: 'completed' | 'unavailable';
+  model?: string;
   credibility_index?: number | null;
   verdict?: CredibilityVerdict | null;
   confidence?: number | null;
+  processing_ms?: number | null;
   summary: string;
   issues: CredibilityIssue[];
   sources: CredibilitySource[];

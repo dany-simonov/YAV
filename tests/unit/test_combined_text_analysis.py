@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from api.schemas import AnalysisResult, CredibilityAssessment
+from api.schemas import AIOriginDetails, AnalysisResult, CredibilityAssessment
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ProviderInfrastructureError
 from src.main import _analyze, _analyze_combined_normal_text, _analyze_complex_text, _execute_request
@@ -83,6 +83,36 @@ async def test_complex_text_runs_exactly_two_parallel_gemini_branches():
     assert result.credibility is not None and result.credibility.status == "completed"
     text.assert_awaited_once()
     credibility.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unified_complex_text_only_passes_one_nonempty_string_corpus_to_both_branches():
+    text = "Текстовый материал для Unified Complex. " * 12
+    captured: list[tuple[bytes, bool]] = []
+    logs: list[str] = []
+
+    async def ai_branch(data, *, complex_mode, **_kwargs):
+        captured.append((data, complex_mode))
+        return _ai_result()
+
+    async def credibility_branch(data, *, complex_mode, **_kwargs):
+        captured.append((data, complex_mode))
+        return _credibility_result()
+
+    request = validate_request_payload({"mode": "complex", "text": text, "fileIds": []})
+    with patch("src.main.GeminiTextAdapter.analyze", new=AsyncMock(side_effect=ai_branch)), patch(
+        "src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(side_effect=credibility_branch)
+    ):
+        result = await _analyze(request, "", logs.append)
+
+    assert result["analysis_mode"] == "complex"
+    assert len(captured) == 2
+    assert all(isinstance(data, bytes) and data.decode("utf-8") == text and complex_mode for data, complex_mode in captured)
+    corpus_log = next(item for item in logs if item.startswith("complex_text_corpus"))
+    assert "manual_text_present=yes source_text_present=no" in corpus_log
+    assert f"combined_corpus_length={len(text)}" in corpus_log
+    assert "combined_corpus_empty=no combined_corpus_type=str truncated=no" in corpus_log
+    assert text not in corpus_log
 
 
 @pytest.mark.asyncio
@@ -169,6 +199,85 @@ async def test_combined_result_is_persisted_once():
     assert response["credibility"]["credibility_index"] == 34
     assert response["credibility"]["processing_ms"] == 8120
     assert persist.await_args.args[0]["credibility"]["processing_ms"] == 8120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ai_outcome", "credibility_outcome", "expected_ai_status", "expected_credibility_status"),
+    [
+        pytest.param(
+            _ai_result().model_copy(update={"ai_details": AIOriginDetails(human_signals=["Проверен стиль изложения."])}),
+            _credibility_result(),
+            None,
+            "completed",
+            id="full",
+        ),
+        pytest.param(
+            _ai_result().model_copy(update={"ai_details": AIOriginDetails(human_signals=["Проверен стиль изложения."])}),
+            ProviderInfrastructureError("gemini", "timeout", stage="request"),
+            None,
+            "unavailable",
+            id="credibility-unavailable",
+        ),
+        pytest.param(
+            ProviderInfrastructureError("gemini", "timeout", stage="request"),
+            _credibility_result(),
+            "unavailable",
+            "completed",
+            id="ai-unavailable",
+        ),
+    ],
+)
+async def test_unified_complex_text_only_persists_without_source_or_manual_media(
+    ai_outcome,
+    credibility_outcome,
+    expected_ai_status,
+    expected_credibility_status,
+):
+    """Text-only unified Complex must not require source_label/source media.
+
+    Before the regression fix this reached successful Gemini branches, then
+    raised AttributeError while persistence read ComplexAnalyzeRequest.source_label.
+    """
+    text = "Проверочный материал для комплексного анализа. " * 12
+    ai_mock = AsyncMock(side_effect=ai_outcome) if isinstance(ai_outcome, BaseException) else AsyncMock(return_value=ai_outcome)
+    credibility_mock = (
+        AsyncMock(side_effect=credibility_outcome)
+        if isinstance(credibility_outcome, BaseException)
+        else AsyncMock(return_value=credibility_outcome)
+    )
+    with patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
+        "src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "user"})
+    ), patch("src.main.AppwriteTablesRateLimitStore"
+    ), patch("src.main.GeminiTextAdapter.analyze", new=ai_mock), patch(
+        "src.main.GeminiCredibilityAdapter.analyze", new=credibility_mock
+    ), patch("src.main.persist_check_result", new=AsyncMock(return_value="check-1")) as persist:
+        response = await _execute_request(
+            {"mode": "complex", "text": text, "fileIds": []},
+            "key",
+            "user",
+            "jwt",
+        )
+
+    persist.assert_awaited_once()
+    persisted_result, persisted_user, source_label, persisted_key = persist.await_args.args
+    assert (persisted_user, source_label, persisted_key) == ("user", "", "key")
+    assert response["check_id"] == "check-1"
+    assert response["analysis_mode"] == "complex"
+    assert "source" not in response and "complex_media" not in response
+    assert "source" not in persisted_result and "complex_media" not in persisted_result
+    assert response.get("ai_status") == expected_ai_status
+    assert response["credibility"]["status"] == expected_credibility_status
+
+    if expected_ai_status is None:
+        assert response["authenticity_index"] == 96
+        assert response["verdict"] == "REAL"
+        assert response["confidence"] == 0.9
+        assert persisted_result["authenticity_index"] == 96
+        assert response["ai_details"]["human_signals"] == ["Проверен стиль изложения."]
+        assert persisted_result["ai_details"]["human_signals"] == ["Проверен стиль изложения."]
+    else:
+        assert "authenticity_index" not in response
 
 
 @pytest.mark.asyncio

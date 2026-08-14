@@ -263,7 +263,7 @@ def _safe_diagnostic_log(diagnostic_log: Any, message: str) -> None:
         pass
 
 
-def _log_internal_error(context: Any, exc: BaseException) -> None:
+def _log_internal_error(context: Any, exc: BaseException, *, operation: str = "unclassified") -> None:
     """Emit bounded runtime diagnostics without rendering exception text or request data."""
     log = getattr(context, "log", None)
     if not callable(log):
@@ -277,7 +277,8 @@ def _log_internal_error(context: Any, exc: BaseException) -> None:
             f"string_lengths={exc.string_lengths}"
         )
     else:
-        message = f"internal_error operation=unclassified exception_class={type(exc).__name__}"
+        safe_operation = operation if operation in {"complex_url_only", "unclassified"} else "unclassified"
+        message = f"internal_error operation={safe_operation} exception_class={type(exc).__name__}"
     try:
         log(message)
     except Exception:
@@ -298,13 +299,17 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
         return
 
     known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
-    known_codes = {"request_error", "rate_limit"}
+    known_codes = {"request_error", "request_rejected", "auth_configuration", "rate_limit"}
     provider = exc.service if exc.service in known_providers else "unknown"
     error_code = exc.detail if exc.detail in known_codes else "unknown"
     status = getattr(exc, "status_code", None)
     safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "none"
     provider_message = getattr(exc, "provider_message", None)
-    if provider not in {"aiornot", "sightengine", "gemini"} or error_code != "request_error":
+    allows_safe_provider_message = (
+        (provider in {"aiornot", "sightengine"} and error_code == "request_error")
+        or (provider == "gemini" and error_code in {"request_error", "request_rejected", "auth_configuration"})
+    )
+    if not allows_safe_provider_message:
         provider_message = None
     if isinstance(provider_message, str):
         provider_message = provider_message.replace("\r", " ").replace("\n", " ").strip()
@@ -595,7 +600,15 @@ async def _analyze_complex_source(
 ) -> AnalysisResult:
     """Ingest one public source and deterministically combine existing analyzers."""
     ingestor = SourceIngestor()
-    document = await ingestor.ingest(source_url)
+    _safe_diagnostic_log(diagnostic_log, "complex_stage=source_start")
+    document = await ingestor.ingest(source_url, diagnostic_log=diagnostic_log)
+    _safe_diagnostic_log(
+        diagnostic_log,
+        "complex_stage=source_ingested "
+        f"text_present={'yes' if bool(document.text.strip()) else 'no'} "
+        f"images_present={'yes' if bool(document.image_urls) else 'no'} "
+        f"video_present={'yes' if bool(document.video_urls) else 'no'}",
+    )
     router = MediaRouter()
 
     def _child_timeout() -> float | None:
@@ -674,6 +687,16 @@ async def _analyze_complex_source(
         combined_text = "[Дополнительный текст пользователя]\n" + manual_text[:MAX_TEXT_LENGTH]
     else:
         combined_text = ""
+    _safe_diagnostic_log(
+        diagnostic_log,
+        "complex_text_corpus "
+        f"manual_text_present={'yes' if manual_text else 'no'} "
+        f"source_text_present={'yes' if source_text else 'no'} "
+        f"combined_corpus_length={len(combined_text)} "
+        f"combined_corpus_empty={'yes' if not combined_text else 'no'} "
+        "combined_corpus_type=str "
+        f"truncated={'yes' if len(source_text) > MAX_TEXT_LENGTH or len(manual_text) > MAX_TEXT_LENGTH else 'no'}",
+    )
     has_text = len(combined_text) >= 200
     text_task = _analyze_complex_text(combined_text, diagnostic_log) if has_text else None
     if text_task is None:
@@ -689,7 +712,11 @@ async def _analyze_complex_source(
     media_results = [item for item in media_outcomes if isinstance(item, SourceMediaResult)]
     completed_media = [item for item in media_results if item.status == "completed"]
     if text_result is None and not completed_media:
-        raise SecurityValidationError("source_unavailable", "Источник не содержит пригодного текста или медиа.", 422)
+        raise SecurityValidationError(
+            "source_no_analyzable_content",
+            "На странице не найден материал для анализа.",
+            422,
+        )
 
     source = SourceDetails(
         url=document.url, title=document.title[:300], description=document.description[:600],
@@ -800,7 +827,15 @@ async def _analyze(
         if request.source_url:
             source_result = await _analyze_complex_source(request.source_url, diagnostic_log, quota_store=quota_store,
                 user_id=user_id, client_ip=client_ip, account_created_at=account_created_at, additional_text=request.text or "")
-        text_result = await _analyze_complex_text(request.text, diagnostic_log) if request.text and not request.source_url else None
+        text_result = None
+        if request.text and not request.source_url:
+            _safe_diagnostic_log(
+                diagnostic_log,
+                "complex_text_corpus manual_text_present=yes source_text_present=no "
+                f"combined_corpus_length={len(request.text)} combined_corpus_empty=no "
+                "combined_corpus_type=str truncated=no",
+            )
+            text_result = await _analyze_complex_text(request.text, diagnostic_log)
         manual_results: list[AnalysisResult] = []
         manual_media: list[SourceMediaResult] = []
         bucket_id = os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID") or os.getenv("UPLOADS_BUCKET_ID") or "uploads"
@@ -980,6 +1015,13 @@ async def _execute_request(
             account_created_at=account.get("$createdAt"), client_ip=client_ip,
         )
         is_gemini_text = result.get("model_used") == "gemini_text_verification"
+        if isinstance(request, (SourceAnalyzeRequest, ComplexAnalyzeRequest)):
+            # Source metadata is optional for unified Complex.  In particular,
+            # text-only Complex has no source and must persist normally.
+            source = result.get("source")
+            source_label = source.get("url", "") if isinstance(source, dict) else ""
+        else:
+            source_label = request.source_label or ""
         persistence_started = time.monotonic()
         if is_gemini_text:
             _safe_diagnostic_log(diagnostic_log, "provider=gemini_text stage=persistence_start")
@@ -989,12 +1031,12 @@ async def _execute_request(
                     persist_check_result(
                         result,
                         user_id,
-                        (result.get("source", {}).get("url", "") if isinstance(request, SourceAnalyzeRequest) else request.source_label or ""),
+                        source_label,
                         api_key,
                     )
                 )
                 if execution_deadline is not None
-                else persist_check_result(result, user_id, (result.get("source", {}).get("url", "") if isinstance(request, SourceAnalyzeRequest) else request.source_label or ""), api_key)
+                else persist_check_result(result, user_id, source_label, api_key)
             )
         except Exception:
             if is_gemini_text:
@@ -1046,10 +1088,19 @@ def _run_coro_sync(coro: Any) -> Any:
 
 def main(context: Any):
     """Appwrite function handler."""
+    request: ValidatedRequest | None = None
     try:
         request_start = time.monotonic()
         payload = _extract_payload(context.req)
         request = validate_request_payload(payload)
+        if isinstance(request, ComplexAnalyzeRequest):
+            _safe_diagnostic_log(
+                _media_diagnostic_logger(context),
+                "complex_stage=request_validated "
+                f"source_present={'yes' if bool(request.source_url) else 'no'} "
+                f"manual_text_present={'yes' if bool(request.text) else 'no'} "
+                f"manual_file_count={len(request.file_ids)}",
+            )
         execution_deadline = None
         if request.action == "analyze":
             try:
@@ -1100,6 +1151,22 @@ def main(context: Any):
             403,
         )
     except SecurityValidationError as exc:
+        if (
+            isinstance(request, ComplexAnalyzeRequest)
+            and request.source_url is not None
+            and request.text is None
+            and not request.file_ids
+        ):
+            safe_source_codes = {
+                "invalid_source_url", "unsafe_source_url", "source_unavailable",
+                "source_timeout", "unsupported_source", "source_too_large",
+                "source_no_analyzable_content",
+            }
+            source_code = exc.code if exc.code in safe_source_codes else "source_unavailable"
+            _safe_diagnostic_log(
+                _media_diagnostic_logger(context),
+                f"complex_stage=source_failed source_error_code={source_code}",
+            )
         return _response_json(context, {"detail": exc.detail, "code": exc.code}, exc.status_code)
     except RateLimitError as exc:
         payload = {"detail": exc.detail, "code": exc.code}
@@ -1136,7 +1203,17 @@ def main(context: Any):
             503,
         )
     except Exception as exc:
-        _log_internal_error(context, exc)
+        is_url_only_complex = (
+            isinstance(request, ComplexAnalyzeRequest)
+            and request.source_url is not None
+            and request.text is None
+            and not request.file_ids
+        )
+        _log_internal_error(
+            context,
+            exc,
+            operation="complex_url_only" if is_url_only_complex else "unclassified",
+        )
         return _response_json(
             context,
             {"detail": "Внутренняя ошибка сервиса.", "code": "internal_error"},

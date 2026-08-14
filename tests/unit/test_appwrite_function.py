@@ -21,6 +21,7 @@ from src.main import (
     main,
 )
 from src.validation import SecurityValidationError, validate_request_payload
+from src.source_ingestion import SourceDocument
 
 
 def _context(payload, headers=None):
@@ -126,6 +127,94 @@ def test_main_uses_only_runtime_client_ip_for_admission():
         main(context)
 
     assert execute_mock.call_args.args[5] == "2001:db8::1"
+
+
+def test_main_handles_url_only_unified_complex_through_source_ingest_and_persistence():
+    class UrlOnlyIngestor:
+        async def ingest(self, url: str, *, diagnostic_log=None) -> SourceDocument:
+            assert url == "https://example.com/article"
+            assert callable(diagnostic_log)
+            return SourceDocument(
+                url=url,
+                title="Публичная статья",
+                description="",
+                site_name="Example",
+                text="Текст публичной статьи для комплексного анализа. " * 12,
+                image_urls=(),
+                video_urls=(),
+                text_truncated=False,
+            )
+
+    context = _context(
+        {"mode": "complex", "sourceUrl": "https://example.com/article", "fileIds": []},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    now = time.monotonic()
+    deadline = ExecutionDeadline(now, now + 10, now + 8, now + 9)
+    complex_result = AnalysisResult(
+        verdict=Verdict.REAL,
+        confidence=0.9,
+        model_used=ModelUsed.GEMINI_TEXT,
+        explanation="Текст проанализирован.",
+        media_type=MediaType.TEXT,
+        authenticity_index=95,
+        analysis_mode="complex",
+    )
+    with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
+        "src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})
+    ), patch("src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})), patch(
+        "src.main.AppwriteTablesRateLimitStore"
+    ), patch("src.main.SourceIngestor", return_value=UrlOnlyIngestor()) as ingestor, patch(
+        "src.main._analyze_complex_text", new=AsyncMock(return_value=complex_result)
+    ), patch("src.main.persist_check_result", new=AsyncMock(return_value="check-1")) as persist:
+        payload, status = main(context)
+
+    assert status == 200
+    assert payload["check_id"] == "check-1"
+    assert payload["analysis_mode"] == "complex"
+    assert payload["source"]["url"] == "https://example.com/article"
+    ingestor.assert_called_once_with()
+    persist.assert_awaited_once()
+    logs = [call.args[0] for call in context.log.call_args_list]
+    assert "complex_stage=request_validated source_present=yes manual_text_present=no manual_file_count=0" in logs
+    assert "complex_stage=source_start" in logs
+    assert any(log.startswith("complex_stage=source_ingested text_present=yes") for log in logs)
+
+
+def test_main_returns_distinct_safe_error_for_url_only_source_without_content():
+    class EmptyIngestor:
+        async def ingest(self, url: str, *, diagnostic_log=None) -> SourceDocument:
+            assert url == "https://example.com/article"
+            return SourceDocument(url, "", "", "", "", (), (), False)
+
+    context = _context(
+        {"mode": "complex", "sourceUrl": "https://example.com/article", "fileIds": []},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    now = time.monotonic()
+    deadline = ExecutionDeadline(now, now + 10, now + 8, now + 9)
+    with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
+        "src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})
+    ), patch("src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})), patch(
+        "src.main.AppwriteTablesRateLimitStore"
+    ), patch("src.main.SourceIngestor", return_value=EmptyIngestor()):
+        payload, status = main(context)
+
+    assert status == 422
+    assert payload == {
+        "detail": "На странице не найден материал для анализа.",
+        "code": "source_no_analyzable_content",
+    }
+    logs = [call.args[0] for call in context.log.call_args_list]
+    assert "complex_stage=source_failed source_error_code=source_no_analyzable_content" in logs
 
 
 def test_main_builds_analyze_response_with_the_same_root_deadline():
@@ -234,6 +323,43 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
     assert "response_keys=detail,status" in logged
     assert "response_paths=detail" in logged
     assert "provider_message=invalid credentials" in logged
+    for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private analysis input"):
+        assert sensitive_value not in logged
+
+
+def test_main_logs_safe_gemini_generate_content_400_metadata():
+    context = _context(
+        {"text": "private analysis input " * 20},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    error = ExternalAPIError(
+        "gemini",
+        "request_rejected",
+        status_code=400,
+        provider_message="Invalid value at generationConfig.maxOutputTokens",
+        operation="generate_content",
+        upstream_status="INVALID_ARGUMENT",
+        upstream_code=400,
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        payload, status = main(context)
+
+    assert (payload, status) == (
+        {"detail": "Сервис анализа временно недоступен.", "code": "provider_unavailable"},
+        503,
+    )
+    logged = context.log.call_args.args[0]
+    assert "provider=gemini" in logged
+    assert "safe_error_code=request_rejected" in logged
+    assert "gemini_operation=generate_content" in logged
+    assert "google_status=INVALID_ARGUMENT google_code=400" in logged
+    assert "provider_message=Invalid value at generationConfig.maxOutputTokens" in logged
     for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private analysis input"):
         assert sensitive_value not in logged
 

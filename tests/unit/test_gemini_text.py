@@ -54,6 +54,15 @@ def _generated(verdict: object, index: int, confidence: float, summary: str) -> 
     }
 
 
+def _complex_generated() -> dict[str, object]:
+    body = _generated("REAL", 96, 0.9, "Текст выглядит естественным и связным.")
+    text = body["candidates"][0]["content"]["parts"][0]["text"]  # type: ignore[index]
+    parsed = json.loads(text)
+    parsed.update({"signals": [], "human_signals": ["Стиль изложения неоднороден."]})
+    body["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(parsed, ensure_ascii=False)  # type: ignore[index]
+    return body
+
+
 def _client(*, response: MagicMock | None = None, error: Exception | None = None) -> AsyncMock:
     client = AsyncMock()
     client.post = AsyncMock(return_value=response, side_effect=error)
@@ -90,6 +99,30 @@ async def test_text_uses_generate_content_structured_json_without_files_api():
     assert "Привет" in request["json"]["contents"][0]["parts"][0]["text"]
     assert result.verdict == Verdict.UNCERTAIN
     assert result.model_used == ModelUsed.GEMINI_TEXT
+
+
+@pytest.mark.asyncio
+async def test_complex_text_request_has_one_string_part_and_structured_output_shape_without_leaking_input():
+    private_text = "Содержимое только для проверки структуры запроса."
+    client = _client(response=_response(200, _complex_generated()))
+    logs: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch("adapters.gemini_text.httpx.AsyncClient", return_value=client):
+        await GeminiTextAdapter().analyze(private_text.encode("utf-8"), complex_mode=True, diagnostic_log=logs.append)
+
+    payload = client.post.await_args.kwargs["json"]
+    part = payload["contents"][0]["parts"][0]
+    assert len(payload["contents"]) == len(payload["contents"][0]["parts"]) == 1
+    assert set(part) == {"text"} and isinstance(part["text"], str)
+    assert payload["generationConfig"] == {
+        "responseMimeType": "application/json",
+        "responseJsonSchema": GeminiTextAdapter._COMPLEX_RESPONSE_SCHEMA,
+        "maxOutputTokens": GeminiTextAdapter.COMPLEX_MAX_OUTPUT_TOKENS,
+    }
+    shape_log = next(item for item in logs if "stage=request_shape" in item)
+    assert "contents=1 parts=1 part_types=text" in shape_log
+    assert "response_json_schema=yes" in shape_log
+    assert private_text not in shape_log
 
 
 @pytest.mark.asyncio
@@ -199,6 +232,29 @@ async def test_ordinary_4xx_is_a_provider_request_error():
     assert (raised.value.service, raised.value.detail, raised.value.status_code) == (
         "gemini", "request_error", 400
     )
+
+
+@pytest.mark.asyncio
+async def test_400_preserves_safe_google_field_message_but_redacts_analyzed_text():
+    private_text = "секретный пользовательский текст"
+    response = _response(400, {"error": {
+        "code": 400,
+        "status": "INVALID_ARGUMENT",
+        "message": f'Invalid JSON payload at generationConfig.responseJsonSchema: {private_text}',
+    }})
+    client = _client(response=response)
+    logs: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch("adapters.gemini_text.httpx.AsyncClient", return_value=client):
+        with pytest.raises(ExternalAPIError) as raised:
+            await GeminiTextAdapter().analyze(private_text.encode("utf-8"), complex_mode=True, diagnostic_log=logs.append)
+
+    assert raised.value.operation == "generate_content"
+    assert (raised.value.upstream_status, raised.value.upstream_code) == ("INVALID_ARGUMENT", 400)
+    assert private_text not in (raised.value.provider_message or "")
+    error_log = next(item for item in logs if "stage=request_error" in item)
+    assert "google_status=INVALID_ARGUMENT google_code=400" in error_log
+    assert private_text not in error_log
 
 
 @pytest.mark.asyncio

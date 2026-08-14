@@ -31,6 +31,15 @@ def _body(index=34, confidence=0.88, summary="Материал требует д
     }
 
 
+def _complex_body():
+    body = _body()
+    text = body["candidates"][0]["content"]["parts"][0]["text"]
+    parsed = json.loads(text)
+    parsed["credible_points"] = ["Текст содержит проверяемые формулировки."]
+    body["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(parsed, ensure_ascii=False)
+    return body
+
+
 def _issue(issue_type="UNSUPPORTED_CLAIM", severity="MEDIUM", claim="Утверждение", explanation="Недостаточно подтверждений."):
     return {"type": issue_type, "severity": severity, "claim": claim, "explanation": explanation}
 
@@ -66,6 +75,53 @@ async def test_credibility_uses_one_ordinary_generate_content_request_without_to
     assert request.kwargs["json"]["generationConfig"]["maxOutputTokens"] == 700
     assert GeminiCredibilityAdapter.TOTAL_TIMEOUT_SECONDS - GeminiCredibilityAdapter.TRANSPORT_SAFETY_SECONDS == 11
     assert result.sources == []
+
+
+@pytest.mark.asyncio
+async def test_complex_credibility_request_has_one_string_part_without_response_schema_or_input_leakage():
+    private_text = "Содержимое для проверки структуры credibility запроса."
+    client = _client(_response(200, _complex_body()))
+    logs: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch("adapters.gemini_credibility.httpx.AsyncClient", return_value=client):
+        result = await GeminiCredibilityAdapter().analyze(private_text.encode(), complex_mode=True, diagnostic_log=logs.append)
+
+    payload = client.post.await_args.kwargs["json"]
+    part = payload["contents"][0]["parts"][0]
+    assert len(payload["contents"]) == len(payload["contents"][0]["parts"]) == 1
+    assert set(part) == {"text"} and isinstance(part["text"], str)
+    assert payload["generationConfig"] == {
+        "temperature": 0.1,
+        "maxOutputTokens": GeminiCredibilityAdapter.COMPLEX_MAX_OUTPUT_TOKENS,
+    }
+    assert "responseJsonSchema" not in payload["generationConfig"]
+    assert result.credible_points == ["Текст содержит проверяемые формулировки."]
+    shape_log = next(item for item in logs if "stage=request_shape" in item)
+    assert "contents=1 parts=1 part_types=text" in shape_log
+    assert "response_json_schema=no" in shape_log
+    assert private_text not in shape_log
+
+
+@pytest.mark.asyncio
+async def test_credibility_400_records_safe_google_message_and_generate_content_operation():
+    private_text = "секретный текст credibility"
+    client = _client(_response(400, {"error": {
+        "code": 400,
+        "status": "INVALID_ARGUMENT",
+        "message": f"Invalid value at generationConfig.maxOutputTokens: {private_text}",
+    }}))
+    logs: list[str] = []
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch("adapters.gemini_credibility.httpx.AsyncClient", return_value=client):
+        with pytest.raises(ExternalAPIError) as raised:
+            await GeminiCredibilityAdapter().analyze(private_text.encode(), complex_mode=True, diagnostic_log=logs.append)
+
+    assert raised.value.operation == "generate_content"
+    assert (raised.value.upstream_status, raised.value.upstream_code) == ("INVALID_ARGUMENT", 400)
+    assert private_text not in (raised.value.provider_message or "")
+    error_log = next(item for item in logs if "stage=request_error" in item)
+    assert "google_status=INVALID_ARGUMENT google_code=400" in error_log
+    assert private_text not in error_log
 
 
 @pytest.mark.parametrize(

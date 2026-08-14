@@ -73,6 +73,9 @@ def test_source_complex_contract_accepts_only_a_source_url():
     {"mode": "complex", "sourceUrl": "https://example.com/post"},
     {"mode": "complex", "text": "x" * 200},
     {"mode": "complex", "fileIds": ["valid-file-id"]},
+    {"mode": "complex", "sourceUrl": "https://example.com/post", "text": "x" * 200},
+    {"mode": "complex", "sourceUrl": "https://example.com/post", "fileIds": ["valid-file-id"]},
+    {"mode": "complex", "text": "x" * 200, "fileIds": ["valid-file-id"]},
     {"mode": "complex", "sourceUrl": "https://example.com/post", "text": "x" * 200, "fileIds": ["valid-file-id"]},
 ])
 def test_unified_complex_contract_accepts_each_supported_input_combination(payload):

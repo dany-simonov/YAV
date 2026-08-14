@@ -219,7 +219,8 @@ class SourceDetails(BaseModel):
 class SourceMediaResult(BaseModel):
     """One independently analysed media item; unavailable never has a score."""
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["image", "video"]
+    kind: Literal["image", "audio", "video"]
+    origin: Literal["source", "manual"] = "source"
     ordinal: StrictInt = Field(ge=1, le=3)
     status: Literal["completed", "unavailable"]
     authenticity_index: StrictInt | None = Field(default=None, ge=0, le=100)
@@ -265,6 +266,7 @@ class AnalysisResult(BaseModel):
     ai_status: Literal["completed", "unavailable"] | None = None
     credibility: CredibilityAssessment | None = None
     source: SourceDetails | None = None
+    complex_media: list[SourceMediaResult] | None = Field(default=None, max_length=4)
     provider_evidence: ProviderEvidence | None = None
     component_evidence: list[ComponentEvidence] | None = Field(default=None, max_length=2)
 

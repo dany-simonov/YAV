@@ -1,7 +1,7 @@
 import { AppwriteException, Query, type Models } from 'appwrite';
 
 import { APPWRITE_CONFIG, tablesDB } from './appwrite';
-import type { AIOriginDetails, Check, CredibilityAssessment, MediaType, SourceAnalysisDetails, Verdict } from '../types';
+import type { AIOriginDetails, Check, CredibilityAssessment, MediaType, SourceAnalysisDetails, SourceMediaResult, Verdict } from '../types';
 import { displayModelName } from './resultPresentation';
 
 const MAX_ITEMS = 200;
@@ -74,6 +74,7 @@ export function mapHistoryRow(row: CheckRow): Check {
     analysis_mode: details.analysis_mode,
     ai_details: details.ai_details,
     source: details.source,
+    complex_media: details.complex_media,
   };
 }
 
@@ -85,6 +86,7 @@ function parseDetails(value: string | null | undefined): {
   ai_details?: AIOriginDetails;
   ai_confidence?: number;
   source?: SourceAnalysisDetails;
+  complex_media?: SourceMediaResult[];
 } {
   if (typeof value !== 'string' || value.length > 16_384) return {};
   try {
@@ -100,6 +102,7 @@ function parseDetails(value: string | null | undefined): {
       ai_details: isAIOriginDetails(item.ai_details) ? item.ai_details : undefined,
       ai_confidence: isUnitConfidence(item.ai_confidence) ? item.ai_confidence : undefined,
       source: isSourceAnalysisDetails(item.source) ? item.source : undefined,
+      complex_media: Array.isArray(item.complex_media) ? item.complex_media as SourceMediaResult[] : undefined,
     };
   } catch {
     return {};

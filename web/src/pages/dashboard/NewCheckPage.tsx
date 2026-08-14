@@ -22,10 +22,11 @@ import { useAuthStore } from '../../store';
 import { displayModelName } from '../../lib/resultPresentation';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 import {
-  buildComplexPayload,
+  buildUnifiedComplexPayload,
   COMPLEX_MAX_LENGTH,
   COMPLEX_MIN_LENGTH,
   COMPLEX_RECOMMENDED_RANGE,
+  isComplexSourceSubmittable,
   isComplexTextSubmittable,
 } from '../../lib/complexAnalysis';
 
@@ -86,6 +87,17 @@ export function NewCheckPage() {
     );
   };
 
+  const setComplexFileStatus = (
+    id: string,
+    status: UploadFile['status'],
+    progress: number,
+    fileError?: string,
+  ) => {
+    setComplexFiles((previous) =>
+      previous.map((file) => (file.id === id ? { ...file, status, progress, error: fileError } : file)),
+    );
+  };
+
   const normalizeFunctionResult = (data: any, mediaType: CheckResult['media_type']): CheckResult => {
     const source = data?.result ?? data;
     const rawConfidence = Number(source?.confidence ?? 0);
@@ -104,6 +116,10 @@ export function NewCheckPage() {
       credibility: source?.credibility && typeof source.credibility === 'object'
         ? source.credibility : undefined,
       ai_status: source?.ai_status === 'unavailable' ? 'unavailable' : 'completed',
+      analysis_mode: source?.analysis_mode === 'complex' ? 'complex' : undefined,
+      ai_details: source?.ai_details && typeof source.ai_details === 'object' ? source.ai_details : undefined,
+      source: source?.source && typeof source.source === 'object' ? source.source : undefined,
+      complex_media: Array.isArray(source?.complex_media) ? source.complex_media : undefined,
     };
   };
 
@@ -124,7 +140,7 @@ export function NewCheckPage() {
         if (file.preview) URL.revokeObjectURL(file.preview);
       });
       return newFiles.slice(0, 1);
-    }); // Keep only one file and allow replacing the current one.
+    });
     resetState();
   }, []);
 
@@ -151,7 +167,7 @@ export function NewCheckPage() {
       previous.forEach((file) => {
         if (file.preview) URL.revokeObjectURL(file.preview);
       });
-      return newFiles;
+      return newFiles.slice(0, 4);
     });
     resetState();
   }, []);
@@ -169,7 +185,11 @@ export function NewCheckPage() {
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
     : activeTab === 'text'
       ? text.trim().length >= 1 && text.length <= 10000
-      : isComplexTextSubmittable(complexText, isAnalyzing);
+      : !isAnalyzing && (
+        isComplexSourceSubmittable(complexArticleUrl, false)
+        || isComplexTextSubmittable(complexText, false)
+        || (complexFiles.length > 0 && complexFiles.every((file) => file.status !== 'uploading' && file.status !== 'analyzing'))
+      );
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;
@@ -183,9 +203,16 @@ export function NewCheckPage() {
       let uploadedFileId: string | null = null;
 
       if (activeTab === 'complex') {
+        const uploadedIds: string[] = [];
+        for (const fileRef of complexFiles) {
+          setComplexFileStatus(fileRef.id, 'uploading', 35);
+          const uploaded = await storage.createFile(APPWRITE_CONFIG.buckets.uploads, ID.unique(), fileRef.file);
+          uploadedIds.push(uploaded.$id);
+          setComplexFileStatus(fileRef.id, 'analyzing', 70);
+        }
         execution = await functions.createExecution(
           APPWRITE_CONFIG.functions.analyze,
-          JSON.stringify(buildComplexPayload(complexText, user)),
+          JSON.stringify(buildUnifiedComplexPayload({ sourceUrl: complexArticleUrl, text: complexText, fileIds: uploadedIds }, user)),
           false,
         );
         let responseBody = execution.responseBody || '';
@@ -212,7 +239,9 @@ export function NewCheckPage() {
         if (backendError || (responseStatusCode && responseStatusCode >= 400)) {
           throw new AnalysisExecutionError(backendError);
         }
-        setResult(resultData as CheckResult);
+        setResult(normalizeFunctionResult(resultData, 'text'));
+        complexFiles.forEach((file) => setComplexFileStatus(file.id, 'complete', 100));
+        for (const fileId of uploadedIds) { try { await storage.deleteFile(APPWRITE_CONFIG.buckets.uploads, fileId); } catch { /* best effort */ } }
         return;
       }
 
@@ -300,7 +329,9 @@ export function NewCheckPage() {
     } catch (e) {
       const message = analysisErrorMessageFromUnknown(e);
       setError(message);
-      if (activeTab === 'media' && files.length > 0) {
+      if (activeTab === 'complex') {
+        complexFiles.forEach((file) => setComplexFileStatus(file.id, 'error', 0, message));
+      } else if (activeTab === 'media' && files.length > 0) {
         setFileStatus(files[0].id, 'error', 0, message);
       }
     } finally {
@@ -345,7 +376,7 @@ export function NewCheckPage() {
               <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Добавьте ссылку, текст и файл вместе</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Соберите контекст статьи в одной проверке: источник, фрагмент текста и изображение или другой медиафайл.</p></div>
               <label className="block"><span className="mb-2 flex items-center gap-2 text-sm font-semibold"><Link2 size={16} /> Ссылка на статью</span><input value={complexArticleUrl} onChange={(event) => { setComplexArticleUrl(event.target.value); resetState(); }} disabled={isAnalyzing} type="url" placeholder="https://example.com/article" className="w-full rounded-xl border border-mv-border bg-white px-4 py-3 text-sm outline-none transition focus:border-black disabled:cursor-not-allowed disabled:opacity-50" /></label>
               <TextInput value={complexText} onChange={handleComplexTextChange} minLength={COMPLEX_MIN_LENGTH} maxLength={COMPLEX_MAX_LENGTH} recommendedRange={COMPLEX_RECOMMENDED_RANGE} meaningfulMinLength disabled={isAnalyzing} />
-              <div><p className="mb-2 text-sm font-semibold">Файлы к материалу</p><FileDropzone files={complexFiles} onFilesSelected={handleComplexFilesSelected} onRemoveFile={handleComplexFileRemove} disabled={isAnalyzing} maxFiles={5} /></div>
+              <div><p className="mb-2 text-sm font-semibold">Файлы к материалу</p><FileDropzone files={complexFiles} onFilesSelected={handleComplexFilesSelected} onRemoveFile={handleComplexFileRemove} disabled={isAnalyzing} maxFiles={4} /></div>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Минимум {COMPLEX_MIN_LENGTH} значимых символов, максимум {COMPLEX_MAX_LENGTH.toLocaleString()}.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}>{isAnalyzing ? 'Идёт анализ...' : 'Запустить анализ'}</Button></div>
               {isAnalyzing && <div className="flex items-center gap-2 rounded-lg border border-mv-border bg-mv-surface-2 p-4 text-mv-text-secondary"><Clock className="w-4 h-4" /><span>Комплексный анализ выполняется параллельно. Прошло: {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:{String(elapsedSeconds % 60).padStart(2, '0')}</span></div>}
             </div>

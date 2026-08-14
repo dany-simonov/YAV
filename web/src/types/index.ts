@@ -80,6 +80,7 @@ export interface Check {
   analysis_mode?: 'complex';
   ai_details?: AIOriginDetails | null;
   source?: SourceAnalysisDetails | null;
+  complex_media?: SourceMediaResult[] | null;
 }
 
 export interface CheckResult {
@@ -96,11 +97,12 @@ export interface CheckResult {
   analysis_mode?: 'complex';
   ai_details?: AIOriginDetails | null;
   source?: SourceAnalysisDetails | null;
+  complex_media?: SourceMediaResult[] | null;
 }
 
 export interface AIOriginSignal { type: AIOriginSignalType; severity: Severity; title: string; explanation: string; }
 export interface AIOriginDetails { signals: AIOriginSignal[]; human_signals: string[]; }
-export interface SourceMediaResult { kind: 'image' | 'video'; ordinal: number; status: 'completed' | 'unavailable'; authenticity_index?: number | null; verdict?: Verdict | null; confidence?: number | null; model?: string | null; explanation?: string | null; processing_ms?: number | null; }
+export interface SourceMediaResult { kind: 'image' | 'audio' | 'video'; origin?: 'source' | 'manual'; ordinal: number; status: 'completed' | 'unavailable'; authenticity_index?: number | null; verdict?: Verdict | null; confidence?: number | null; model?: string | null; explanation?: string | null; processing_ms?: number | null; }
 export interface SourceAnalysisDetails { url: string; title: string; description: string; site_name: string; text_found: boolean; text_truncated: boolean; images_discovered?: number; video_discovered?: boolean; images_analyzed: number; video_analyzed: boolean; media: SourceMediaResult[]; }
 
 // Backward-compatible type for older components/hooks.

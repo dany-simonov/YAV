@@ -3,12 +3,44 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from urllib.parse import urlsplit
 
 from core.config import settings
 
 
 _MODEL = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_GOOGLE_STATUS = re.compile(r"[A-Z_]{1,64}")
+
+
+def safe_gemini_error_details(response: Any, *, analyzed_text: str) -> tuple[str | None, str | None, int | None]:
+    """Return bounded Google 4xx metadata without retaining input or secrets."""
+    try:
+        body = response.json()
+        error = body.get("error") if isinstance(body, dict) else None
+    except (AttributeError, TypeError, ValueError):
+        error = None
+    if not isinstance(error, dict):
+        return None, None, None
+
+    status = error.get("status")
+    code = error.get("code")
+    google_status = status if isinstance(status, str) and _GOOGLE_STATUS.fullmatch(status) else None
+    google_code = code if isinstance(code, int) and 100 <= code <= 599 else None
+    message = error.get("message")
+    if not isinstance(message, str):
+        return None, google_status, google_code
+
+    # Google normally returns a technical field violation here.  Protect the
+    # diagnostic boundary if an upstream error ever echoes the prompt/input.
+    normalized_input = " ".join(analyzed_text.split())
+    normalized = " ".join(message.split())
+    for candidate in (analyzed_text, normalized_input):
+        if candidate:
+            normalized = normalized.replace(candidate, "[REDACTED_INPUT]")
+    normalized = re.sub(r"https?://\S+", "[REDACTED_URL]", normalized)
+    normalized = re.sub(r"(?i)(?:api[-_ ]?key|key|token|secret)\s*[=:]\s*\S+", "[REDACTED_SECRET]", normalized)
+    return normalized[:240] or None, google_status, google_code
 
 
 def safe_gemini_model() -> str:

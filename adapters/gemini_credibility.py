@@ -16,7 +16,7 @@ from api.schemas import CredibilityAssessment, CredibilityIssue
 from core.config import settings
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.execution_deadline import bounded_timeout
-from src.gemini_client import gemini_headers, safe_gemini_base_url, safe_gemini_model
+from src.gemini_client import gemini_headers, safe_gemini_base_url, safe_gemini_error_details, safe_gemini_model
 from src.provider_protection import admit_provider_operation
 
 
@@ -116,7 +116,7 @@ issues — максимум 8; credible_points — максимум 4. Если 
             pass
 
     @classmethod
-    def _raise_for_status(cls, response: httpx.Response) -> None:
+    def _raise_for_status(cls, response: httpx.Response, *, analyzed_text: str) -> None:
         if response.status_code < 400:
             return
         if response.status_code == 429:
@@ -128,7 +128,16 @@ issues — максимум 8; credible_points — максимум 4. Если 
                 cls.PROVIDER, "unavailable", stage="request", status_code=response.status_code
             )
         category = "auth_configuration" if response.status_code in {401, 403} else "request_rejected"
-        raise ExternalAPIError(cls.PROVIDER, category, status_code=response.status_code)
+        message, google_status, google_code = safe_gemini_error_details(response, analyzed_text=analyzed_text)
+        raise ExternalAPIError(
+            cls.PROVIDER,
+            category,
+            status_code=response.status_code,
+            provider_message=message,
+            operation="generate_content",
+            upstream_status=google_status,
+            upstream_code=google_code,
+        )
 
     @staticmethod
     def _http_error_category(status_code: int) -> str:
@@ -252,6 +261,17 @@ issues — максимум 8; credible_points — максимум 4. Если 
                 f"branch=credibility provider=gemini model={model} stage=request_start "
                 f"transport_timeout_ms={round(timeout * 1000)}",
             )
+            generation_config = {
+                "temperature": 0.1,
+                "maxOutputTokens": self.COMPLEX_MAX_OUTPUT_TOKENS if complex_mode else self.MAX_OUTPUT_TOKENS,
+            }
+            self._diagnose(
+                diagnostic_log,
+                "branch=credibility provider=gemini stage=request_shape operation=generate_content "
+                f"model={model} contents=1 parts=1 part_types=text "
+                f"generation_config_keys={','.join(sorted(generation_config))} "
+                "response_mime_type=none response_json_schema=no",
+            )
             async with asyncio.timeout(timeout):
                 await admit_provider_operation(self.PROVIDER)
                 async with httpx.AsyncClient(timeout=self._request_timeout(timeout)) as client:
@@ -260,7 +280,7 @@ issues — максимум 8; credible_points — максимум 4. Если 
                         headers={**gemini_headers(), "Content-Type": "application/json"},
                         json={
                             "contents": [{"parts": [{"text": f"{self._COMPLEX_PROMPT if complex_mode else self._PROMPT}{text}"}]}],
-                            "generationConfig": {"temperature": 0.1, "maxOutputTokens": self.COMPLEX_MAX_OUTPUT_TOKENS if complex_mode else self.MAX_OUTPUT_TOKENS},
+                            "generationConfig": generation_config,
                         },
                     )
         except TimeoutError as exc:
@@ -276,10 +296,13 @@ issues — максимум 8; credible_points — максимум 4. Если 
                            f"category=transport status_code=none elapsed_ms={round((time.monotonic() - started) * 1000)}")
             raise ProviderInfrastructureError(self.PROVIDER, "transport", stage="request") from exc
         if response.status_code >= 400:
+            message, google_status, google_code = safe_gemini_error_details(response, analyzed_text=text)
             self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_error "
-                           f"category={self._http_error_category(response.status_code)} "
-                           f"status_code={response.status_code} elapsed_ms={round((time.monotonic() - started) * 1000)}")
-        self._raise_for_status(response)
+                           f"category={self._http_error_category(response.status_code)} operation=generate_content "
+                           f"google_status={google_status or 'none'} google_code={google_code or 'none'} "
+                           f"provider_message={message or 'none'} status_code={response.status_code} "
+                           f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
+        self._raise_for_status(response, analyzed_text=text)
         self._diagnose(diagnostic_log, f"branch=credibility provider=gemini model={model} stage=request_success "
                        f"elapsed_ms={round((time.monotonic() - started) * 1000)}")
         return self._result(response, complex_mode=complex_mode)

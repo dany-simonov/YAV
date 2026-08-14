@@ -238,6 +238,43 @@ def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log
         assert sensitive_value not in logged
 
 
+def test_main_logs_safe_gemini_generate_content_400_metadata():
+    context = _context(
+        {"text": "private analysis input " * 20},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    error = ExternalAPIError(
+        "gemini",
+        "request_rejected",
+        status_code=400,
+        provider_message="Invalid value at generationConfig.maxOutputTokens",
+        operation="generate_content",
+        upstream_status="INVALID_ARGUMENT",
+        upstream_code=400,
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        payload, status = main(context)
+
+    assert (payload, status) == (
+        {"detail": "Сервис анализа временно недоступен.", "code": "provider_unavailable"},
+        503,
+    )
+    logged = context.log.call_args.args[0]
+    assert "provider=gemini" in logged
+    assert "safe_error_code=request_rejected" in logged
+    assert "gemini_operation=generate_content" in logged
+    assert "google_status=INVALID_ARGUMENT google_code=400" in logged
+    assert "provider_message=Invalid value at generationConfig.maxOutputTokens" in logged
+    for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private analysis input"):
+        assert sensitive_value not in logged
+
+
 def test_main_sanitizes_sapling_auth_error_without_logging_provider_data():
     context = _context(
         {"text": "Привет"},

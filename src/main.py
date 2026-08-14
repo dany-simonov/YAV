@@ -298,13 +298,17 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
         return
 
     known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
-    known_codes = {"request_error", "rate_limit"}
+    known_codes = {"request_error", "request_rejected", "auth_configuration", "rate_limit"}
     provider = exc.service if exc.service in known_providers else "unknown"
     error_code = exc.detail if exc.detail in known_codes else "unknown"
     status = getattr(exc, "status_code", None)
     safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "none"
     provider_message = getattr(exc, "provider_message", None)
-    if provider not in {"aiornot", "sightengine", "gemini"} or error_code != "request_error":
+    allows_safe_provider_message = (
+        (provider in {"aiornot", "sightengine"} and error_code == "request_error")
+        or (provider == "gemini" and error_code in {"request_error", "request_rejected", "auth_configuration"})
+    )
+    if not allows_safe_provider_message:
         provider_message = None
     if isinstance(provider_message, str):
         provider_message = provider_message.replace("\r", " ").replace("\n", " ").strip()
@@ -674,6 +678,16 @@ async def _analyze_complex_source(
         combined_text = "[Дополнительный текст пользователя]\n" + manual_text[:MAX_TEXT_LENGTH]
     else:
         combined_text = ""
+    _safe_diagnostic_log(
+        diagnostic_log,
+        "complex_text_corpus "
+        f"manual_text_present={'yes' if manual_text else 'no'} "
+        f"source_text_present={'yes' if source_text else 'no'} "
+        f"combined_corpus_length={len(combined_text)} "
+        f"combined_corpus_empty={'yes' if not combined_text else 'no'} "
+        "combined_corpus_type=str "
+        f"truncated={'yes' if len(source_text) > MAX_TEXT_LENGTH or len(manual_text) > MAX_TEXT_LENGTH else 'no'}",
+    )
     has_text = len(combined_text) >= 200
     text_task = _analyze_complex_text(combined_text, diagnostic_log) if has_text else None
     if text_task is None:
@@ -800,7 +814,15 @@ async def _analyze(
         if request.source_url:
             source_result = await _analyze_complex_source(request.source_url, diagnostic_log, quota_store=quota_store,
                 user_id=user_id, client_ip=client_ip, account_created_at=account_created_at, additional_text=request.text or "")
-        text_result = await _analyze_complex_text(request.text, diagnostic_log) if request.text and not request.source_url else None
+        text_result = None
+        if request.text and not request.source_url:
+            _safe_diagnostic_log(
+                diagnostic_log,
+                "complex_text_corpus manual_text_present=yes source_text_present=no "
+                f"combined_corpus_length={len(request.text)} combined_corpus_empty=no "
+                "combined_corpus_type=str truncated=no",
+            )
+            text_result = await _analyze_complex_text(request.text, diagnostic_log)
         manual_results: list[AnalysisResult] = []
         manual_media: list[SourceMediaResult] = []
         bucket_id = os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID") or os.getenv("UPLOADS_BUCKET_ID") or "uploads"

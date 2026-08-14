@@ -86,6 +86,36 @@ async def test_complex_text_runs_exactly_two_parallel_gemini_branches():
 
 
 @pytest.mark.asyncio
+async def test_unified_complex_text_only_passes_one_nonempty_string_corpus_to_both_branches():
+    text = "Текстовый материал для Unified Complex. " * 12
+    captured: list[tuple[bytes, bool]] = []
+    logs: list[str] = []
+
+    async def ai_branch(data, *, complex_mode, **_kwargs):
+        captured.append((data, complex_mode))
+        return _ai_result()
+
+    async def credibility_branch(data, *, complex_mode, **_kwargs):
+        captured.append((data, complex_mode))
+        return _credibility_result()
+
+    request = validate_request_payload({"mode": "complex", "text": text, "fileIds": []})
+    with patch("src.main.GeminiTextAdapter.analyze", new=AsyncMock(side_effect=ai_branch)), patch(
+        "src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(side_effect=credibility_branch)
+    ):
+        result = await _analyze(request, "", logs.append)
+
+    assert result["analysis_mode"] == "complex"
+    assert len(captured) == 2
+    assert all(isinstance(data, bytes) and data.decode("utf-8") == text and complex_mode for data, complex_mode in captured)
+    corpus_log = next(item for item in logs if item.startswith("complex_text_corpus"))
+    assert "manual_text_present=yes source_text_present=no" in corpus_log
+    assert f"combined_corpus_length={len(text)}" in corpus_log
+    assert "combined_corpus_empty=no combined_corpus_type=str truncated=no" in corpus_log
+    assert text not in corpus_log
+
+
+@pytest.mark.asyncio
 async def test_combined_credibility_processing_time_excludes_parallel_ai_branch_waiting():
     credibility_finished = asyncio.Event()
 

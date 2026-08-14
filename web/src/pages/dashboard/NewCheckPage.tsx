@@ -22,8 +22,11 @@ import { useAuthStore } from '../../store';
 import { displayModelName } from '../../lib/resultPresentation';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 import {
-  buildComplexSourcePayload,
-  isComplexSourceSubmittable,
+  buildComplexPayload,
+  COMPLEX_MAX_LENGTH,
+  COMPLEX_MIN_LENGTH,
+  COMPLEX_RECOMMENDED_RANGE,
+  isComplexTextSubmittable,
 } from '../../lib/complexAnalysis';
 
 interface Tab {
@@ -99,9 +102,6 @@ export function NewCheckPage() {
       credibility: source?.credibility && typeof source.credibility === 'object'
         ? source.credibility : undefined,
       ai_status: source?.ai_status === 'unavailable' ? 'unavailable' : 'completed',
-      analysis_mode: source?.analysis_mode === 'complex' ? 'complex' : undefined,
-      ai_details: source?.ai_details && typeof source.ai_details === 'object' ? source.ai_details : undefined,
-      source: source?.source && typeof source.source === 'object' ? source.source : undefined,
     };
   };
 
@@ -148,7 +148,7 @@ export function NewCheckPage() {
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
     : activeTab === 'text'
       ? text.trim().length >= 1 && text.length <= 10000
-      : isComplexSourceSubmittable(complexText, isAnalyzing);
+      : isComplexTextSubmittable(complexText, isAnalyzing);
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;
@@ -164,7 +164,7 @@ export function NewCheckPage() {
       if (activeTab === 'complex') {
         execution = await functions.createExecution(
           APPWRITE_CONFIG.functions.analyze,
-          JSON.stringify(buildComplexSourcePayload(complexText, user)),
+          JSON.stringify(buildComplexPayload(complexText, user)),
           false,
         );
         let responseBody = execution.responseBody || '';
@@ -321,9 +321,9 @@ export function NewCheckPage() {
             <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
           ) : (
             <div className="space-y-5">
-              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Анализ публикации по ссылке</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Мы безопасно извлечём доступный текст, изображения и видео публичной страницы и проверим их существующими моделями.</p></div>
-              <label className="block"><span className="mb-2 block text-sm font-semibold">Ссылка на публикацию</span><input value={complexText} onChange={(event) => handleComplexTextChange(event.target.value)} disabled={isAnalyzing} type="url" placeholder="https://example.com/article" className="w-full rounded-xl border border-mv-border bg-white px-4 py-3 text-sm outline-none transition focus:border-black disabled:cursor-not-allowed disabled:opacity-50" /></label>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Поддерживаются публичные HTTP/HTTPS-страницы с доступным содержимым.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}>{isAnalyzing ? 'Идёт анализ...' : 'Запустить комплексный анализ'}</Button></div>
+              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Расширенный анализ текста</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Оценка происхождения и достоверности текста с подробным разбором ключевых признаков и проблемных утверждений.</p></div>
+              <TextInput value={complexText} onChange={handleComplexTextChange} minLength={COMPLEX_MIN_LENGTH} maxLength={COMPLEX_MAX_LENGTH} recommendedRange={COMPLEX_RECOMMENDED_RANGE} meaningfulMinLength disabled={isAnalyzing} />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Минимум {COMPLEX_MIN_LENGTH} значимых символов, максимум {COMPLEX_MAX_LENGTH.toLocaleString()}.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}>{isAnalyzing ? 'Идёт анализ...' : 'Запустить анализ'}</Button></div>
               {isAnalyzing && <div className="flex items-center gap-2 rounded-lg border border-mv-border bg-mv-surface-2 p-4 text-mv-text-secondary"><Clock className="w-4 h-4" /><span>Комплексный анализ выполняется параллельно. Прошло: {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:{String(elapsedSeconds % 60).padStart(2, '0')}</span></div>}
             </div>
           )}

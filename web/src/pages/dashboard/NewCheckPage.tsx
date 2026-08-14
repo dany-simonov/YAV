@@ -4,9 +4,9 @@
  * Страница для создания новой проверки с Drag & Drop и табами.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { FileImage, FileText, Layers3, Link2, Send, Loader2 } from 'lucide-react';
+import { FileImage, FileText, Layers3, Send, Loader2, Clock, ShieldCheck } from 'lucide-react';
 
 import { Card, Button, Alert } from '../../components/ui';
 import { FileDropzone, TextInput } from '../../components/upload';
@@ -21,6 +21,13 @@ import {
 import { useAuthStore } from '../../store';
 import { displayModelName } from '../../lib/resultPresentation';
 import type { UploadFile, TabType, CheckResult } from '../../types';
+import {
+  buildComplexPayload,
+  COMPLEX_MAX_LENGTH,
+  COMPLEX_MIN_LENGTH,
+  COMPLEX_RECOMMENDED_RANGE,
+  isComplexTextSubmittable,
+} from '../../lib/complexAnalysis';
 
 interface Tab {
   id: TabType;
@@ -31,7 +38,7 @@ interface Tab {
 const tabs: Tab[] = [
   { id: 'media', label: 'Файл', icon: <FileImage className="w-4 h-4" /> },
   { id: 'text', label: 'Текст', icon: <FileText className="w-4 h-4" /> },
-  { id: 'complex', label: 'Комплексная проверка', icon: <Layers3 className="w-4 h-4" /> },
+  { id: 'complex', label: 'Комплексный анализ', icon: <Layers3 className="w-4 h-4" /> },
 ];
 
 export function NewCheckPage() {
@@ -42,16 +49,22 @@ export function NewCheckPage() {
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [text, setText] = useState('');
-  const [complexFiles, setComplexFiles] = useState<UploadFile[]>([]);
   const [complexText, setComplexText] = useState('');
-  const [articleUrl, setArticleUrl] = useState('');
-  const [complexSubmitted, setComplexSubmitted] = useState(false);
-  
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CheckResult | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   
   const { user } = useAuthStore();
+
+  useEffect(() => {
+    if (!isAnalyzing || activeTab !== 'complex') {
+      setElapsedSeconds(0);
+      return undefined;
+    }
+    const timer = setInterval(() => setElapsedSeconds((previous) => previous + 1), 1000);
+    return () => clearInterval(timer);
+  }, [activeTab, isAnalyzing]);
 
   const detectMediaType = (file: File): CheckResult['media_type'] => {
     if (file.type.startsWith('image/')) return 'image';
@@ -126,9 +139,16 @@ export function NewCheckPage() {
     resetState();
   }, []);
 
+  const handleComplexTextChange = useCallback((value: string) => {
+    setComplexText(value);
+    resetState();
+  }, []);
+
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
-    : activeTab === 'text' && text.trim().length >= 1 && text.length <= 10000;
+    : activeTab === 'text'
+      ? text.trim().length >= 1 && text.length <= 10000
+      : isComplexTextSubmittable(complexText, isAnalyzing);
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;
@@ -140,6 +160,40 @@ export function NewCheckPage() {
       let execution;
       let mediaType: CheckResult['media_type'] = 'text';
       let uploadedFileId: string | null = null;
+
+      if (activeTab === 'complex') {
+        execution = await functions.createExecution(
+          APPWRITE_CONFIG.functions.analyze,
+          JSON.stringify(buildComplexPayload(complexText, user)),
+          false,
+        );
+        let responseBody = execution.responseBody || '';
+        let responseStatusCode = execution.responseStatusCode;
+        if (!responseBody && execution.$id) {
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            const refreshed = await functions.getExecution(APPWRITE_CONFIG.functions.analyze, execution.$id);
+            responseStatusCode = refreshed.responseStatusCode;
+            if (refreshed.responseBody) {
+              responseBody = refreshed.responseBody;
+              break;
+            }
+            if (refreshed.status && refreshed.status !== 'processing') break;
+          }
+        }
+        if (!responseBody) throw new AnalysisExecutionError(null);
+        const resultData = JSON.parse(responseBody);
+        const backendError = parseAnalysisBackendError(resultData);
+        if (backendError?.code === 'email_not_verified') {
+          navigate('/verify-email', { replace: true, state: { notice: 'Подтвердите email перед запуском анализа.' } });
+          return;
+        }
+        if (backendError || (responseStatusCode && responseStatusCode >= 400)) {
+          throw new AnalysisExecutionError(backendError);
+        }
+        setResult(resultData as CheckResult);
+        return;
+      }
 
       if (activeTab === 'media' && files.length > 0) {
         const fileRef = files[0];
@@ -267,12 +321,10 @@ export function NewCheckPage() {
             <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
           ) : (
             <div className="space-y-5">
-              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">Мультимодальный материал</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Добавьте ссылку, текст и файл вместе</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Соберите контекст статьи в одной проверке: источник, фрагмент текста и изображение или другой медиафайл.</p></div>
-              <label className="block"><span className="mb-2 flex items-center gap-2 text-sm font-semibold"><Link2 size={16} /> Ссылка на статью</span><input value={articleUrl} onChange={(event) => { setArticleUrl(event.target.value); setComplexSubmitted(false); }} type="url" placeholder="https://example.com/article" className="w-full rounded-xl border border-mv-border bg-white px-4 py-3 text-sm outline-none transition focus:border-black" /></label>
-              <TextInput value={complexText} onChange={(value) => { setComplexText(value); setComplexSubmitted(false); }} disabled={false} />
-              <FileDropzone files={complexFiles} onFilesSelected={(newFiles) => { setComplexFiles(newFiles); setComplexSubmitted(false); }} onRemoveFile={(id) => setComplexFiles((current) => current.filter((file) => file.id !== id))} maxFiles={5} />
-              <Button onClick={() => setComplexSubmitted(true)} disabled={!articleUrl.trim() && !complexText.trim() && complexFiles.length === 0} leftIcon={<Send className="w-4 h-4" />}>Собрать комплексную проверку</Button>
-              {complexSubmitted && <div className="rounded-2xl border border-black/[.09] bg-[#fafaf9] p-6 sm:p-8"><p className="eyebrow">Состав проверки</p><h3 className="mt-3 text-2xl font-semibold tracking-[-.035em]">Материал собран</h3><div className="mt-6 grid gap-3 sm:grid-cols-3"><div className="rounded-xl bg-white p-4 text-sm"><p className="text-mv-text-muted">Ссылка</p><p className="mt-2 font-semibold">{articleUrl ? 'Добавлена' : 'Нет'}</p></div><div className="rounded-xl bg-white p-4 text-sm"><p className="text-mv-text-muted">Текст</p><p className="mt-2 font-semibold">{complexText ? `${complexText.length} символов` : 'Нет'}</p></div><div className="rounded-xl bg-white p-4 text-sm"><p className="text-mv-text-muted">Файлы</p><p className="mt-2 font-semibold">{complexFiles.length ? `${complexFiles.length} шт.` : 'Нет'}</p></div></div>{complexFiles.length > 0 && <div className="mt-4 border-t border-black/[.07] pt-4 text-sm text-mv-text-secondary">{complexFiles.map((file) => <p key={file.id} className="truncate">{file.file.name}</p>)}</div>}</div>}
+              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Расширенный анализ текста</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Оценка происхождения и достоверности текста с подробным разбором ключевых признаков и проблемных утверждений.</p></div>
+              <TextInput value={complexText} onChange={handleComplexTextChange} minLength={COMPLEX_MIN_LENGTH} maxLength={COMPLEX_MAX_LENGTH} recommendedRange={COMPLEX_RECOMMENDED_RANGE} meaningfulMinLength disabled={isAnalyzing} />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Минимум {COMPLEX_MIN_LENGTH} значимых символов, максимум {COMPLEX_MAX_LENGTH.toLocaleString()}.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}>{isAnalyzing ? 'Идёт анализ...' : 'Запустить анализ'}</Button></div>
+              {isAnalyzing && <div className="flex items-center gap-2 rounded-lg border border-mv-border bg-mv-surface-2 p-4 text-mv-text-secondary"><Clock className="w-4 h-4" /><span>Комплексный анализ выполняется параллельно. Прошло: {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:{String(elapsedSeconds % 60).padStart(2, '0')}</span></div>}
             </div>
           )}
         </div>

@@ -192,6 +192,11 @@ def _serialize_canonical_details(result: AnalysisResult) -> str:
         details["short_report"] = result.short_report
     if result.analysis_mode is not None:
         details["analysis_mode"] = result.analysis_mode
+    # `confidence` is the canonical AI-origin model confidence. It is distinct
+    # from authenticity_index and is retained in details because the checks
+    # table has no dedicated confidence column.
+    if result.ai_status != "unavailable":
+        details["ai_confidence"] = result.confidence
     if result.ai_details is not None:
         details["ai_details"] = result.ai_details.model_dump(mode="json")
     if result.ai_status == "unavailable":
@@ -321,7 +326,17 @@ def _serialize_canonical_details_bounded(details: dict[str, Any]) -> str:
     if encoded is not None:
         return encoded
     compacted = _compact_credibility_details(details)
-    return compacted if compacted is not None else '{"truncated":true}'
+    if compacted is not None:
+        return compacted
+    # Keep the small canonical Complex discriminator/confidence subset even if
+    # optional evidence itself could not be compacted into the row limit.
+    essential = {
+        key: details[key]
+        for key in ("analysis_mode", "ai_confidence", "ai_status")
+        if key in details
+    }
+    encoded_essential = _encode_details(essential)
+    return encoded_essential if encoded_essential is not None else '{"truncated":true}'
 
 
 def _map_hybrid_v2_to_check_row(

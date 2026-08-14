@@ -15,6 +15,7 @@ interface TextInputProps {
   maxLength?: number;
   disabled?: boolean;
   recommendedRange?: { min: number; max: number };
+  meaningfulMinLength?: boolean;
 }
 
 export function TextInput({
@@ -24,11 +25,13 @@ export function TextInput({
   maxLength = 10000,
   disabled = false,
   recommendedRange,
+  meaningfulMinLength = false,
 }: TextInputProps) {
   const [isFocused, setIsFocused] = useState(false);
   
   const charCount = value.length;
-  const isValid = charCount >= minLength;
+  const measuredLength = meaningfulMinLength ? value.trim().length : charCount;
+  const isValid = measuredLength >= minLength;
   const isOverLimit = charCount > maxLength;
   
   const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
@@ -83,7 +86,7 @@ export function TextInput({
         {minLength > 1 && charCount > 0 && !isValid && (
           <div className="flex items-center gap-2 text-mv-uncertain">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
-            <span>Минимум {minLength} символов (ещё {minLength - charCount})</span>
+            <span>Минимум {minLength} {meaningfulMinLength ? 'значимых ' : ''}символов (ещё {minLength - measuredLength})</span>
           </div>
         )}
 

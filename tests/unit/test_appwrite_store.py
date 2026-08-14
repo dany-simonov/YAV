@@ -141,6 +141,62 @@ def test_combined_text_credibility_is_persisted_in_the_same_safe_details_record(
     assert row["authenticity_index"] == 95
 
 
+@pytest.mark.parametrize("confidence", [0.0, 0.96, 1.0])
+def test_complex_ai_confidence_is_persisted_independently_of_authenticity_index(confidence):
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            verdict="FAKE",
+            confidence=confidence,
+            model_used="gemini_text_verification",
+            media_type="text",
+            authenticity_index=4,
+            analysis_mode="complex",
+        ),
+        "authenticated-user",
+    )
+    details = json.loads(row["details"])
+
+    assert row["verdict"] == "FAKE"
+    assert row["authenticity_index"] == 4
+    assert details["ai_confidence"] == confidence
+
+
+def test_unavailable_complex_ai_does_not_persist_a_sentinel_confidence():
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            verdict="UNCERTAIN",
+            confidence=0.5,
+            model_used="gemini_text_verification",
+            media_type="text",
+            authenticity_index=None,
+            analysis_mode="complex",
+            ai_status="unavailable",
+        ),
+        "authenticated-user",
+    )
+
+    assert "ai_confidence" not in json.loads(row["details"])
+
+
+def test_complex_ai_confidence_survives_when_credibility_is_unavailable():
+    row = map_analysis_to_check_row(
+        _canonical_result(
+            confidence=0.96,
+            model_used="gemini_text_verification",
+            media_type="text",
+            authenticity_index=4,
+            analysis_mode="complex",
+            credibility={
+                "status": "unavailable", "summary": "Проверка временно недоступна.",
+                "issues": [], "sources": [],
+            },
+        ),
+        "authenticated-user",
+    )
+
+    assert json.loads(row["details"])["ai_confidence"] == 0.96
+
+
 def _maximum_credibility_payload():
     issue = {
         "type": "UNSUPPORTED_CLAIM", "severity": "LOW", "claim": "Ж" * 300,
@@ -166,6 +222,7 @@ def test_maximum_unicode_credibility_payload_is_compacted_not_lost_and_reference
     assert details["credibility"]["credibility_index"] == 34
     assert details["credibility"]["verdict"] == "LOW_CREDIBILITY"
     assert details["credibility"]["summary"] == "Д" * 500
+    assert details["ai_confidence"] == 0.8
     assert details["details_compacted"] is True
     sources = details["credibility"]["sources"]
     assert all(0 <= ref < len(sources) for issue in details["credibility"]["issues"] for ref in issue["source_refs"])
@@ -178,6 +235,39 @@ def test_credibility_compaction_preserves_high_severity_issues_before_low_issues
     row = map_analysis_to_check_row(_canonical_result(credibility=payload), "user")
     details = json.loads(row["details"])
     assert any(issue["severity"] == "HIGH" for issue in details["credibility"]["issues"])
+
+
+def test_complex_compaction_keeps_ai_confidence_and_high_priority_signal():
+    signals = [
+        {
+            "type": "STRUCTURAL_UNIFORMITY", "severity": "HIGH",
+            "title": "Ключевой сигнал", "explanation": "Важное наблюдение.",
+        },
+        *[
+            {
+                "type": "GENERIC_FORMULATION", "severity": "LOW",
+                "title": "Низкий сигнал " + str(index), "explanation": "П" * 400,
+            }
+            for index in range(4)
+        ],
+    ]
+    row = map_analysis_to_check_row(_canonical_result(
+        confidence=0.96,
+        model_used="gemini_text_verification",
+        media_type="text",
+        analysis_mode="complex",
+        ai_details={"signals": signals, "human_signals": ["Авторская деталь."] * 3},
+        credibility=_maximum_credibility_payload(),
+        provider_evidence={
+            **_canonical_result()["provider_evidence"],
+            "safe_details": {f"optional_{index}": "x" * 256 for index in range(16)},
+        },
+    ), "user")
+    details = json.loads(row["details"])
+
+    assert len(row["details"].encode("utf-8")) <= MAX_DETAILS_BYTES
+    assert details["ai_confidence"] == 0.96
+    assert details["ai_details"]["signals"][0]["severity"] == "HIGH"
 
 
 def test_gemini_video_persists_its_canonical_authenticity_index_without_inversion():
@@ -299,7 +389,8 @@ def test_v2_evidence_is_bounded_to_versioned_curated_details():
     )
     details = json.loads(map_analysis_to_check_row(result, "authenticated-user")["details"])
 
-    assert set(details) == {"provider_evidence_v2"}
+    assert set(details) == {"provider_evidence_v2", "ai_confidence"}
+    assert details["ai_confidence"] == 0.8
     assert details["provider_evidence_v2"]["safe_details"] == {
         "score_field": "type.ai_generated"
     }
@@ -386,6 +477,9 @@ def test_audio_component_evidence_persists_safe_scores_without_a_universal_proba
     [
         ("semantics_version", 1),
         ("semantics_version", True),
+        ("confidence", True),
+        ("confidence", float("nan")),
+        ("confidence", 1.1),
         ("ai_probability", float("nan")),
         ("ai_probability", 1.1),
         ("ai_probability", "0.5"),

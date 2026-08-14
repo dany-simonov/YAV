@@ -54,11 +54,15 @@ const clampIndex = (value: number): number => {
 
 export function mapHistoryRow(row: CheckRow): Check {
   const details = parseDetails(row.details);
+  const isComplex = details.analysis_mode === 'complex';
   return {
     id: row.$id,
     media_type: asMediaType(row.media_type),
     verdict: asVerdict(row.verdict),
-    confidence: clampIndex(row.authenticity_index),
+    // Complex confidence is not a score and must never be reconstructed from
+    // authenticity_index. Current backend persistence may omit it; retain null
+    // in that case rather than inventing a value.
+    confidence: isComplex ? details.ai_confidence ?? null : clampIndex(row.authenticity_index),
     authenticity_index: clampIndex(row.authenticity_index),
     model_used: displayModelName(row.model || row.provider || 'Unknown model'),
     explanation: row.explanation || row.source_label || 'Проверка',
@@ -78,6 +82,7 @@ function parseDetails(value: string | null | undefined): {
   ai_status?: 'completed' | 'unavailable';
   analysis_mode?: 'complex';
   ai_details?: AIOriginDetails;
+  ai_confidence?: number;
 } {
   if (typeof value !== 'string' || value.length > 16_384) return {};
   try {
@@ -91,10 +96,15 @@ function parseDetails(value: string | null | undefined): {
       ai_status: item.ai_status === 'unavailable' ? 'unavailable' : undefined,
       analysis_mode: item.analysis_mode === 'complex' ? 'complex' : undefined,
       ai_details: isAIOriginDetails(item.ai_details) ? item.ai_details : undefined,
+      ai_confidence: isUnitConfidence(item.ai_confidence) ? item.ai_confidence : undefined,
     };
   } catch {
     return {};
   }
+}
+
+function isUnitConfidence(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 function isAIOriginDetails(value: unknown): value is AIOriginDetails {
@@ -256,7 +266,7 @@ export function calculateHistoryStats(checks: Check[]): HistoryStats {
   const checksToday = checks.filter((item) => isSameLocalDay(new Date(item.created_at), now)).length;
   const checksThisWeek = checks.filter((item) => new Date(item.created_at) >= weekStart).length;
   const averageIndex = checks.length
-    ? Math.round(checks.reduce((sum, item) => sum + item.confidence, 0) / checks.length)
+    ? Math.round(checks.reduce((sum, item) => sum + (item.authenticity_index ?? 0), 0) / checks.length)
     : null;
   return { checksToday, totalChecks: checks.length, averageIndex, checksThisWeek };
 }

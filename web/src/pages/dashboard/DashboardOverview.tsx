@@ -197,9 +197,9 @@ export function DashboardOverview() {
               <img src="/assets/img/yav-logo.png" alt="" className="w-7 h-7 object-contain" />
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-mv-text">Большая проверка текста</h3>
+              <h3 className="text-lg font-semibold text-mv-text">Комплексный анализ</h3>
               <p className="text-sm text-mv-text-secondary mt-1">
-                Двойная проверка: детектор ИИ + фактчек/заимствования с пословной подсветкой.
+                Расширенная оценка происхождения и достоверности текста с разбором ключевых признаков и проблемных утверждений.
               </p>
               <p className="text-xs text-mv-text-muted mt-2">
                 Рекомендуем 200-2000 символов. Чем больше текст, тем точнее проверка.

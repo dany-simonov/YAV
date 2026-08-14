@@ -223,6 +223,11 @@ class AnalysisResult(BaseModel):
     provider_evidence: ProviderEvidence | None = None
     component_evidence: list[ComponentEvidence] | None = Field(default=None, max_length=2)
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_confidence(cls, value: float) -> float:
+        return _finite_unit_interval(value, "confidence")  # type: ignore[return-value]
+
     @field_validator("ai_probability", "decision_confidence", mode="before")
     @classmethod
     def validate_canonical_probability(cls, value: float | None, info: Any) -> float | None:

@@ -8,13 +8,29 @@ import { TextInput } from '../../components/upload';
 import { functions, APPWRITE_CONFIG } from '../../lib/appwrite';
 import { AnalysisExecutionError, analysisErrorMessageFromUnknown, parseAnalysisBackendError } from '../../lib/analysisError';
 import { useAuthStore } from '../../store';
-import type { CheckResult } from '../../types';
+import type { CheckResult, User } from '../../types';
 
-const MIN_LENGTH = 200;
-const MAX_LENGTH = 10000;
+export const COMPLEX_MIN_LENGTH = 200;
+// This is a UX cap, not a security authority: the backend remains authoritative.
+// It prevents newly created accounts from submitting text the current backend
+// would reject under its 3,000-character Complex limit.
+export const COMPLEX_MAX_LENGTH = 3000;
 const RECOMMENDED_RANGE = { min: 200, max: 2000 };
 
 const formatDuration = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+
+export const isComplexTextSubmittable = (value: string, isAnalyzing: boolean): boolean =>
+  value.trim().length >= COMPLEX_MIN_LENGTH && value.length <= COMPLEX_MAX_LENGTH && !isAnalyzing;
+
+export const buildComplexPayload = (text: string, user: User) => ({
+  text,
+  userId: user.$id,
+  username: user.name,
+  firstName: user.name.split(' ')[0] || '',
+  mediaType: 'text' as const,
+  mode: 'hybrid_text' as const,
+  sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
+});
 
 export function BigTextCheckPage() {
   const navigate = useNavigate();
@@ -31,16 +47,13 @@ export function BigTextCheckPage() {
     return () => clearInterval(timer);
   }, [isAnalyzing]);
 
-  const canSubmit = text.length >= MIN_LENGTH && text.length <= MAX_LENGTH && !isAnalyzing;
+  const canSubmit = isComplexTextSubmittable(text, isAnalyzing);
   const handleSubmit = async () => {
     if (!canSubmit) return;
     if (!user?.$id) { setError('Для запуска проверки требуется авторизация.'); return; }
     setError(null); setResult(null); setIsAnalyzing(true);
     try {
-      const execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify({
-        text, userId: user.$id, username: user.name, firstName: user.name.split(' ')[0] || '',
-        mediaType: 'text', mode: 'hybrid_text', sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
-      }), false);
+      const execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(buildComplexPayload(text, user)), false);
       let responseBody = execution.responseBody || '';
       let responseStatusCode = execution.responseStatusCode;
       if (!responseBody && execution.$id) {
@@ -65,9 +78,14 @@ export function BigTextCheckPage() {
     finally { setIsAnalyzing(false); }
   };
 
-  return <div className="max-w-6xl mx-auto space-y-6">
-    <div className="flex flex-col gap-2"><h1 className="text-2xl font-bold text-mv-text flex items-center gap-2">Комплексный анализ <Sparkles className="w-5 h-5 text-mv-accent" /></h1><p className="text-mv-text-secondary">Две независимые проверки: происхождение текста и его достоверность. Рекомендуемый объём: {RECOMMENDED_RANGE.min}–{RECOMMENDED_RANGE.max} символов, максимум {MAX_LENGTH.toLocaleString()}.</p></div>
-    <Card><CardHeader title="Текст для комплексного анализа" description="Результат — ориентир: учитывайте контекст и источник материала." /><div className="space-y-5"><TextInput value={text} onChange={setText} minLength={MIN_LENGTH} maxLength={MAX_LENGTH} recommendedRange={RECOMMENDED_RANGE} disabled={isAnalyzing} /><div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Минимум {MIN_LENGTH} символов, максимум {MAX_LENGTH.toLocaleString()}.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} className="text-white">{isAnalyzing ? 'Идёт анализ...' : 'Запустить анализ'}</Button></div>{isAnalyzing && <div className="flex items-center gap-2 p-4 rounded-lg bg-mv-surface-2 border border-mv-border text-mv-text-secondary"><Clock className="w-4 h-4" /><span>Комплексный анализ выполняется параллельно. Прошло: {formatDuration(elapsedSeconds)}</span></div>}{error && <Alert variant="error">{error}</Alert>}</div></Card>
+  const handleTextChange = (value: string) => {
+    setText(value);
+    if (error) setError(null);
+  };
+
+  return <div className="complex-check-page max-w-6xl mx-auto space-y-6">
+    <div className="flex flex-col gap-2"><h1 className="text-2xl font-bold text-mv-text flex items-center gap-2">Комплексный анализ <Sparkles className="w-5 h-5 text-mv-accent" /></h1><p className="text-mv-text-secondary">Две независимые проверки: происхождение текста и его достоверность. Рекомендуемый объём: {RECOMMENDED_RANGE.min}–{RECOMMENDED_RANGE.max} символов, максимум {COMPLEX_MAX_LENGTH.toLocaleString()}.</p></div>
+    <Card className="complex-input-card"><CardHeader title="Текст для комплексного анализа" description="Результат — ориентир: учитывайте контекст и источник материала." /><div className="space-y-5"><TextInput value={text} onChange={handleTextChange} minLength={COMPLEX_MIN_LENGTH} maxLength={COMPLEX_MAX_LENGTH} recommendedRange={RECOMMENDED_RANGE} meaningfulMinLength disabled={isAnalyzing} /><div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Минимум {COMPLEX_MIN_LENGTH} значимых символов, максимум {COMPLEX_MAX_LENGTH.toLocaleString()}.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} className="complex-submit-control text-white">{isAnalyzing ? 'Идёт анализ...' : 'Запустить анализ'}</Button></div>{isAnalyzing && <div className="flex items-center gap-2 p-4 rounded-lg bg-mv-surface-2 border border-mv-border text-mv-text-secondary"><Clock className="w-4 h-4" /><span>Комплексный анализ выполняется параллельно. Прошло: {formatDuration(elapsedSeconds)}</span></div>}{error && <Alert variant="error">{error}</Alert>}</div></Card>
     {result && <CheckResultCard result={result} />}
   </div>;
 }

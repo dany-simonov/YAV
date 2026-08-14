@@ -8,6 +8,7 @@ from api.schemas import AnalysisResult
 from core.enums import MediaType, ModelUsed, Verdict
 from src.execution_deadline import ExecutionDeadline, reset_execution_deadline, set_execution_deadline
 from src.source_ingestion import SourceDocument
+from src.validation import SecurityValidationError
 
 
 def _text_result() -> AnalysisResult:
@@ -19,7 +20,7 @@ def _text_result() -> AnalysisResult:
 
 
 class _SlowVideoIngestor:
-    async def ingest(self, _url: str) -> SourceDocument:
+    async def ingest(self, _url: str, *, diagnostic_log=None) -> SourceDocument:
         return SourceDocument("https://example.com/post", "Post", "", "", "x" * 200, (),
                               ("https://media.example/video.mp4",), False)
 
@@ -47,3 +48,19 @@ async def test_slow_media_download_becomes_unavailable_while_text_partial_surviv
     assert result.source.media[0].kind == "video"
     assert result.source.media[0].status == "unavailable"
     assert result.explanation == "text completed"
+
+
+@pytest.mark.asyncio
+async def test_source_without_text_or_media_has_a_distinct_controlled_error():
+    class EmptyIngestor:
+        async def ingest(self, _url: str, *, diagnostic_log=None) -> SourceDocument:
+            return SourceDocument("https://example.com/post", "", "", "", "", (), (), False)
+
+    with patch("src.main.SourceIngestor", return_value=EmptyIngestor()):
+        from src.main import _analyze_complex_source
+
+        with pytest.raises(SecurityValidationError) as raised:
+            await _analyze_complex_source("https://example.com/post", None)
+
+    assert raised.value.code == "source_no_analyzable_content"
+    assert raised.value.detail == "На странице не найден материал для анализа."

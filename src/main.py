@@ -601,7 +601,7 @@ async def _analyze_complex_source(
     """Ingest one public source and deterministically combine existing analyzers."""
     ingestor = SourceIngestor()
     _safe_diagnostic_log(diagnostic_log, "complex_stage=source_start")
-    document = await ingestor.ingest(source_url)
+    document = await ingestor.ingest(source_url, diagnostic_log=diagnostic_log)
     _safe_diagnostic_log(
         diagnostic_log,
         "complex_stage=source_ingested "
@@ -712,7 +712,11 @@ async def _analyze_complex_source(
     media_results = [item for item in media_outcomes if isinstance(item, SourceMediaResult)]
     completed_media = [item for item in media_results if item.status == "completed"]
     if text_result is None and not completed_media:
-        raise SecurityValidationError("source_unavailable", "Источник не содержит пригодного текста или медиа.", 422)
+        raise SecurityValidationError(
+            "source_no_analyzable_content",
+            "На странице не найден материал для анализа.",
+            422,
+        )
 
     source = SourceDetails(
         url=document.url, title=document.title[:300], description=document.description[:600],
@@ -1147,6 +1151,22 @@ def main(context: Any):
             403,
         )
     except SecurityValidationError as exc:
+        if (
+            isinstance(request, ComplexAnalyzeRequest)
+            and request.source_url is not None
+            and request.text is None
+            and not request.file_ids
+        ):
+            safe_source_codes = {
+                "invalid_source_url", "unsafe_source_url", "source_unavailable",
+                "source_timeout", "unsupported_source", "source_too_large",
+                "source_no_analyzable_content",
+            }
+            source_code = exc.code if exc.code in safe_source_codes else "source_unavailable"
+            _safe_diagnostic_log(
+                _media_diagnostic_logger(context),
+                f"complex_stage=source_failed source_error_code={source_code}",
+            )
         return _response_json(context, {"detail": exc.detail, "code": exc.code}, exc.status_code)
     except RateLimitError as exc:
         payload = {"detail": exc.detail, "code": exc.code}

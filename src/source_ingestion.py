@@ -29,11 +29,40 @@ MAX_IMAGES = 3
 MAX_REDIRECTS = 3
 USER_AGENT = "YAV-Source-Analyzer/1.0 (+https://yav.example)"
 _DNS_SEMAPHORE = asyncio.Semaphore(8)
+_SAFE_SOURCE_ERROR_CODES = frozenset({
+    "invalid_source_url", "unsafe_source_url", "source_unavailable",
+    "source_timeout", "unsupported_source", "source_too_large",
+    "source_no_analyzable_content",
+})
 
 
 class SourceUnavailableError(SecurityValidationError):
     def __init__(self, code: str = "source_unavailable", detail: str = "Источник временно недоступен.") -> None:
         super().__init__(code, detail, 422)
+
+
+def _source_diagnostic(diagnostic_log: object | None, message: str) -> None:
+    """Best-effort source telemetry; messages must not contain URLs or page data."""
+    if not callable(diagnostic_log):
+        return
+    try:
+        diagnostic_log(message)
+    except Exception:
+        pass
+
+
+def _safe_content_type(headers: httpx.Headers) -> str:
+    """Return an allowlisted media type so a hostile header cannot enter logs."""
+    content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type in {
+        "text/html", "application/xhtml+xml", "text/plain", "application/octet-stream",
+    }:
+        return content_type
+    return "other"
+
+
+def _safe_source_error_code(code: object) -> str:
+    return str(code) if str(code) in _SAFE_SOURCE_ERROR_CODES else "source_unavailable"
 
 
 @dataclass(frozen=True)
@@ -112,11 +141,18 @@ def _normalized_url(value: str, *, retain_query: bool) -> tuple[str, str]:
     return fetch, display
 
 
-async def pin_source_url(value: str, resolver: Callable[..., object] = socket.getaddrinfo) -> PinnedTarget:
+async def pin_source_url(
+    value: str,
+    resolver: Callable[..., object] = socket.getaddrinfo,
+    diagnostic_log: object | None = None,
+) -> PinnedTarget:
+    _source_diagnostic(diagnostic_log, "source_stage=url_parse")
     fetch_url, display_url = _normalized_url(value, retain_query=True)
     host = urlsplit(fetch_url).hostname
     assert host is not None
-    return PinnedTarget(fetch_url, display_url, _canonical_host(host), await resolve_public_host(host, resolver))
+    target = PinnedTarget(fetch_url, display_url, _canonical_host(host), await resolve_public_host(host, resolver))
+    _source_diagnostic(diagnostic_log, f"source_stage=url_pinned host={target.hostname}")
+    return target
 
 
 async def validate_source_url(value: str, resolver: Callable[..., object] = socket.getaddrinfo) -> str:
@@ -211,21 +247,39 @@ class SourceIngestor:
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None, resolver: Callable[..., object] = socket.getaddrinfo) -> None:
         self.transport, self.resolver = transport, resolver
 
-    async def _request(self, url: str, *, max_bytes: int, accept: str, deadline_at: float | None = None) -> tuple[httpx.Response, bytes, PinnedTarget]:
+    async def _request(
+        self,
+        url: str,
+        *,
+        max_bytes: int,
+        accept: str,
+        deadline_at: float | None = None,
+        diagnostic_log: object | None = None,
+    ) -> tuple[httpx.Response, bytes, PinnedTarget]:
         current = url
         redirects = 0
         while True:
             if deadline_at is not None and deadline_at <= time.monotonic():
                 raise SourceUnavailableError("source_timeout", "Не удалось получить содержимое источника вовремя.")
-            target = await pin_source_url(current, self.resolver)
+            target = await pin_source_url(current, self.resolver, diagnostic_log)
             headers = {"User-Agent": USER_AGENT, "Accept": accept}
             remaining = deadline_at - time.monotonic() if deadline_at is not None else float("inf")
             if remaining <= 0:
                 raise SourceUnavailableError("source_timeout", "Не удалось получить содержимое источника вовремя.")
             timeout = httpx.Timeout(connect=min(5.0, bounded_timeout(5.0), remaining), read=min(12.0, bounded_timeout(12.0), remaining), write=min(5.0, remaining), pool=min(5.0, remaining))
             transport = self.transport or PinnedAsyncHTTPTransport(target)
+            _source_diagnostic(
+                diagnostic_log,
+                f"source_stage=fetch_start host={target.hostname} redirect_count={redirects}",
+            )
             async with httpx.AsyncClient(transport=transport, follow_redirects=False, timeout=timeout, headers=headers, trust_env=False) as client:
                 async with client.stream("GET", target.fetch_url) as response:
+                    _source_diagnostic(
+                        diagnostic_log,
+                        "source_stage=fetch_response "
+                        f"http_status={response.status_code} content_type={_safe_content_type(response.headers)} "
+                        f"redirect_count={redirects}",
+                    )
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")
                         if not location: raise SourceUnavailableError("unsupported_source", "Источник вернул некорректный redirect.")
@@ -241,18 +295,39 @@ class SourceIngestor:
                         chunks.append(chunk)
                     return response, b"".join(chunks), target
 
-    async def ingest(self, source_url: str) -> SourceDocument:
-        response, body, target = await self._request(source_url, max_bytes=MAX_HTML_BYTES, accept="text/html,application/xhtml+xml")
-        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-        if content_type not in {"text/html", "application/xhtml+xml"}: raise SourceUnavailableError("unsupported_source", "Источник не содержит HTML-страницу.")
-        parser = _Extractor(); parser.feed(body.decode("utf-8", errors="replace"))
-        text = " ".join("".join(parser.parts).split()); truncated = len(text) > MAX_TEXT_CHARS
-        safe_url = target.display_url
-        canonical = parser.meta.get("og:url", "")
-        if canonical:
-            try: safe_url = (await pin_source_url(urljoin(target.fetch_url, canonical), self.resolver)).display_url
-            except SecurityValidationError: pass
-        return SourceDocument(safe_url, parser.meta.get("og:title") or parser.meta.get("twitter:title") or "", parser.meta.get("og:description") or parser.meta.get("description") or parser.meta.get("twitter:description") or "", parser.meta.get("og:site_name", ""), text[:MAX_TEXT_CHARS], _absolute_urls([parser.meta.get("og:image", ""), parser.meta.get("twitter:image", ""), *parser.images], target.fetch_url, limit=MAX_IMAGES), _absolute_urls([parser.meta.get("og:video", ""), parser.meta.get("og:video:url", ""), parser.meta.get("twitter:player:stream", ""), *parser.videos], target.fetch_url, limit=1), truncated)
+    async def ingest(self, source_url: str, *, diagnostic_log: object | None = None) -> SourceDocument:
+        try:
+            response, body, target = await self._request(
+                source_url,
+                max_bytes=MAX_HTML_BYTES,
+                accept="text/html,application/xhtml+xml",
+                diagnostic_log=diagnostic_log,
+            )
+            _source_diagnostic(diagnostic_log, f"source_stage=html_read html_bytes={len(body)}")
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+            if content_type not in {"text/html", "application/xhtml+xml"}:
+                raise SourceUnavailableError("unsupported_source", "Источник не содержит HTML-страницу.")
+            parser = _Extractor(); parser.feed(body.decode("utf-8", errors="replace"))
+            text = " ".join("".join(parser.parts).split()); truncated = len(text) > MAX_TEXT_CHARS
+            safe_url = target.display_url
+            canonical = parser.meta.get("og:url", "")
+            if canonical:
+                try: safe_url = (await pin_source_url(urljoin(target.fetch_url, canonical), self.resolver)).display_url
+                except SecurityValidationError: pass
+            image_urls = _absolute_urls([parser.meta.get("og:image", ""), parser.meta.get("twitter:image", ""), *parser.images], target.fetch_url, limit=MAX_IMAGES)
+            video_urls = _absolute_urls([parser.meta.get("og:video", ""), parser.meta.get("og:video:url", ""), parser.meta.get("twitter:player:stream", ""), *parser.videos], target.fetch_url, limit=1)
+            _source_diagnostic(
+                diagnostic_log,
+                "source_stage=extract_complete "
+                f"text_length={len(text)} image_candidates={len(image_urls)} video_candidates={len(video_urls)}",
+            )
+            return SourceDocument(safe_url, parser.meta.get("og:title") or parser.meta.get("twitter:title") or "", parser.meta.get("og:description") or parser.meta.get("description") or parser.meta.get("twitter:description") or "", parser.meta.get("og:site_name", ""), text[:MAX_TEXT_CHARS], image_urls, video_urls, truncated)
+        except SecurityValidationError as exc:
+            _source_diagnostic(diagnostic_log, f"source_stage=failed source_error_code={_safe_source_error_code(exc.code)}")
+            raise
+        except (httpx.HTTPError, httpcore.HTTPError, OSError, TimeoutError) as exc:
+            _source_diagnostic(diagnostic_log, "source_stage=failed source_error_code=source_unavailable")
+            raise SourceUnavailableError() from exc
 
     async def download_media(self, url: str, *, timeout_seconds: float | None = None) -> tuple[bytes, str]:
         deadline_at = time.monotonic() + timeout_seconds if timeout_seconds is not None else None

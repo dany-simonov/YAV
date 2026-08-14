@@ -5,7 +5,7 @@ import httpx
 import httpcore
 import pytest
 
-from src.source_ingestion import _PinnedBackend, PinnedAsyncHTTPTransport, SourceIngestor, pin_source_url, validate_source_url
+from src.source_ingestion import SourceUnavailableError, _PinnedBackend, PinnedAsyncHTTPTransport, SourceIngestor, pin_source_url, validate_source_url
 from src.validation import SecurityValidationError
 
 
@@ -30,14 +30,41 @@ async def test_ingestion_extracts_bounded_text_metadata_and_media():
     def handler(request):
         return httpx.Response(200, headers={"content-type": "text/html; charset=utf-8"}, text=html)
 
+    logs: list[str] = []
     ingestor = SourceIngestor(transport=httpx.MockTransport(handler), resolver=public_resolver)
-    document = await ingestor.ingest("https://example.com/article")
+    document = await ingestor.ingest("https://example.com/article?token=SECRET", diagnostic_log=logs.append)
 
     assert document.title == "Заголовок"
     assert "Первый абзац" in document.text
     assert "Меню" not in document.text
     assert document.image_urls == ("https://example.com/cover.jpg", "https://example.com/body.png")
     assert document.video_urls == ("https://media.example/video.mp4",)
+    assert logs == [
+        "source_stage=url_parse",
+        "source_stage=url_pinned host=example.com",
+        "source_stage=fetch_start host=example.com redirect_count=0",
+        "source_stage=fetch_response http_status=200 content_type=text/html redirect_count=0",
+        f"source_stage=html_read html_bytes={len(html.encode())}",
+        "source_stage=extract_complete text_length=27 image_candidates=2 video_candidates=1",
+    ]
+    assert all("SECRET" not in item for item in logs)
+
+
+@pytest.mark.asyncio
+async def test_http_error_is_a_controlled_source_error_with_safe_stage_diagnostics():
+    logs: list[str] = []
+
+    def handler(_request):
+        return httpx.Response(403, headers={"content-type": "text/html; charset=utf-8"})
+
+    ingestor = SourceIngestor(transport=httpx.MockTransport(handler), resolver=public_resolver)
+    with pytest.raises(SourceUnavailableError) as raised:
+        await ingestor.ingest("https://example.com/article?token=SECRET", diagnostic_log=logs.append)
+
+    assert raised.value.code == "source_unavailable"
+    assert logs[-1] == "source_stage=failed source_error_code=source_unavailable"
+    assert "source_stage=fetch_response http_status=403 content_type=text/html redirect_count=0" in logs
+    assert all("SECRET" not in item for item in logs)
 
 
 @pytest.mark.asyncio

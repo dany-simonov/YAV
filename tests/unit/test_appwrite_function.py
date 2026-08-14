@@ -131,8 +131,9 @@ def test_main_uses_only_runtime_client_ip_for_admission():
 
 def test_main_handles_url_only_unified_complex_through_source_ingest_and_persistence():
     class UrlOnlyIngestor:
-        async def ingest(self, url: str) -> SourceDocument:
+        async def ingest(self, url: str, *, diagnostic_log=None) -> SourceDocument:
             assert url == "https://example.com/article"
+            assert callable(diagnostic_log)
             return SourceDocument(
                 url=url,
                 title="Публичная статья",
@@ -182,6 +183,38 @@ def test_main_handles_url_only_unified_complex_through_source_ingest_and_persist
     assert "complex_stage=request_validated source_present=yes manual_text_present=no manual_file_count=0" in logs
     assert "complex_stage=source_start" in logs
     assert any(log.startswith("complex_stage=source_ingested text_present=yes") for log in logs)
+
+
+def test_main_returns_distinct_safe_error_for_url_only_source_without_content():
+    class EmptyIngestor:
+        async def ingest(self, url: str, *, diagnostic_log=None) -> SourceDocument:
+            assert url == "https://example.com/article"
+            return SourceDocument(url, "", "", "", "", (), (), False)
+
+    context = _context(
+        {"mode": "complex", "sourceUrl": "https://example.com/article", "fileIds": []},
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    now = time.monotonic()
+    deadline = ExecutionDeadline(now, now + 10, now + 8, now + 9)
+    with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
+        "src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})
+    ), patch("src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})), patch(
+        "src.main.AppwriteTablesRateLimitStore"
+    ), patch("src.main.SourceIngestor", return_value=EmptyIngestor()):
+        payload, status = main(context)
+
+    assert status == 422
+    assert payload == {
+        "detail": "На странице не найден материал для анализа.",
+        "code": "source_no_analyzable_content",
+    }
+    logs = [call.args[0] for call in context.log.call_args_list]
+    assert "complex_stage=source_failed source_error_code=source_no_analyzable_content" in logs
 
 
 def test_main_builds_analyze_response_with_the_same_root_deadline():

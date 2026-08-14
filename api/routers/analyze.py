@@ -6,9 +6,8 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Body, File, Form, Header, HTTPException, UploadFile
-from api.schemas import AnalysisResult, HybridAnalysisResponse
+from api.schemas import AnalysisResult
 from api.security import security_http_error
-from core.analyzer import HybridTextAnalyzer
 from core.config import settings
 from core.enums import MediaType
 from core.exceptions import (
@@ -20,6 +19,7 @@ from core.exceptions import (
 from router.media_router import MediaRouter
 from src.media_validation import validate_media_bytes
 from src.validation import SecurityValidationError, validate_request_payload
+from src.main import _analyze_complex_text
 
 # Cleaner API design
 # Edge cases handled
@@ -29,10 +29,9 @@ from src.validation import SecurityValidationError, validate_request_payload
 router = APIRouter()
 logger = logging.getLogger(__name__)
 media_router = MediaRouter()
-hybrid_analyzer = HybridTextAnalyzer()
 
 
-@router.post("/text/hybrid", response_model=HybridAnalysisResponse)
+@router.post("/text/hybrid", response_model=AnalysisResult)
 async def analyze_text_hybrid(
     payload: Any = Body(..., example={"text": "Введите текст для проверки"}),
     x_api_secret: str = Header(..., alias="x-api-secret"),
@@ -50,8 +49,9 @@ async def analyze_text_hybrid(
         raise security_http_error(exc) from exc
 
     try:
-        result = await hybrid_analyzer.analyze(request.text)
-        return HybridAnalysisResponse(**result)
+        # Keep the historic public path, but make it the same two-Gemini
+        # complex contract as the Function entrypoint.
+        return await _analyze_complex_text(request.text, None)
     except Exception:  # noqa: BLE001
         logger.error("Hybrid analyze failed")
         raise HTTPException(status_code=503, detail={"code": "provider_unavailable", "detail": "Сервис анализа временно недоступен."})

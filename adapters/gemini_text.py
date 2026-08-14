@@ -12,7 +12,7 @@ from typing import Any, Callable
 import httpx
 
 from adapters.base import BaseAdapter
-from api.schemas import AnalysisResult, ProviderEvidence
+from api.schemas import AIOriginDetails, AIOriginSignal, AnalysisResult, ProviderEvidence
 from core.config import settings
 from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
@@ -54,6 +54,31 @@ class GeminiTextAdapter(BaseAdapter):
         "reasoning_summary must be natural Russian in one to three short sentences, with no Markdown, "
         "JSON field names, model, API, provider, or technical details. Do not begin it with Gemini Text "
         "Verification:, Gemini:, a model name, a provider name, or another technical prefix."
+    )
+    COMPLEX_MAX_OUTPUT_TOKENS = 1000
+    _COMPLEX_SIGNAL_TYPES = {
+        "STRUCTURAL_UNIFORMITY", "LEXICAL_PREDICTABILITY", "SYNTACTIC_UNIFORMITY",
+        "REPETITIVE_PATTERNS", "OVERLY_REGULAR_COMPOSITION", "GENERIC_FORMULATION",
+        "STYLE_INCONSISTENCY",
+    }
+    _COMPLEX_RESPONSE_SCHEMA = {
+        "type": "object",
+        "properties": {
+            **_RESPONSE_SCHEMA["properties"],
+            "signals": {"type": "array", "maxItems": 5, "items": {"type": "object", "properties": {
+                "type": {"type": "string", "enum": sorted(_COMPLEX_SIGNAL_TYPES)},
+                "severity": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+                "title": {"type": "string"}, "explanation": {"type": "string"},
+            }, "required": ["type", "severity", "title", "explanation"], "additionalProperties": False}},
+            "human_signals": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
+        },
+        "required": ["verdict", "authenticity_index", "confidence", "reasoning_summary", "signals", "human_signals"],
+        "additionalProperties": False,
+    }
+    _COMPLEX_PROMPT = _PROMPT + (
+        " For this expanded mode, also return at most five significant stylistic or structural signals "
+        "and at most three observations supporting human authorship. Do not fact-check or assess factual "
+        "credibility. Do not invent evidence. Return Russian JSON only."
     )
 
     @classmethod
@@ -97,16 +122,17 @@ class GeminiTextAdapter(BaseAdapter):
         return cls._SUMMARY_PREFIX.sub("", summary, count=1).strip()
 
     @classmethod
-    def _result(cls, response: httpx.Response, model: str) -> AnalysisResult:
+    def _result(cls, response: httpx.Response, model: str, *, complex_mode: bool = False) -> AnalysisResult:
         try:
             body = response.json()
             text = body["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(text)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response") from exc
-        if not isinstance(parsed, dict) or set(parsed) != {
-            "verdict", "authenticity_index", "confidence", "reasoning_summary"
-        }:
+        expected = {"verdict", "authenticity_index", "confidence", "reasoning_summary"}
+        if complex_mode:
+            expected |= {"signals", "human_signals"}
+        if not isinstance(parsed, dict) or set(parsed) != expected:
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
 
         verdict_value = parsed["verdict"]
@@ -127,8 +153,20 @@ class GeminiTextAdapter(BaseAdapter):
         ):
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
         summary = cls._sanitize_summary(" ".join(summary.split()))
-        if not summary or len(summary) > 300:
+        if not summary or len(summary) > (600 if complex_mode else 300):
             raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
+
+        ai_details = None
+        if complex_mode:
+            raw_signals, raw_human = parsed["signals"], parsed["human_signals"]
+            if not isinstance(raw_signals, list) or len(raw_signals) > 5 or not isinstance(raw_human, list) or len(raw_human) > 3:
+                raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response")
+            try:
+                signals = [AIOriginSignal.model_validate(item) for item in raw_signals]
+                human_signals = [" ".join(item.split()) for item in raw_human]
+                ai_details = AIOriginDetails(signals=signals, human_signals=human_signals)
+            except (TypeError, ValueError) as exc:
+                raise ProviderInfrastructureError(cls.PROVIDER, "invalid_response", stage="response") from exc
 
         verdict = Verdict(verdict_value)
         return canonicalize_result(
@@ -138,6 +176,8 @@ class GeminiTextAdapter(BaseAdapter):
                 model_used=ModelUsed.GEMINI_TEXT,
                 explanation=summary,
                 media_type=MediaType.TEXT,
+                analysis_mode="complex" if complex_mode else None,
+                ai_details=ai_details,
             ),
             ProviderEvidence(
                 provider=cls.PROVIDER,
@@ -150,7 +190,7 @@ class GeminiTextAdapter(BaseAdapter):
         )
 
     async def analyze(
-        self, data: bytes, *, diagnostic_log: Callable[[str], None] | None = None
+        self, data: bytes, *, diagnostic_log: Callable[[str], None] | None = None, complex_mode: bool = False,
     ) -> AnalysisResult:
         text = data.decode("utf-8", errors="replace").strip()
         if not text:
@@ -175,10 +215,11 @@ class GeminiTextAdapter(BaseAdapter):
                         f"{base_url}/v1beta/models/{model}:generateContent",
                         headers={**gemini_headers(), "Content-Type": "application/json"},
                         json={
-                            "contents": [{"parts": [{"text": f"{self._PROMPT}\n\nTEXT:\n{text}"}]}],
+                            "contents": [{"parts": [{"text": f"{self._COMPLEX_PROMPT if complex_mode else self._PROMPT}\n\nTEXT:\n{text}"}]}],
                             "generationConfig": {
                                 "responseMimeType": "application/json",
-                                "responseJsonSchema": self._RESPONSE_SCHEMA,
+                                "responseJsonSchema": self._COMPLEX_RESPONSE_SCHEMA if complex_mode else self._RESPONSE_SCHEMA,
+                                **({"maxOutputTokens": self.COMPLEX_MAX_OUTPUT_TOKENS} if complex_mode else {}),
                             },
                         },
                     )
@@ -216,7 +257,7 @@ class GeminiTextAdapter(BaseAdapter):
             f"elapsed_ms={round((time.monotonic() - started) * 1000)}",
         )
         normalize_started = time.monotonic()
-        result = self._result(response, model)
+        result = self._result(response, model, complex_mode=complex_mode)
         self._diagnose(
             diagnostic_log,
             "provider=gemini_text stage=normalize "

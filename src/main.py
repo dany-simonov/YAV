@@ -30,13 +30,13 @@ if str(ROOT) not in sys.path:
 
 from core.enums import MediaType, ModelUsed, Verdict  # noqa: E402
 from core.config import settings  # noqa: E402
-from core.analyzer import HybridTextAnalyzer  # noqa: E402
 from core.exceptions import (  # noqa: E402
     ExternalAPIError,
     ProviderInfrastructureError,
 )
 from core.short_report import build_combined_text_report, build_short_report  # noqa: E402
 from adapters.gemini_credibility import GeminiCredibilityAdapter  # noqa: E402
+from adapters.gemini_text import GeminiTextAdapter  # noqa: E402
 from api.schemas import AnalysisResult, CredibilityAssessment  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
@@ -445,9 +445,6 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
     return b"".join(chunks)
 
 
-hybrid_analyzer = HybridTextAnalyzer()
-
-
 def _branch_diagnostic(diagnostic_log: Any, branch: str):
     """Attach an allowlisted branch label without exposing request data."""
     def _log(message: str) -> None:
@@ -462,7 +459,7 @@ def _unavailable_credibility() -> CredibilityAssessment:
     )
 
 
-def _unavailable_ai_result() -> AnalysisResult:
+def _unavailable_ai_result(*, complex_mode: bool = False) -> AnalysisResult:
     """Represent an independently unavailable AI-origin branch without inventing a score."""
     return AnalysisResult(
         verdict=Verdict.UNCERTAIN,
@@ -472,6 +469,7 @@ def _unavailable_ai_result() -> AnalysisResult:
         media_type=MediaType.TEXT,
         semantics_version=2,
         ai_status="unavailable",
+        analysis_mode="complex" if complex_mode else None,
     )
 
 
@@ -528,6 +526,52 @@ async def _analyze_combined_normal_text(
         else credibility_outcome
     )
     return ai_result.model_copy(update={
+        "credibility": credibility,
+        "short_report": build_combined_text_report(ai_result, credibility),
+    })
+
+
+async def _analyze_complex_text(text: str, diagnostic_log: Any) -> AnalysisResult:
+    """Run the two independent expanded Gemini branches, with no legacy Hybrid providers."""
+    text_bytes = text.encode("utf-8")
+    ai_started = time.monotonic()
+    ai_diagnostic = _branch_diagnostic(diagnostic_log, "ai_origin") if diagnostic_log is not None else None
+
+    async def _run_ai_branch() -> AnalysisResult:
+        return await GeminiTextAdapter().analyze(text_bytes, diagnostic_log=ai_diagnostic, complex_mode=True)
+
+    async def _run_credibility_branch() -> CredibilityAssessment:
+        started = time.monotonic()
+        assessment = await GeminiCredibilityAdapter().analyze(
+            text_bytes, diagnostic_log=diagnostic_log, complex_mode=True,
+        )
+        return assessment.model_copy(update={
+            "processing_ms": max(0, min(60_000, round((time.monotonic() - started) * 1000))),
+        })
+
+    ai_outcome, credibility_outcome = await asyncio.gather(
+        _run_ai_branch(), _run_credibility_branch(), return_exceptions=True,
+    )
+    _safe_diagnostic_log(
+        diagnostic_log, "branch=ai_origin stage=branch_"
+        + ("error" if isinstance(ai_outcome, BaseException) else "success")
+        + f" elapsed_ms={round((time.monotonic() - ai_started) * 1000)}",
+    )
+    _safe_diagnostic_log(
+        diagnostic_log, "branch=credibility stage=branch_"
+        + ("error" if isinstance(credibility_outcome, BaseException) else "success"),
+    )
+    provider_errors = (ProviderInfrastructureError, ExternalAPIError)
+    if isinstance(ai_outcome, BaseException) and not isinstance(ai_outcome, provider_errors):
+        raise ai_outcome
+    if isinstance(credibility_outcome, BaseException) and not isinstance(credibility_outcome, provider_errors):
+        raise credibility_outcome
+    if isinstance(ai_outcome, BaseException) and isinstance(credibility_outcome, BaseException):
+        raise ai_outcome
+    ai_result = _unavailable_ai_result(complex_mode=True) if isinstance(ai_outcome, BaseException) else ai_outcome
+    credibility = _unavailable_credibility() if isinstance(credibility_outcome, BaseException) else credibility_outcome
+    return ai_result.model_copy(update={
+        "analysis_mode": "complex",
         "credibility": credibility,
         "short_report": build_combined_text_report(ai_result, credibility),
     })
@@ -626,7 +670,7 @@ async def _analyze(
             ) if quota_store is not None and account_created_at is not None else None
         )
         if mode:
-            result = await _with_quota(lambda: hybrid_analyzer.analyze(text), admission_plan)
+            result = await _with_quota(lambda: _analyze_complex_text(text, diagnostic_log), admission_plan)
         else:
             result = await _with_quota(lambda: _analyze_combined_normal_text(router, text, diagnostic_log), admission_plan)
     else:

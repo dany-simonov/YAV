@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from api.schemas import AnalysisResult
+from api.schemas import AnalysisResult, CredibilityAssessment
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from router.media_router import MediaRouter
@@ -72,32 +72,32 @@ async def test_short_text_gemini_result_consumes_quota_once():
 
 
 @pytest.mark.asyncio
-async def test_completed_hybrid_result_consumes_quota_once():
+async def test_completed_complex_result_consumes_quota_once():
     store = _QuotaStore()
-    hybrid_result = {
-        "verdict": "clean",
-        "ai_verdict": "REAL",
-        "ai_confidence": 0.1,
-        "fact_checks": [],
-        "tokens": [],
-    }
-    with patch("src.main.hybrid_analyzer.analyze", new=AsyncMock(return_value=hybrid_result)):
+    credibility = CredibilityAssessment(
+        status="completed", credibility_index=80, verdict="MOSTLY_CREDIBLE", confidence=0.8, summary="Проверка завершена."
+    )
+    with patch("src.main.GeminiTextAdapter.analyze", new=AsyncMock(return_value=_result(Verdict.REAL))) as text, patch(
+        "src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(return_value=credibility)
+    ) as credibility_branch:
         result = await _analyze(
             TextAnalyzeRequest(text="x" * 200, mode="hybrid_text"),
             "jwt",
             quota_store=store,
             user_id="user",
         )
-    assert result["verdict"] == "clean"
+    assert result["verdict"] == "REAL"
+    assert result["analysis_mode"] == "complex"
+    text.assert_awaited_once()
+    credibility_branch.assert_awaited_once()
     assert store.transitions == ["consumed"]
 
 
 @pytest.mark.asyncio
-async def test_terminal_hybrid_technical_failure_refunds_quota_once():
+async def test_terminal_complex_technical_failure_refunds_quota_once():
     store = _QuotaStore()
-    with patch(
-        "src.main.hybrid_analyzer.analyze",
-        new=AsyncMock(side_effect=ProviderInfrastructureError("sapling", "timeout")),
+    with patch("src.main.GeminiTextAdapter.analyze", new=AsyncMock(side_effect=ProviderInfrastructureError("gemini", "timeout"))), patch(
+        "src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(side_effect=ProviderInfrastructureError("gemini", "timeout"))
     ):
         with pytest.raises(ProviderInfrastructureError):
             await _analyze(

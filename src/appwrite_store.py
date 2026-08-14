@@ -190,6 +190,10 @@ def _serialize_canonical_details(result: AnalysisResult) -> str:
         details["provider_evidence_v2"] = evidence_details
     if result.short_report is not None:
         details["short_report"] = result.short_report
+    if result.analysis_mode is not None:
+        details["analysis_mode"] = result.analysis_mode
+    if result.ai_details is not None:
+        details["ai_details"] = result.ai_details.model_dump(mode="json")
     if result.ai_status == "unavailable":
         details["ai_status"] = result.ai_status
     if result.credibility is not None:
@@ -277,20 +281,38 @@ def _compact_credibility_details(details: dict[str, Any]) -> str | None:
         key=lambda item: severity_rank.get(item.get("severity"), 3),
     )
 
-    # Try high-to-low issue prefixes; each candidate retains cited sources
-    # before optional sources and repairs every source_refs index.
+    ai_details = details.get("ai_details")
+    signals = ai_details.get("signals") if isinstance(ai_details, dict) else []
+    ordered_signals = sorted(
+        (item for item in signals if isinstance(item, dict)),
+        key=lambda item: severity_rank.get(item.get("severity"), 3),
+    ) if isinstance(signals, list) else []
+    credible_points = credibility.get("credible_points")
+    points = [item for item in credible_points if isinstance(item, str)] if isinstance(credible_points, list) else []
+
+    # Retain the most severe issues and signals first.  The canonical score
+    # fields live in columns; summaries and reduced, valid evidence remain in
+    # details rather than replacing the entire report with a truncation marker.
     for issue_count in range(len(ordered_issues), -1, -1):
         candidate_credibility = dict(credibility)
         candidate_credibility["issues"] = ordered_issues[:issue_count]
         priority = _credibility_priority_indexes(candidate_credibility)
-        for source_count in range(len(priority), -1, -1):
-            candidate = dict(base)
-            candidate["credibility"] = _compact_credibility_sources(
-                candidate_credibility, priority[:source_count]
-            )
-            encoded = _encode_details(candidate)
-            if encoded is not None:
-                return encoded
+        for signal_count in range(len(ordered_signals), -1, -1):
+            for point_count in range(len(points), -1, -1):
+                for source_count in range(len(priority), -1, -1):
+                    candidate = dict(base)
+                    compacted_credibility = _compact_credibility_sources(
+                        candidate_credibility, priority[:source_count]
+                    )
+                    compacted_credibility["credible_points"] = points[:point_count]
+                    candidate["credibility"] = compacted_credibility
+                    if isinstance(ai_details, dict):
+                        compacted_ai = dict(ai_details)
+                        compacted_ai["signals"] = ordered_signals[:signal_count]
+                        candidate["ai_details"] = compacted_ai
+                    encoded = _encode_details(candidate)
+                    if encoded is not None:
+                        return encoded
     return None
 
 

@@ -37,6 +37,7 @@ export interface CredibilityAssessment {
   processing_ms?: number | null;
   summary: string;
   issues: CredibilityIssue[];
+  credible_points?: string[];
   sources: CredibilitySource[];
 }
 
@@ -57,6 +58,8 @@ export interface Check {
   short_report?: string | null;
   credibility?: CredibilityAssessment | null;
   ai_status?: 'completed' | 'unavailable';
+  analysis_mode?: 'complex';
+  ai_details?: AIOriginDetails | null;
 }
 
 export interface CheckResult {
@@ -70,7 +73,12 @@ export interface CheckResult {
   short_report?: string | null;
   credibility?: CredibilityAssessment | null;
   ai_status?: 'completed' | 'unavailable';
+  analysis_mode?: 'complex';
+  ai_details?: AIOriginDetails | null;
 }
+
+export interface AIOriginSignal { type: string; severity: 'LOW' | 'MEDIUM' | 'HIGH'; title: string; explanation: string; }
+export interface AIOriginDetails { signals: AIOriginSignal[]; human_signals: string[]; }
 
 // Backward-compatible type for older components/hooks.
 export interface AnalyzeResult {

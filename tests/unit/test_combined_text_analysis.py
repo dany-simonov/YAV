@@ -8,7 +8,7 @@ import pytest
 from api.schemas import AnalysisResult, CredibilityAssessment
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ProviderInfrastructureError
-from src.main import _analyze, _analyze_combined_normal_text, _execute_request
+from src.main import _analyze, _analyze_combined_normal_text, _analyze_complex_text, _execute_request
 from src.validation import SecurityValidationError, validate_request_payload
 
 
@@ -55,6 +55,34 @@ async def test_combined_normal_text_runs_branches_concurrently_and_returns_one_r
     assert result.credibility.processing_ms >= 0
     assert "34/100" in (result.short_report or "")
     router.route.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_complex_text_runs_exactly_two_parallel_gemini_branches():
+    ai_started = asyncio.Event()
+    credibility_started = asyncio.Event()
+
+    async def ai_branch(*_args, **kwargs):
+        assert kwargs["complex_mode"] is True
+        ai_started.set()
+        await asyncio.wait_for(credibility_started.wait(), timeout=0.2)
+        return _ai_result().model_copy(update={"analysis_mode": "complex"})
+
+    async def credibility_branch(*_args, **kwargs):
+        assert kwargs["complex_mode"] is True
+        credibility_started.set()
+        await asyncio.wait_for(ai_started.wait(), timeout=0.2)
+        return _credibility_result()
+
+    with patch("src.main.GeminiTextAdapter.analyze", new=AsyncMock(side_effect=ai_branch)) as text, patch(
+        "src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(side_effect=credibility_branch)
+    ) as credibility:
+        result = await _analyze_complex_text("длинный текст " * 100, None)
+
+    assert result.analysis_mode == "complex"
+    assert result.credibility is not None and result.credibility.status == "completed"
+    text.assert_awaited_once()
+    credibility.assert_awaited_once()
 
 
 @pytest.mark.asyncio

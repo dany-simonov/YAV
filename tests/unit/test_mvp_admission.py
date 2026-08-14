@@ -48,6 +48,15 @@ def test_long_text_uses_actual_aiornot_words_and_one_gemini_operation(monkeypatc
     assert plan.units_for("gemini") == 1
 
 
+def test_complex_text_has_no_sapling_or_aiornot_and_exactly_two_gemini_operations(monkeypatch):
+    plan = _plan(monkeypatch, text="word " * 100, hybrid=True)
+    names = {item.dimension for item in plan.dimensions}
+    assert plan.units_for("gemini") == 2
+    assert plan.units_for("sapling") == 0
+    assert plan.units_for("aiornot") == 0
+    assert "global_gemini_daily" in names
+
+
 @pytest.mark.parametrize(
     ("media_type", "dimension"),
     [("image", "new_user_image_daily"), ("audio", "new_user_audio_72h"), ("video", "new_user_video_first7d")],

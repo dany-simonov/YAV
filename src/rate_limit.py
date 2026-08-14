@@ -802,7 +802,8 @@ def build_admission_plan(
     provider_units: list[tuple[str, int]] = []
     if kind == MediaType.TEXT:
         if hybrid:
-            provider_units.append(("sapling", len(text)))
+            # Complex text has exactly its two parallel Gemini branches.
+            provider_units.append(("gemini", 2))
         else:
             # This mirrors MediaRouter: eligible text goes to AIOrNot while
             # every normal text request has exactly one Gemini credibility call.

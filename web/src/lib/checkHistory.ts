@@ -1,7 +1,7 @@
 import { AppwriteException, Query, type Models } from 'appwrite';
 
 import { APPWRITE_CONFIG, tablesDB } from './appwrite';
-import type { Check, CredibilityAssessment, MediaType, Verdict } from '../types';
+import type { AIOriginDetails, Check, CredibilityAssessment, MediaType, Verdict } from '../types';
 import { displayModelName } from './resultPresentation';
 
 const MAX_ITEMS = 200;
@@ -67,6 +67,8 @@ export function mapHistoryRow(row: CheckRow): Check {
     short_report: details.short_report,
     credibility: details.credibility,
     ai_status: details.ai_status,
+    analysis_mode: details.analysis_mode,
+    ai_details: details.ai_details,
   };
 }
 
@@ -74,6 +76,8 @@ function parseDetails(value: string | null | undefined): {
   short_report?: string;
   credibility?: CredibilityAssessment;
   ai_status?: 'completed' | 'unavailable';
+  analysis_mode?: 'complex';
+  ai_details?: AIOriginDetails;
 } {
   if (typeof value !== 'string' || value.length > 16_384) return {};
   try {
@@ -85,10 +89,18 @@ function parseDetails(value: string | null | undefined): {
       short_report: typeof item.short_report === 'string' ? item.short_report : undefined,
       credibility: isCredibilityAssessment(credibility) ? credibility : undefined,
       ai_status: item.ai_status === 'unavailable' ? 'unavailable' : undefined,
+      analysis_mode: item.analysis_mode === 'complex' ? 'complex' : undefined,
+      ai_details: isAIOriginDetails(item.ai_details) ? item.ai_details : undefined,
     };
   } catch {
     return {};
   }
+}
+
+function isAIOriginDetails(value: unknown): value is AIOriginDetails {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Record<string, unknown>;
+  return Array.isArray(item.signals) && Array.isArray(item.human_signals);
 }
 
 function isCredibilityAssessment(value: unknown): value is CredibilityAssessment {

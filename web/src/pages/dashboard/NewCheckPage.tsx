@@ -7,12 +7,13 @@
 import { useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  FileImage, FileText, Send, Loader2
+  FileImage, FileText, Send, Loader2, ScanSearch
 } from 'lucide-react';
 
 import { Card, Button, Alert } from '../../components/ui';
 import { FileDropzone, TextInput } from '../../components/upload';
 import { CheckResultCard } from '../../components/CheckResultCard';
+import { ComplexTextCheck } from './BigTextCheckPage';
 import { cn } from '../../lib/utils';
 import { functions, storage, ID, APPWRITE_CONFIG } from '../../lib/appwrite';
 import {
@@ -43,6 +44,8 @@ export function NewCheckPage() {
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [text, setText] = useState('');
+  const [checkMode, setCheckMode] = useState<'standard' | 'complex'>('standard');
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,6 +126,15 @@ export function NewCheckPage() {
     resetState();
   }, []);
 
+  const handleCheckSwipeEnd = (endX: number) => {
+    if (touchStartX === null) return;
+
+    const distance = endX - touchStartX;
+    if (distance > 50) setCheckMode('complex');
+    if (distance < -50) setCheckMode('standard');
+    setTouchStartX(null);
+  };
+
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
     : text.trim().length >= 1 && text.length <= 10000;
@@ -162,6 +174,7 @@ export function NewCheckPage() {
           firstName: user.name.split(' ')[0] || '',
           mediaType,
           sourceLabel: fileToUpload.name,
+          ...(checkMode === 'complex' ? { mode: 'complex_media' } : {}),
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else if (activeTab === 'text') {
@@ -257,32 +270,82 @@ export function NewCheckPage() {
           ))}
         </div>
 
+        <div className="px-4 pt-4">
+          <div className="inline-flex rounded-xl border border-mv-border bg-mv-surface-2 p-1">
+            <button
+              type="button"
+              onClick={() => setCheckMode('standard')}
+              className={cn('rounded-lg px-3 py-2 text-sm font-medium transition-colors', checkMode === 'standard' ? 'bg-white text-mv-text shadow-sm' : 'text-mv-text-muted hover:text-mv-text')}
+            >
+              Обычная проверка
+            </button>
+            <button
+              type="button"
+              onClick={() => setCheckMode('complex')}
+              className={cn('rounded-lg px-3 py-2 text-sm font-medium transition-colors', checkMode === 'complex' ? 'bg-white text-mv-text shadow-sm' : 'text-mv-text-muted hover:text-mv-text')}
+            >
+              Комплексная
+            </button>
+          </div>
+        </div>
+
         <div className="p-4 sm:p-6">
           {activeTab === 'media' ? (
-            <FileDropzone
-              files={files}
-              onFilesSelected={handleFilesSelected}
-              onRemoveFile={handleRemoveFile}
-              disabled={isAnalyzing}
-              maxFiles={1}
-            />
+            <div
+              onTouchStart={(event) => setTouchStartX(event.touches[0]?.clientX ?? null)}
+              onTouchEnd={(event) => handleCheckSwipeEnd(event.changedTouches[0]?.clientX ?? 0)}
+            >
+              <FileDropzone
+                files={files}
+                onFilesSelected={handleFilesSelected}
+                onRemoveFile={handleRemoveFile}
+                disabled={isAnalyzing}
+                maxFiles={1}
+              />
+              {checkMode === 'complex' && (
+                <div className="mt-4 flex gap-3 rounded-xl border border-mv-border bg-mv-surface-2 p-4 text-sm leading-6 text-mv-text-secondary">
+                  <ScanSearch className="mt-0.5 shrink-0 text-mv-text" size={18} />
+                  <p><span className="font-semibold text-mv-text">Комплексная проверка файла.</span> Вместе с оценкой ИИ-признаков будут учтены структура файла, метаданные и доступные технические сигналы.</p>
+                </div>
+              )}
+            </div>
           ) : (
-            <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
+            <div
+              onTouchStart={(event) => setTouchStartX(event.touches[0]?.clientX ?? null)}
+              onTouchEnd={(event) => handleCheckSwipeEnd(event.changedTouches[0]?.clientX ?? 0)}
+            >
+              <div className="overflow-hidden">
+                <div
+                  className="flex w-[200%] transition-transform duration-300 ease-out"
+                  style={{ transform: checkMode === 'standard' ? 'translateX(0)' : 'translateX(-50%)' }}
+                >
+                  <div className="w-1/2 pr-3">
+                    <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
+                  </div>
+                  <div className="w-1/2 pl-3">
+                    <ComplexTextCheck />
+                  </div>
+                </div>
+              </div>
+              <p className="mt-4 text-xs text-mv-text-muted">Свайпните вправо, чтобы открыть комплексную проверку: ИИ-признаки, фактчекинг и заимствования.</p>
+            </div>
           )}
         </div>
 
-        <div className="px-6 py-4 bg-[#fafaf9] border-t border-mv-border flex items-center justify-between">
-          <p className="text-sm text-mv-text-muted">
-            {activeTab === 'media' ? `${files.length} файл(ов) выбрано` : `${text.length} символов`}
-          </p>
-          <Button
-            onClick={handleSubmit}
-            disabled={!canSubmit || isAnalyzing}
-            leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          >
-            {isAnalyzing ? 'Анализ...' : 'Запустить проверку'}
-          </Button>
-        </div>
+        {!(activeTab === 'text' && checkMode === 'complex') && (
+          <div className="px-6 py-4 bg-[#fafaf9] border-t border-mv-border flex items-center justify-between">
+            <p className="text-sm text-mv-text-muted">
+              {activeTab === 'media' ? `${files.length} файл(ов) выбрано` : `${text.length} символов`}
+            </p>
+            <Button
+              onClick={handleSubmit}
+              disabled={!canSubmit || isAnalyzing}
+              leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+            >
+              {isAnalyzing ? 'Анализ...' : 'Запустить проверку'}
+            </Button>
+          </div>
+        )}
       </Card>
       
       {error && <Alert variant="error" title="Ошибка анализа">{error}</Alert>}

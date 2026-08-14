@@ -134,6 +134,7 @@ class FileAnalyzeRequest(_RequestModel):
     action: Literal["analyze"] = "analyze"
     file_id: str = Field(alias="fileId")
     media_type: Literal["image", "audio", "video"] | None = Field(default=None, alias="mediaType")
+    mode: Literal["complex_media"] | None = None
     source_label: str | None = Field(default=None, alias="sourceLabel")
 
     @model_validator(mode="after")

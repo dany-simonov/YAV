@@ -184,7 +184,7 @@ export interface UploadFile {
 // UI Types
 // ============================================================================
 
-export type TabType = 'media' | 'text';
+export type TabType = 'media' | 'text' | 'complex';
 
 export interface Tab {
   id: TabType;

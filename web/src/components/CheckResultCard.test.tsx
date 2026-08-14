@@ -34,7 +34,9 @@ describe('CheckResultCard short report', () => {
 
     expect(markup).toContain('Итог');
     expect(markup).toContain('Уверенность модели: 96%');
-    expect(markup).toContain('Уверенность модели: 80%');
+    expect(markup).toContain('Достоверность: 80%');
+    expect(markup).toContain('03 · Достоверность');
+    expect(markup).toContain('03 · Уверенность модели');
     expect(markup).toContain('Высокая значимость');
     expect(markup).toContain('Средняя значимость');
     expect(markup).toContain('Что говорит в пользу человеческого авторства');
@@ -165,6 +167,20 @@ describe('CheckResultCard short report', () => {
 
     expect(markup).toContain('>95<span');
     expect(markup).not.toContain('>90<span');
+  });
+
+  it('uses достоверность only for video-result confidence while preserving image copy', () => {
+    const markup = renderToStaticMarkup(<CheckResultCard result={result({
+      analysis_mode: 'complex',
+      complex_media: [
+        { kind: 'video', origin: 'manual', ordinal: 1, status: 'completed', authenticity_index: 95, verdict: 'REAL', confidence: 0.9, model: 'gemini_video_verification' },
+        { kind: 'image', origin: 'manual', ordinal: 2, status: 'completed', authenticity_index: 88, verdict: 'REAL', confidence: 0.8, model: 'sightengine' },
+      ],
+    })} />);
+
+    expect(markup).toContain('Индекс подлинности: 95% · достоверность 90%');
+    expect(markup).toContain('Индекс подлинности: 88% · уверенность 80%');
+    expect(markup).not.toContain('Индекс подлинности: 95% · уверенность 90%');
   });
 
   it('renders a canonical Gemini TEXT index and readable model name directly', () => {

@@ -88,6 +88,11 @@ export interface ResearchCase {
   finalText: string;
   classification: string;
   finalScores: Array<{ label: string; value: string }>;
+  textAiCheck: {
+    score: number;
+    verdict: string;
+    explanation: string;
+  };
   sources: ResearchSource[];
   benchmarkModelResult: boolean;
 }
@@ -217,6 +222,11 @@ export const researchCases: ResearchCase[] = [
       { label: 'Достоверность статьи', value: '8/10' },
       { label: 'Реализуемость проекта', value: '4–5/10' },
     ],
+    textAiCheck: {
+      score: 8,
+      verdict: 'Явных признаков ИИ-генерации не найдено',
+      explanation: 'Текст Reuters построен как редакционная новость: содержит конкретные атрибуции, дату, имена и разделяет заявления источников от фактов. Это не доказывает авторство человека, но не даёт сильных признаков автоматической генерации.',
+    },
     sources: [
       {
         title: 'Russia has begun designing nuclear-powered submarines to export gas',
@@ -356,6 +366,11 @@ export const researchCases: ResearchCase[] = [
       { label: 'Достоверность центральной гипотезы', value: '3.4/10' },
       { label: 'Соответствие научному консенсусу', value: '2.2/10' },
     ],
+    textAiCheck: {
+      score: 1,
+      verdict: 'Признаки современной ИИ-генерации не обнаружены',
+      explanation: 'Статья опубликована в 2007 году — до распространения современных генеративных моделей. Научная структура, формулы и ссылки соответствуют академической публикации; это не оценка научной достоверности её гипотезы.',
+    },
     sources: [
       {
         title: 'Arctic East Siberia had a lower latitude in the Pleistocene',
@@ -488,6 +503,11 @@ export const researchCases: ResearchCase[] = [
       { label: 'Общая достоверность', value: '5.8/10' },
       { label: 'Сенсационность подачи', value: '8.6/10' },
     ],
+    textAiCheck: {
+      score: 16,
+      verdict: 'Признаки ИИ-генерации слабые',
+      explanation: 'Сенсационная подача и эмоциональные формулировки характерны для таблоидной заметки, но сами по себе не указывают на ИИ. В тексте есть проверяемые детали: место находки, дата и цепочка последующих публикаций.',
+    },
     sources: [
       {
         title: 'Bizarre mummified “monster” unearthed by diamond miners in Siberia',
@@ -640,6 +660,11 @@ export const researchCases: ResearchCase[] = [
       { label: 'Общая достоверность', value: '0.7/10' },
       { label: 'Уверенность в вердикте', value: '9.6/10' },
     ],
+    textAiCheck: {
+      score: 12,
+      verdict: 'Явных признаков ИИ-генерации не найдено',
+      explanation: 'История опубликована в 2014 году и имеет признаки вторичного пересказа: повторяет неподтверждённые детали и ссылается на другие медиа. Это говорит о слабой проверке фактов, но не является доказательством генерации текста ИИ.',
+    },
     sources: [
       {
         title: 'Гигантский монстр напал на учёных в глубинах Арктики',

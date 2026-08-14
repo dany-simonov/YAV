@@ -1,4 +1,5 @@
 import { ArrowLeft, ArrowRight, Map } from 'lucide-react';
+import { useEffect } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
 import { ResearchCaseView } from '../components/research/ResearchCaseView';
@@ -82,6 +83,13 @@ export function ArcticResearch() {
 export function ResearchCasePage() {
   const { caseSlug } = useParams();
   const researchCase = getResearchCase(caseSlug);
+
+  // React Router keeps the previous scroll position between pages, so every
+  // research case deliberately opens from its title rather than from the card
+  // that was clicked in the list.
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [caseSlug]);
 
   if (!researchCase) {
     return (

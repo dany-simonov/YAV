@@ -270,6 +270,31 @@ export function ResearchCaseView({ researchCase }: { researchCase: ResearchCase 
           </div>
         </section>
 
+        <section className="border-t border-black/[.09] py-16 lg:py-24" aria-labelledby={`ai-text-${researchCase.number}`}>
+          <div className="grid gap-10 lg:grid-cols-[.75fr_1.25fr] lg:gap-20">
+            <div>
+              <p className="eyebrow">Проверка текста</p>
+              <h2 id={`ai-text-${researchCase.number}`} className="section-title mt-5">Написан ли текст ИИ?</h2>
+            </div>
+            <div className="rounded-2xl border border-black/[.09] bg-white p-7 sm:p-9">
+              <div className="flex flex-wrap items-end justify-between gap-6">
+                <div>
+                  <p className="text-sm font-semibold">{researchCase.textAiCheck.verdict}</p>
+                  <p className="mt-3 max-w-2xl text-sm leading-6 text-mv-text-secondary">{researchCase.textAiCheck.explanation}</p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <strong className="text-5xl leading-none tracking-[-.06em]">{researchCase.textAiCheck.score}%</strong>
+                  <p className="mt-2 text-[11px] font-semibold uppercase tracking-[.08em] text-mv-text-muted">вероятность ИИ</p>
+                </div>
+              </div>
+              <div className="mt-7 h-1.5 overflow-hidden rounded-full bg-black/[.06]">
+                <div className="h-full rounded-full bg-black" style={{ width: `${researchCase.textAiCheck.score}%` }} />
+              </div>
+              <p className="mt-4 text-xs leading-5 text-mv-text-muted">Это оценка языковых признаков, а не способ достоверно установить автора текста.</p>
+            </div>
+          </div>
+        </section>
+
         <section className="border-t border-black/[.09] py-16 lg:py-24" aria-labelledby={`comparison-${researchCase.number}`}>
           <p className="eyebrow">Главное сравнение</p>
           <h2 id={`comparison-${researchCase.number}`} className="section-title mt-5 max-w-4xl">{researchCase.comparisonTitle}</h2>

@@ -16,6 +16,8 @@ from typing import Any
 import httpx
 
 from src.validation import SecurityValidationError
+from core.config import settings
+from core.enums import MediaType
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,32 @@ class RateLimitError(Exception):
 class Window:
     key: str
     end: datetime
+
+
+@dataclass(frozen=True)
+class AdmissionDimension:
+    """One bounded counter change staged as part of an admission."""
+
+    dimension: str
+    subject: str
+    window: Window
+    units: int
+    limit: int
+    error_code: str
+    error_detail: str
+
+
+@dataclass(frozen=True)
+class AdmissionPlan:
+    """All known counter changes for a single analysis request."""
+
+    user_id: str
+    dimensions: tuple[AdmissionDimension, ...]
+    provider_units: tuple[tuple[str, int], ...] = ()
+    create_reservation: bool = True
+
+    def units_for(self, provider: str) -> int:
+        return sum(units for name, units in self.provider_units if name == provider)
 
 
 def normalize_client_ip(value: str) -> str:
@@ -288,6 +316,139 @@ class AppwriteTablesRateLimitStore:
     def ip_subject(self, raw_ip: str) -> str:
         return hmac.new(self.secret.encode(), normalize_client_ip(raw_ip).encode(), hashlib.sha256).hexdigest()[:48]
 
+    def _quota_error(self, dimension: AdmissionDimension) -> RateLimitError:
+        retry_after = max(1, int((dimension.window.end - self.now).total_seconds()))
+        return RateLimitError(
+            dimension.error_code, dimension.error_detail, 429 if dimension.error_code != "provider_temporarily_unavailable" else 503,
+            retry_after if dimension.error_code != "provider_temporarily_unavailable" else None,
+        )
+
+    async def admit(self, plan: AdmissionPlan) -> None:
+        """Atomically spend every known quota dimension before provider I/O.
+
+        A transaction is retried only for write conflicts.  Capacity, malformed
+        Appwrite replies, timeouts and 5xx responses all fail closed.
+        """
+        if not self.enabled:
+            return
+        if not plan.dimensions:
+            return
+        for item in plan.dimensions:
+            if item.units <= 0 or item.limit <= 0 or item.units > item.limit:
+                raise self._quota_unavailable("quota.admission.plan", quota_dimension=item.dimension)
+
+        rows = f"{self.endpoint}/tablesdb/{self.database}/tables/{self.table}/rows"
+        reservations = f"{self.endpoint}/tablesdb/{self.database}/tables/{self.reservations_table}/rows"
+        transactions = f"{self.endpoint}/tablesdb/transactions"
+        headers = {"X-Appwrite-Project": self.project, "X-Appwrite-Key": self.api_key}
+        reservation_id = uuid.uuid4().hex
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for attempt in range(3):
+                    created_transaction = await client.post(
+                        transactions, headers=headers, json={"ttl": self.TRANSACTION_TTL_SECONDS},
+                    )
+                    if created_transaction.status_code not in (200, 201):
+                        raise self._transaction_create_unavailable(response=created_transaction, user_id=plan.user_id)
+                    try:
+                        transaction_id = created_transaction.json().get("$id")
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        raise self._transaction_create_unavailable(exc=exc, user_id=plan.user_id) from exc
+                    if not isinstance(transaction_id, str) or not transaction_id:
+                        raise self._transaction_create_unavailable(response=created_transaction, user_id=plan.user_id)
+
+                    conflict = False
+                    for item in plan.dimensions:
+                        row_id = self._row_id(item.dimension, item.subject, item.window.key)
+                        data = {
+                            "dimension": item.dimension,
+                            "subject": item.subject,
+                            "window_start": item.window.key,
+                            "window_end": item.window.end.isoformat(),
+                            "count": item.units,
+                        }
+                        current = await client.get(
+                            f"{rows}/{row_id}", headers=headers, params={"transactionId": transaction_id},
+                        )
+                        if current.status_code == 404:
+                            staged = await client.post(
+                                rows, headers=headers,
+                                json={"rowId": row_id, "data": data, "permissions": [], "transactionId": transaction_id},
+                            )
+                        elif current.status_code == 200:
+                            staged = await client.patch(
+                                f"{rows}/{row_id}/count/increment", headers=headers,
+                                json={"value": item.units, "max": item.limit, "transactionId": transaction_id},
+                            )
+                        else:
+                            await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                            raise self._quota_unavailable(
+                                "quota.admission.read", response=current, quota_dimension=item.dimension, row_id=row_id, data=data,
+                            )
+
+                        error_type = self._appwrite_error_type(staged)
+                        if staged.status_code == 409:
+                            conflict = True
+                            break
+                        if staged.status_code == 400 and error_type in {
+                            "row_max_exceeded", "attribute_limit_exceeded", "column_limit_exceeded",
+                        }:
+                            await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                            raise self._quota_error(item)
+                        if staged.status_code not in (200, 201):
+                            await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                            raise self._quota_unavailable(
+                                "quota.admission.stage", response=staged, quota_dimension=item.dimension, row_id=row_id, data=data,
+                            )
+                    if conflict:
+                        await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                        continue
+
+                    if plan.create_reservation:
+                        reservation_data = {
+                            "user_id": plan.user_id,
+                            "quota_dimension": "admission",
+                            "window_start": _window(self.now, "day").key,
+                            "state": "consumed",
+                        }
+                        staged_reservation = await client.post(
+                            reservations, headers=headers,
+                            json={"rowId": reservation_id, "data": reservation_data, "permissions": [], "transactionId": transaction_id},
+                        )
+                        if staged_reservation.status_code == 409:
+                            # UUID collision is not an exhaustion signal; retry with a new reservation.
+                            reservation_id = uuid.uuid4().hex
+                            await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                            continue
+                        if staged_reservation.status_code not in (200, 201):
+                            await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                            raise self._quota_unavailable(
+                                "quota.admission.reservation", response=staged_reservation,
+                                quota_dimension="admission", row_id=reservation_id, data=reservation_data,
+                            )
+
+                    committed = await client.patch(
+                        f"{transactions}/{transaction_id}", headers=headers, json={"commit": True},
+                    )
+                    if committed.status_code == 200:
+                        return
+                    if committed.status_code == 409:
+                        continue
+                    await self._rollback_failed_transaction(client, transactions, transaction_id, headers)
+                    raise self._transaction_commit_unavailable(
+                        response=committed, quota_dimension="admission", row_id=reservation_id,
+                        data={"dimensions": len(plan.dimensions)}, user_id=plan.user_id,
+                    )
+        except httpx.HTTPError as exc:
+            raise self._quota_unavailable("quota.admission.transport", exc=exc) from exc
+        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+
+    async def admit_provider_units(self, provider: str, units: int) -> None:
+        """Spend an unplanned provider operation without charging user/IP quota."""
+        plan = _provider_plan(self, provider, units)
+        if plan.dimensions:
+            await self.admit(plan)
+
     async def consume(self, dimension: str, subject: str, period: str, limit: int) -> int:
         if not self.enabled:
             return 0
@@ -509,6 +670,156 @@ class QuotaReservation:
     dimension: str
     window: str
     state: str
+
+
+def _parse_created_at(value: Any) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503) from exc
+    if parsed.tzinfo is None:
+        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+    return parsed.astimezone(timezone.utc)
+
+
+def _anchored_window(created_at: datetime, now: datetime, hours: int) -> Window:
+    """A fixed account-anchored bucket; deliberately not a rolling window."""
+    index = max(0, int((now - created_at).total_seconds() // (hours * 3600)))
+    start = created_at + timedelta(hours=index * hours)
+    # Existing generic rows use a short ``window_start`` attribute.  The user
+    # subject makes this hour key unambiguous while the exact account-created
+    # timestamp still determines the bucket arithmetic above.
+    return Window(start.strftime("%Y-%m-%dT%H"), start + timedelta(hours=hours))
+
+
+def _dimension(
+    name: str, subject: str, window: Window, units: int, limit: int, code: str, detail: str,
+) -> AdmissionDimension:
+    return AdmissionDimension(name, subject, window, units, limit, code, detail)
+
+
+def _provider_plan(store: AppwriteTablesRateLimitStore, provider: str, units: int) -> AdmissionPlan:
+    if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
+        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+    now = store.now
+    day, month = _window(now, "day"), _window(now, "month")
+    unavailable = ("provider_temporarily_unavailable", "Проверка этого типа временно недоступна.")
+    if provider == "gemini":
+        items = [_dimension("global_gemini_daily", "global", day, units, settings.global_gemini_operations_daily, *unavailable)]
+    elif provider == "sightengine":
+        items = [
+            _dimension("global_sightengine_daily", "global", day, units, settings.global_sightengine_daily, *unavailable),
+            _dimension("global_sightengine_monthly", "global", month, units, settings.global_sightengine_monthly, *unavailable),
+        ]
+    elif provider == "aiornot":
+        items = [
+            _dimension("global_aiornot_words_daily", "global", day, units, settings.global_aiornot_words_daily, *unavailable),
+            _dimension("global_aiornot_words_monthly", "global", month, units, settings.global_aiornot_words_monthly, *unavailable),
+        ]
+    elif provider == "sapling":
+        items = [
+            _dimension("global_sapling_chars_daily", "global", day, units, settings.global_sapling_chars_daily, *unavailable),
+            _dimension("global_sapling_chars_monthly", "global", month, units, settings.global_sapling_chars_monthly, *unavailable),
+        ]
+    else:
+        items = []
+    return AdmissionPlan("provider-budget", tuple(items), ((provider, units),), create_reservation=False)
+
+
+def build_admission_plan(
+    store: AppwriteTablesRateLimitStore, *, user_id: str, client_ip: str, account_created_at: Any,
+    media_type: str, input_size: int, text: str = "", hybrid: bool = False,
+) -> AdmissionPlan:
+    """Build the whole request admission before any provider can be contacted."""
+    now = store.now
+    created_at = _parse_created_at(account_created_at)
+    is_new_user = now < created_at + timedelta(days=settings.new_user_period_days)
+    try:
+        kind = MediaType(media_type)
+    except ValueError as exc:
+        raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503) from exc
+    if input_size < 0:
+        raise SecurityValidationError("invalid_request", "Некорректный размер входных данных.")
+
+    # New-user input restrictions are checked before any quota is committed.
+    if is_new_user:
+        if kind == MediaType.TEXT:
+            maximum = settings.new_user_hybrid_max_chars if hybrid else settings.new_user_text_max_chars
+            if input_size > maximum:
+                raise SecurityValidationError("text_too_long", f"Текст превышает лимит в {maximum} символов.", 413)
+        else:
+            maximum = {
+                MediaType.IMAGE: settings.new_user_image_max_bytes,
+                MediaType.AUDIO: settings.new_user_audio_max_bytes,
+                MediaType.VIDEO: settings.new_user_video_max_bytes,
+            }[kind]
+            if input_size > maximum:
+                raise SecurityValidationError("file_too_large", "Файл превышает лимит для новых пользователей.", 413)
+
+    day = _window(now, "day")
+    dimensions: list[AdmissionDimension] = [
+        _dimension("ip_total_daily", store.ip_subject(client_ip), day, 1, settings.ip_total_daily,
+                   "daily_quota_exceeded", "Достигнут дневной лимит проверок."),
+    ]
+    if kind in {MediaType.IMAGE, MediaType.AUDIO, MediaType.VIDEO}:
+        dimensions.append(_dimension(
+            "ip_heavy_media_daily", store.ip_subject(client_ip), day, 1, settings.ip_heavy_media_daily,
+            "daily_quota_exceeded", "Достигнут дневной лимит проверок.",
+        ))
+
+    if is_new_user:
+        first7 = Window(
+            created_at.strftime("%Y-%m-%dT%H"),
+            created_at + timedelta(days=settings.new_user_period_days),
+        )
+        dimensions.extend((
+            _dimension("new_user_total_daily", user_id, day, 1, settings.new_user_total_daily,
+                       "daily_quota_exceeded", "Достигнут дневной лимит проверок."),
+            _dimension("new_user_total_first7d", user_id, first7, 1, settings.new_user_total_first_7d,
+                       "new_user_quota_exceeded", "Достигнут лимит проверок для новых пользователей."),
+        ))
+        if kind == MediaType.TEXT:
+            if hybrid:
+                dimensions.append(_dimension("new_user_hybrid_daily", user_id, day, 1, settings.new_user_hybrid_daily,
+                                             "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа."))
+            else:
+                dimensions.append(_dimension("new_user_text_daily", user_id, day, 1, settings.new_user_text_daily,
+                                             "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа."))
+        elif kind == MediaType.IMAGE:
+            dimensions.append(_dimension("new_user_image_daily", user_id, day, 1, settings.new_user_image_daily,
+                                         "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа."))
+        elif kind == MediaType.AUDIO:
+            dimensions.append(_dimension(
+                "new_user_audio_72h", user_id, _anchored_window(created_at, now, settings.new_user_audio_window_hours),
+                1, settings.new_user_audio_per_window, "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа.",
+            ))
+        elif kind == MediaType.VIDEO:
+            dimensions.append(_dimension("new_user_video_first7d", user_id, first7, 1, settings.new_user_video_first_7d,
+                                         "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа."))
+
+    provider_units: list[tuple[str, int]] = []
+    if kind == MediaType.TEXT:
+        if hybrid:
+            provider_units.append(("sapling", len(text)))
+        else:
+            # This mirrors MediaRouter: eligible text goes to AIOrNot while
+            # every normal text request has exactly one Gemini credibility call.
+            words = len(text.strip().split())
+            if len(text.strip()) >= 250 and words >= 64:
+                provider_units.append(("aiornot", words))
+            provider_units.append(("gemini", 1 if provider_units else 2))
+    elif kind == MediaType.IMAGE:
+        provider_units.append(("sightengine", 1))
+    elif kind == MediaType.VIDEO:
+        # Start-upload, finalize-upload and generateContent are known up front.
+        # Processing polls, if any, are admitted just before each request.
+        provider_units.append(("gemini", 3))
+
+    for provider, units in provider_units:
+        dimensions.extend(_provider_plan(store, provider, units).dimensions)
+    return AdmissionPlan(user_id, tuple(dimensions), tuple(provider_units))
 
 
 async def enforce_admission(store: AppwriteTablesRateLimitStore, user_id: str, client_ip: str) -> None:

@@ -41,6 +41,32 @@ class Settings(BaseSettings):
     free_daily_limit: int = 3
     premium_monthly_limit: int = 100
 
+    # Production MVP abuse protection.  These are deliberately server-side
+    # defaults: changing them needs no schema migration.
+    new_user_period_days: int = 7
+    new_user_total_daily: int = 4
+    new_user_total_first_7d: int = 10
+    new_user_text_daily: int = 3
+    new_user_hybrid_daily: int = 1
+    new_user_image_daily: int = 1
+    new_user_audio_window_hours: int = 72
+    new_user_audio_per_window: int = 1
+    new_user_video_first_7d: int = 1
+    ip_total_daily: int = 8
+    ip_heavy_media_daily: int = 2
+    new_user_text_max_chars: int = 5000
+    new_user_hybrid_max_chars: int = 3000
+    new_user_image_max_bytes: int = 5 * 1024 * 1024
+    new_user_audio_max_bytes: int = 5 * 1024 * 1024
+    new_user_video_max_bytes: int = 10 * 1024 * 1024
+    global_gemini_operations_daily: int = 100
+    global_sightengine_daily: int = 50
+    global_sightengine_monthly: int = 1500
+    global_aiornot_words_daily: int = 20_000
+    global_aiornot_words_monthly: int = 600_000
+    global_sapling_chars_daily: int = 20_000
+    global_sapling_chars_monthly: int = 120_000
+
     # FFmpeg / video
     max_video_duration_seconds: int = 60
     video_frame_sample_rate: int = 1

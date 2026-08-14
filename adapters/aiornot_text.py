@@ -135,7 +135,7 @@ class AIOrNotTextAdapter(BaseAdapter):
             raise ProviderInfrastructureError("aiornot", "unavailable")
 
         try:
-            await admit_provider_operation("aiornot")
+            await admit_provider_operation("aiornot", len(text.split()))
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(
                     self.URL,

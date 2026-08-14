@@ -38,28 +38,46 @@ class ProviderOperationBudget:
 
 
 _budget: ContextVar[ProviderOperationBudget | None] = ContextVar("provider_budget", default=None)
-_guard: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar("provider_guard", default=None)
+_guard: ContextVar[Callable[..., Awaitable[None]] | None] = ContextVar("provider_guard", default=None)
+_prepaid: ContextVar[dict[str, int] | None] = ContextVar("provider_prepaid", default=None)
 
 
-def begin_provider_budget(guard: Callable[[str], Awaitable[None]] | None = None) -> tuple[Token[ProviderOperationBudget | None], Token[Callable[[str], Awaitable[None]] | None]]:
-    return _budget.set(ProviderOperationBudget.from_environment()), _guard.set(guard)
+def begin_provider_budget(
+    guard: Callable[..., Awaitable[None]] | None = None, prepaid: dict[str, int] | None = None,
+) -> tuple[Token[ProviderOperationBudget | None], Token[Callable[..., Awaitable[None]] | None], Token[dict[str, int] | None]]:
+    return (
+        _budget.set(ProviderOperationBudget.from_environment()), _guard.set(guard),
+        _prepaid.set(None if prepaid is None else dict(prepaid)),
+    )
 
 
-def end_provider_budget(tokens: tuple[Token[ProviderOperationBudget | None], Token[Callable[[str], Awaitable[None]] | None]]) -> None:
-    _budget.reset(tokens[0]); _guard.reset(tokens[1])
+def end_provider_budget(tokens: tuple[Token[ProviderOperationBudget | None], Token[Callable[..., Awaitable[None]] | None], Token[dict[str, int] | None]]) -> None:
+    _budget.reset(tokens[0]); _guard.reset(tokens[1]); _prepaid.reset(tokens[2])
 
 
-async def admit_provider_operation(provider: str) -> None:
+async def admit_provider_operation(provider: str, units: int = 1) -> None:
+    if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
+        raise ProviderUnavailableError()
     budget = _budget.get()
     if budget is not None:
         try:
             budget.consume()
         except ProviderUnavailableError as exc:
             raise ProviderInfrastructureError(provider, "capacity") from exc
+    prepaid = _prepaid.get()
+    if prepaid is not None and prepaid.get(provider, 0) >= units:
+        prepaid[provider] -= units
+        return
     guard = _guard.get()
     if guard is not None:
         try:
-            await guard(provider)
+            # One-argument guards are the retired request-minute guard used by
+            # older unit paths.  Production admission always supplies prepaid
+            # units and therefore receives the exact provider units here.
+            if prepaid is None:
+                await guard(provider)
+            else:
+                await guard(provider, units)
         except RateLimitError as exc:
             # Only trusted guard codes are capacity infrastructure failures.
             # Do not infer semantics from an exception message.

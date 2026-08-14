@@ -6,7 +6,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { FileImage, FileText, Layers3, Send, Loader2, Clock, ShieldCheck } from 'lucide-react';
+import { FileImage, FileText, Layers3, Link2, Send, Loader2, Clock, ShieldCheck } from 'lucide-react';
 
 import { Card, Button, Alert } from '../../components/ui';
 import { FileDropzone, TextInput } from '../../components/upload';
@@ -23,7 +23,11 @@ import { displayModelName } from '../../lib/resultPresentation';
 import type { UploadFile, TabType, CheckResult } from '../../types';
 import {
   buildUnifiedComplexPayload,
+  COMPLEX_MAX_LENGTH,
+  COMPLEX_MIN_LENGTH,
+  COMPLEX_RECOMMENDED_RANGE,
   isComplexSourceSubmittable,
+  isComplexTextSubmittable,
 } from '../../lib/complexAnalysis';
 
 interface Tab {
@@ -47,7 +51,8 @@ export function NewCheckPage() {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [text, setText] = useState('');
   const [complexText, setComplexText] = useState('');
-  const [complexUserText, setComplexUserText] = useState('');
+  const [complexArticleUrl, setComplexArticleUrl] = useState('');
+  const [complexFiles, setComplexFiles] = useState<UploadFile[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CheckResult | null>(null);
@@ -79,6 +84,17 @@ export function NewCheckPage() {
   ) => {
     setFiles((prev) =>
       prev.map((f) => (f.id === id ? { ...f, status, progress, error: fileError } : f))
+    );
+  };
+
+  const setComplexFileStatus = (
+    id: string,
+    status: UploadFile['status'],
+    progress: number,
+    fileError?: string,
+  ) => {
+    setComplexFiles((previous) =>
+      previous.map((file) => (file.id === id ? { ...file, status, progress, error: fileError } : file)),
     );
   };
 
@@ -123,7 +139,7 @@ export function NewCheckPage() {
       prev.forEach((file) => {
         if (file.preview) URL.revokeObjectURL(file.preview);
       });
-      return activeTab === 'complex' ? [...prev, ...newFiles].slice(0, 4) : newFiles.slice(0, 1);
+      return newFiles.slice(0, 1);
     });
     resetState();
   }, []);
@@ -146,11 +162,34 @@ export function NewCheckPage() {
     resetState();
   }, []);
 
+  const handleComplexFilesSelected = useCallback((newFiles: UploadFile[]) => {
+    setComplexFiles((previous) => {
+      previous.forEach((file) => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+      return newFiles.slice(0, 4);
+    });
+    resetState();
+  }, []);
+
+  const handleComplexFileRemove = useCallback((id: string) => {
+    setComplexFiles((previous) => {
+      const file = previous.find((item) => item.id === id);
+      if (file?.preview) URL.revokeObjectURL(file.preview);
+      return previous.filter((item) => item.id !== id);
+    });
+    resetState();
+  }, []);
+
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
     : activeTab === 'text'
       ? text.trim().length >= 1 && text.length <= 10000
-      : (!isAnalyzing && (isComplexSourceSubmittable(complexText, false) || complexUserText.trim().length >= 200 || files.length > 0));
+      : !isAnalyzing && (
+        isComplexSourceSubmittable(complexArticleUrl, false)
+        || isComplexTextSubmittable(complexText, false)
+        || (complexFiles.length > 0 && complexFiles.every((file) => file.status !== 'uploading' && file.status !== 'analyzing'))
+      );
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;
@@ -165,15 +204,15 @@ export function NewCheckPage() {
 
       if (activeTab === 'complex') {
         const uploadedIds: string[] = [];
-        for (const fileRef of files) {
-          setFileStatus(fileRef.id, 'uploading', 35);
+        for (const fileRef of complexFiles) {
+          setComplexFileStatus(fileRef.id, 'uploading', 35);
           const uploaded = await storage.createFile(APPWRITE_CONFIG.buckets.uploads, ID.unique(), fileRef.file);
           uploadedIds.push(uploaded.$id);
-          setFileStatus(fileRef.id, 'analyzing', 70);
+          setComplexFileStatus(fileRef.id, 'analyzing', 70);
         }
         execution = await functions.createExecution(
           APPWRITE_CONFIG.functions.analyze,
-          JSON.stringify(buildUnifiedComplexPayload({ sourceUrl: complexText, text: complexUserText, fileIds: uploadedIds }, user)),
+          JSON.stringify(buildUnifiedComplexPayload({ sourceUrl: complexArticleUrl, text: complexText, fileIds: uploadedIds }, user)),
           false,
         );
         let responseBody = execution.responseBody || '';
@@ -201,7 +240,7 @@ export function NewCheckPage() {
           throw new AnalysisExecutionError(backendError);
         }
         setResult(normalizeFunctionResult(resultData, 'text'));
-        files.forEach((file) => setFileStatus(file.id, 'complete', 100));
+        complexFiles.forEach((file) => setComplexFileStatus(file.id, 'complete', 100));
         for (const fileId of uploadedIds) { try { await storage.deleteFile(APPWRITE_CONFIG.buckets.uploads, fileId); } catch { /* best effort */ } }
         return;
       }
@@ -290,7 +329,9 @@ export function NewCheckPage() {
     } catch (e) {
       const message = analysisErrorMessageFromUnknown(e);
       setError(message);
-      if (activeTab === 'media' && files.length > 0) {
+      if (activeTab === 'complex') {
+        complexFiles.forEach((file) => setComplexFileStatus(file.id, 'error', 0, message));
+      } else if (activeTab === 'media' && files.length > 0) {
         setFileStatus(files[0].id, 'error', 0, message);
       }
     } finally {
@@ -332,11 +373,11 @@ export function NewCheckPage() {
             <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
           ) : (
             <div className="space-y-5">
-              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Анализ публикации по ссылке</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Мы безопасно извлечём доступный текст, изображения и видео публичной страницы и проверим их существующими моделями.</p></div>
-              <label className="block"><span className="mb-2 block text-sm font-semibold">Ссылка на публикацию</span><input value={complexText} onChange={(event) => handleComplexTextChange(event.target.value)} disabled={isAnalyzing} type="url" placeholder="https://example.com/article" className="w-full rounded-xl border border-mv-border bg-white px-4 py-3 text-sm outline-none transition focus:border-black disabled:cursor-not-allowed disabled:opacity-50" /></label>
-              <TextInput value={complexUserText} onChange={setComplexUserText} disabled={isAnalyzing} minLength={200} maxLength={10000} meaningfulMinLength />
-              <FileDropzone files={files} onFilesSelected={handleFilesSelected} onRemoveFile={handleRemoveFile} disabled={isAnalyzing} maxFiles={4} />
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Поддерживаются публичные HTTP/HTTPS-страницы с доступным содержимым.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}>{isAnalyzing ? 'Идёт анализ...' : 'Запустить комплексный анализ'}</Button></div>
+              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Добавьте ссылку, текст и файл вместе</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Соберите контекст статьи в одной проверке: источник, фрагмент текста и изображение или другой медиафайл.</p></div>
+              <label className="block"><span className="mb-2 flex items-center gap-2 text-sm font-semibold"><Link2 size={16} /> Ссылка на статью</span><input value={complexArticleUrl} onChange={(event) => { setComplexArticleUrl(event.target.value); resetState(); }} disabled={isAnalyzing} type="url" placeholder="https://example.com/article" className="w-full rounded-xl border border-mv-border bg-white px-4 py-3 text-sm outline-none transition focus:border-black disabled:cursor-not-allowed disabled:opacity-50" /></label>
+              <TextInput value={complexText} onChange={handleComplexTextChange} minLength={COMPLEX_MIN_LENGTH} maxLength={COMPLEX_MAX_LENGTH} recommendedRange={COMPLEX_RECOMMENDED_RANGE} meaningfulMinLength disabled={isAnalyzing} />
+              <div><p className="mb-2 text-sm font-semibold">Файлы к материалу</p><FileDropzone files={complexFiles} onFilesSelected={handleComplexFilesSelected} onRemoveFile={handleComplexFileRemove} disabled={isAnalyzing} maxFiles={4} /></div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Минимум {COMPLEX_MIN_LENGTH} значимых символов, максимум {COMPLEX_MAX_LENGTH.toLocaleString()}.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}>{isAnalyzing ? 'Идёт анализ...' : 'Запустить анализ'}</Button></div>
               {isAnalyzing && <div className="flex items-center gap-2 rounded-lg border border-mv-border bg-mv-surface-2 p-4 text-mv-text-secondary"><Clock className="w-4 h-4" /><span>Комплексный анализ выполняется параллельно. Прошло: {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:{String(elapsedSeconds % 60).padStart(2, '0')}</span></div>}
             </div>
           )}

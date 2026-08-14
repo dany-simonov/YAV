@@ -6,14 +6,11 @@
 
 import { useState, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import {
-  FileImage, FileText, Send, Loader2, ScanSearch
-} from 'lucide-react';
+import { FileImage, FileText, Layers3, Link2, Send, Loader2 } from 'lucide-react';
 
 import { Card, Button, Alert } from '../../components/ui';
 import { FileDropzone, TextInput } from '../../components/upload';
 import { CheckResultCard } from '../../components/CheckResultCard';
-import { ComplexTextCheck } from './BigTextCheckPage';
 import { cn } from '../../lib/utils';
 import { functions, storage, ID, APPWRITE_CONFIG } from '../../lib/appwrite';
 import {
@@ -34,6 +31,7 @@ interface Tab {
 const tabs: Tab[] = [
   { id: 'media', label: 'Файл', icon: <FileImage className="w-4 h-4" /> },
   { id: 'text', label: 'Текст', icon: <FileText className="w-4 h-4" /> },
+  { id: 'complex', label: 'Комплексная проверка', icon: <Layers3 className="w-4 h-4" /> },
 ];
 
 export function NewCheckPage() {
@@ -44,8 +42,10 @@ export function NewCheckPage() {
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [text, setText] = useState('');
-  const [checkMode, setCheckMode] = useState<'standard' | 'complex'>('standard');
-  const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const [complexFiles, setComplexFiles] = useState<UploadFile[]>([]);
+  const [complexText, setComplexText] = useState('');
+  const [articleUrl, setArticleUrl] = useState('');
+  const [complexSubmitted, setComplexSubmitted] = useState(false);
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -126,18 +126,9 @@ export function NewCheckPage() {
     resetState();
   }, []);
 
-  const handleCheckSwipeEnd = (endX: number) => {
-    if (touchStartX === null) return;
-
-    const distance = endX - touchStartX;
-    if (distance > 50) setCheckMode('complex');
-    if (distance < -50) setCheckMode('standard');
-    setTouchStartX(null);
-  };
-
   const canSubmit = activeTab === 'media' 
     ? files.length > 0 && files.every((f) => f.status !== 'uploading' && f.status !== 'analyzing')
-    : text.trim().length >= 1 && text.length <= 10000;
+    : activeTab === 'text' && text.trim().length >= 1 && text.length <= 10000;
 
   const handleSubmit = async () => {
     if (!canSubmit || !user) return;
@@ -174,7 +165,6 @@ export function NewCheckPage() {
           firstName: user.name.split(' ')[0] || '',
           mediaType,
           sourceLabel: fileToUpload.name,
-          ...(checkMode === 'complex' ? { mode: 'complex_media' } : {}),
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else if (activeTab === 'text') {
@@ -270,69 +260,24 @@ export function NewCheckPage() {
           ))}
         </div>
 
-        <div className="px-4 pt-4">
-          <div className="inline-flex rounded-xl border border-mv-border bg-mv-surface-2 p-1">
-            <button
-              type="button"
-              onClick={() => setCheckMode('standard')}
-              className={cn('rounded-lg px-3 py-2 text-sm font-medium transition-colors', checkMode === 'standard' ? 'bg-white text-mv-text shadow-sm' : 'text-mv-text-muted hover:text-mv-text')}
-            >
-              Обычная проверка
-            </button>
-            <button
-              type="button"
-              onClick={() => setCheckMode('complex')}
-              className={cn('rounded-lg px-3 py-2 text-sm font-medium transition-colors', checkMode === 'complex' ? 'bg-white text-mv-text shadow-sm' : 'text-mv-text-muted hover:text-mv-text')}
-            >
-              Комплексная
-            </button>
-          </div>
-        </div>
-
         <div className="p-4 sm:p-6">
           {activeTab === 'media' ? (
-            <div
-              onTouchStart={(event) => setTouchStartX(event.touches[0]?.clientX ?? null)}
-              onTouchEnd={(event) => handleCheckSwipeEnd(event.changedTouches[0]?.clientX ?? 0)}
-            >
-              <FileDropzone
-                files={files}
-                onFilesSelected={handleFilesSelected}
-                onRemoveFile={handleRemoveFile}
-                disabled={isAnalyzing}
-                maxFiles={1}
-              />
-              {checkMode === 'complex' && (
-                <div className="mt-4 flex gap-3 rounded-xl border border-mv-border bg-mv-surface-2 p-4 text-sm leading-6 text-mv-text-secondary">
-                  <ScanSearch className="mt-0.5 shrink-0 text-mv-text" size={18} />
-                  <p><span className="font-semibold text-mv-text">Комплексная проверка файла.</span> Вместе с оценкой ИИ-признаков будут учтены структура файла, метаданные и доступные технические сигналы.</p>
-                </div>
-              )}
-            </div>
+            <FileDropzone files={files} onFilesSelected={handleFilesSelected} onRemoveFile={handleRemoveFile} disabled={isAnalyzing} maxFiles={1} />
+          ) : activeTab === 'text' ? (
+            <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
           ) : (
-            <div
-              onTouchStart={(event) => setTouchStartX(event.touches[0]?.clientX ?? null)}
-              onTouchEnd={(event) => handleCheckSwipeEnd(event.changedTouches[0]?.clientX ?? 0)}
-            >
-              <div className="overflow-hidden">
-                <div
-                  className="flex w-[200%] transition-transform duration-300 ease-out"
-                  style={{ transform: checkMode === 'standard' ? 'translateX(0)' : 'translateX(-50%)' }}
-                >
-                  <div className="w-1/2 pr-3">
-                    <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
-                  </div>
-                  <div className="w-1/2 pl-3">
-                    <ComplexTextCheck />
-                  </div>
-                </div>
-              </div>
-              <p className="mt-4 text-xs text-mv-text-muted">Свайпните вправо, чтобы открыть комплексную проверку: ИИ-признаки, фактчекинг и заимствования.</p>
+            <div className="space-y-5">
+              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">Мультимодальный материал</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Добавьте ссылку, текст и файл вместе</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Соберите контекст статьи в одной проверке: источник, фрагмент текста и изображение или другой медиафайл.</p></div>
+              <label className="block"><span className="mb-2 flex items-center gap-2 text-sm font-semibold"><Link2 size={16} /> Ссылка на статью</span><input value={articleUrl} onChange={(event) => { setArticleUrl(event.target.value); setComplexSubmitted(false); }} type="url" placeholder="https://example.com/article" className="w-full rounded-xl border border-mv-border bg-white px-4 py-3 text-sm outline-none transition focus:border-black" /></label>
+              <TextInput value={complexText} onChange={(value) => { setComplexText(value); setComplexSubmitted(false); }} disabled={false} />
+              <FileDropzone files={complexFiles} onFilesSelected={(newFiles) => { setComplexFiles(newFiles.slice(0, 1)); setComplexSubmitted(false); }} onRemoveFile={(id) => setComplexFiles((current) => current.filter((file) => file.id !== id))} maxFiles={1} />
+              <Button onClick={() => setComplexSubmitted(true)} disabled={!articleUrl.trim() && !complexText.trim() && complexFiles.length === 0} leftIcon={<Send className="w-4 h-4" />}>Собрать комплексную проверку</Button>
+              {complexSubmitted && <div className="rounded-2xl border border-black/[.09] bg-[#fafaf9] p-6 sm:p-8"><p className="eyebrow">Состав проверки</p><h3 className="mt-3 text-2xl font-semibold tracking-[-.035em]">Материал собран</h3><div className="mt-6 grid gap-3 sm:grid-cols-3"><div className="rounded-xl bg-white p-4 text-sm"><p className="text-mv-text-muted">Ссылка</p><p className="mt-2 font-semibold">{articleUrl ? 'Добавлена' : 'Нет'}</p></div><div className="rounded-xl bg-white p-4 text-sm"><p className="text-mv-text-muted">Текст</p><p className="mt-2 font-semibold">{complexText ? `${complexText.length} символов` : 'Нет'}</p></div><div className="rounded-xl bg-white p-4 text-sm"><p className="text-mv-text-muted">Файл</p><p className="mt-2 truncate font-semibold">{complexFiles[0]?.file.name ?? 'Нет'}</p></div></div></div>}
             </div>
           )}
         </div>
 
-        {!(activeTab === 'text' && checkMode === 'complex') && (
+        {activeTab !== 'complex' && (
           <div className="px-6 py-4 bg-[#fafaf9] border-t border-mv-border flex items-center justify-between">
             <p className="text-sm text-mv-text-muted">
               {activeTab === 'media' ? `${files.length} файл(ов) выбрано` : `${text.length} символов`}

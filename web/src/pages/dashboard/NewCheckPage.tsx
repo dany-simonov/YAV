@@ -6,7 +6,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { FileImage, FileText, Layers3, Send, Loader2, Clock, ShieldCheck } from 'lucide-react';
+import { FileImage, FileText, Layers3, Link2, Send, Loader2, Clock, ShieldCheck } from 'lucide-react';
 
 import { Card, Button, Alert } from '../../components/ui';
 import { FileDropzone, TextInput } from '../../components/upload';
@@ -50,6 +50,8 @@ export function NewCheckPage() {
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [text, setText] = useState('');
   const [complexText, setComplexText] = useState('');
+  const [complexArticleUrl, setComplexArticleUrl] = useState('');
+  const [complexFiles, setComplexFiles] = useState<UploadFile[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CheckResult | null>(null);
@@ -141,6 +143,25 @@ export function NewCheckPage() {
 
   const handleComplexTextChange = useCallback((value: string) => {
     setComplexText(value);
+    resetState();
+  }, []);
+
+  const handleComplexFilesSelected = useCallback((newFiles: UploadFile[]) => {
+    setComplexFiles((previous) => {
+      previous.forEach((file) => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+      return newFiles;
+    });
+    resetState();
+  }, []);
+
+  const handleComplexFileRemove = useCallback((id: string) => {
+    setComplexFiles((previous) => {
+      const file = previous.find((item) => item.id === id);
+      if (file?.preview) URL.revokeObjectURL(file.preview);
+      return previous.filter((item) => item.id !== id);
+    });
     resetState();
   }, []);
 
@@ -321,8 +342,10 @@ export function NewCheckPage() {
             <TextInput value={text} onChange={handleTextChange} disabled={isAnalyzing} />
           ) : (
             <div className="space-y-5">
-              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Расширенный анализ текста</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Оценка происхождения и достоверности текста с подробным разбором ключевых признаков и проблемных утверждений.</p></div>
+              <div className="rounded-2xl bg-black p-6 text-white sm:p-8"><p className="eyebrow !text-white/50">КОМПЛЕКСНЫЙ АНАЛИЗ</p><h2 className="mt-4 text-2xl font-semibold tracking-[-.04em]">Добавьте ссылку, текст и файл вместе</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-white/65">Соберите контекст статьи в одной проверке: источник, фрагмент текста и изображение или другой медиафайл.</p></div>
+              <label className="block"><span className="mb-2 flex items-center gap-2 text-sm font-semibold"><Link2 size={16} /> Ссылка на статью</span><input value={complexArticleUrl} onChange={(event) => { setComplexArticleUrl(event.target.value); resetState(); }} disabled={isAnalyzing} type="url" placeholder="https://example.com/article" className="w-full rounded-xl border border-mv-border bg-white px-4 py-3 text-sm outline-none transition focus:border-black disabled:cursor-not-allowed disabled:opacity-50" /></label>
               <TextInput value={complexText} onChange={handleComplexTextChange} minLength={COMPLEX_MIN_LENGTH} maxLength={COMPLEX_MAX_LENGTH} recommendedRange={COMPLEX_RECOMMENDED_RANGE} meaningfulMinLength disabled={isAnalyzing} />
+              <div><p className="mb-2 text-sm font-semibold">Файлы к материалу</p><FileDropzone files={complexFiles} onFilesSelected={handleComplexFilesSelected} onRemoveFile={handleComplexFileRemove} disabled={isAnalyzing} maxFiles={5} /></div>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3 text-sm text-mv-text-secondary"><ShieldCheck className="w-4 h-4 text-mv-accent" /><span>Минимум {COMPLEX_MIN_LENGTH} значимых символов, максимум {COMPLEX_MAX_LENGTH.toLocaleString()}.</span></div><Button onClick={handleSubmit} disabled={!canSubmit} leftIcon={isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}>{isAnalyzing ? 'Идёт анализ...' : 'Запустить анализ'}</Button></div>
               {isAnalyzing && <div className="flex items-center gap-2 rounded-lg border border-mv-border bg-mv-surface-2 p-4 text-mv-text-secondary"><Clock className="w-4 h-4" /><span>Комплексный анализ выполняется параллельно. Прошло: {String(Math.floor(elapsedSeconds / 60)).padStart(2, '0')}:{String(elapsedSeconds % 60).padStart(2, '0')}</span></div>}
             </div>

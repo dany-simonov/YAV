@@ -980,6 +980,13 @@ async def _execute_request(
             account_created_at=account.get("$createdAt"), client_ip=client_ip,
         )
         is_gemini_text = result.get("model_used") == "gemini_text_verification"
+        if isinstance(request, (SourceAnalyzeRequest, ComplexAnalyzeRequest)):
+            # Source metadata is optional for unified Complex.  In particular,
+            # text-only Complex has no source and must persist normally.
+            source = result.get("source")
+            source_label = source.get("url", "") if isinstance(source, dict) else ""
+        else:
+            source_label = request.source_label or ""
         persistence_started = time.monotonic()
         if is_gemini_text:
             _safe_diagnostic_log(diagnostic_log, "provider=gemini_text stage=persistence_start")
@@ -989,12 +996,12 @@ async def _execute_request(
                     persist_check_result(
                         result,
                         user_id,
-                        (result.get("source", {}).get("url", "") if isinstance(request, SourceAnalyzeRequest) else request.source_label or ""),
+                        source_label,
                         api_key,
                     )
                 )
                 if execution_deadline is not None
-                else persist_check_result(result, user_id, (result.get("source", {}).get("url", "") if isinstance(request, SourceAnalyzeRequest) else request.source_label or ""), api_key)
+                else persist_check_result(result, user_id, source_label, api_key)
             )
         except Exception:
             if is_gemini_text:

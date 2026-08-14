@@ -148,12 +148,12 @@ export function Home(){
   </section>
 
   <section id="security" className="container pb-20 lg:pb-32"><div className="bg-[#0b0b0b] text-white rounded-[22px] p-8 md:p-12 lg:p-16 grid lg:grid-cols-[.9fr_1.1fr] gap-16"><div><p className="eyebrow !text-white/45 mb-8">Приватность и контроль</p><h2 className="section-title">Серьёзный<br/>инструмент не<br/>скрывает<br/>ограничения</h2><p className="mt-7 text-white/55 leading-7 max-w-md">Текущая политика сообщает, что медиафайлы не хранятся постоянно и удаляются после получения результата. Детали реализации требуют подтверждения команды.</p></div><div className="grid sm:grid-cols-2 gap-x-10">{[
-    ['Передача файлов','УТОЧНИТЬ МЕХАНИЗМ ЗАЩИТЫ',true],
+    ['Передача файлов','HTTPS + защищённый доступ Appwrite',true],
     ['Понятные результаты','Вывод + объяснение',false],
-    ['Хранение материалов','Не на постоянной основе',false],
-    ['Удаление истории','УТОЧНИТЬ У КОМАНДЫ',true],
-    ['Точность','Без обещания 100%',false],
-    ['Юридический статус','Не является заключением',false],
+    ['Хранение материалов','Только на время обработки',false],
+    ['Удаление истории','Доступно пользователю в кабинете',true],
+    ['Точность','Вероятностная оценка',false],
+    ['Юридический статус','Не является экспертным заключением',false],
   ].map((x)=><div key={x[0] as string} className="py-6 border-t border-white/15"><p className="text-xs text-white/45 mb-3">{x[0]}</p><p className={`text-sm leading-5 ${x[2]?'text-[#d3a444]':'text-white'}`}>{x[1]}</p></div>)}</div></div></section>
 
   <section id="report" className="container section-space border-t border-black/[.06]">

@@ -1,4 +1,4 @@
-"""Unit contracts for the single-call grounded text credibility branch."""
+"""Unit contracts for the one-request, non-grounded credibility branch."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,30 +22,22 @@ def _response(status: int, body: object) -> MagicMock:
     return response
 
 
-def _body(index=34, confidence=0.88, issues=None, chunks=None, supports=None):
-    issues = issues if issues is not None else []
-    chunks = chunks if chunks is not None else []
-    supports = supports if supports is not None else []
+def _body(index=34, confidence=0.88, summary="Материал требует дополнительной проверки.", issues=None):
     return {
-        "candidates": [{
-            "content": {"parts": [{"text": json.dumps({
-                "credibility_index": index,
-                "confidence": confidence,
-                "summary": "Материал содержит утверждения, требующие дополнительной проверки.",
-                "issues": issues,
-            }, ensure_ascii=False)}]},
-            "groundingMetadata": {"groundingChunks": chunks, "groundingSupports": supports},
-        }],
+        "candidates": [{"content": {"parts": [{"text": json.dumps({
+            "credibility_index": index, "confidence": confidence, "summary": summary,
+            "issues": [] if issues is None else issues,
+        }, ensure_ascii=False)}]}}],
     }
 
 
-def _client(response):
+def _issue(issue_type="UNSUPPORTED_CLAIM", severity="MEDIUM", claim="Утверждение", explanation="Недостаточно подтверждений."):
+    return {"type": issue_type, "severity": severity, "claim": claim, "explanation": explanation}
+
+
+def _client(response=None, error=None):
     client = AsyncMock()
-    client.post = (
-        AsyncMock(side_effect=response)
-        if isinstance(response, BaseException)
-        else AsyncMock(return_value=response)
-    )
+    client.post = AsyncMock(return_value=response, side_effect=error)
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
     return client
@@ -54,328 +46,98 @@ def _client(response):
 def _configured_gemini():
     return patch.object(settings, "gemini_api_key", "unit-test-key"), patch.object(
         settings, "gemini_api_url", BASE_URL
-    ), patch.object(settings, "gemini_model", "gemini-test-model")
+    ), patch.object(settings, "gemini_model", "gemini-shared-model")
 
 
 @pytest.mark.asyncio
-async def test_grounded_credibility_uses_one_generate_content_request_and_grounding_sources():
-    client = _client(_response(200, _body(chunks=[
-        {"web": {"title": "Официальный источник", "uri": "https://example.org/report"}},
-    ])))
-    config = _configured_gemini()
-    with config[0], config[1], config[2], patch(
-        "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
-    ):
-        result = await GeminiCredibilityAdapter().analyze("Проверяемое утверждение".encode())
-
-    request = client.post.await_args.kwargs["json"]
-    assert client.post.await_count == 1
-    assert request["tools"] == [{"google_search": {}}]
-    assert "googleSearch" not in request["tools"][0]
-    assert request["generationConfig"]["maxOutputTokens"] == GeminiCredibilityAdapter.MAX_OUTPUT_TOKENS
-    assert result.credibility_index == 34
-    assert result.verdict == "LOW_CREDIBILITY"
-    assert result.sources[0].url == "https://example.org/report"
-
-
-@pytest.mark.asyncio
-async def test_grounded_credibility_uses_dedicated_model_and_logs_its_safe_identifier():
+async def test_credibility_uses_one_ordinary_generate_content_request_without_tools_or_search():
     client = _client(_response(200, _body()))
-    diagnostics: list[str] = []
     config = _configured_gemini()
     with config[0], config[1], config[2], patch.object(
-        settings, "gemini_credibility_model", "gemini-2.5-flash-lite"
+        settings, "gemini_credibility_model", "gemini-unused-dedicated-model"
     ), patch("adapters.gemini_credibility.httpx.AsyncClient", return_value=client):
-        await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
+        result = await GeminiCredibilityAdapter().analyze("Мамонты жили в Сибири во время плейстоцена.".encode())
 
-    assert client.post.await_args.args[0] == (
-        f"{BASE_URL}/v1beta/models/gemini-2.5-flash-lite:generateContent"
-    )
-    assert any("model=gemini-2.5-flash-lite stage=request_start" in item for item in diagnostics)
+    request = client.post.await_args
+    assert request.args[0] == f"{BASE_URL}/v1beta/models/gemini-shared-model:generateContent"
+    assert "tools" not in request.kwargs["json"]
+    assert "google_search" not in str(request.kwargs["json"])
+    assert "grounding" not in str(request.kwargs["json"])
+    assert request.kwargs["json"]["generationConfig"]["maxOutputTokens"] == 700
     assert GeminiCredibilityAdapter.TOTAL_TIMEOUT_SECONDS - GeminiCredibilityAdapter.TRANSPORT_SAFETY_SECONDS == 11
-
-
-@pytest.mark.asyncio
-async def test_grounded_credibility_falls_back_to_shared_model_when_dedicated_model_is_empty():
-    client = _client(_response(200, _body()))
-    config = _configured_gemini()
-    with config[0], config[1], config[2], patch.object(
-        settings, "gemini_credibility_model", ""
-    ), patch("adapters.gemini_credibility.httpx.AsyncClient", return_value=client):
-        await GeminiCredibilityAdapter().analyze(b"text")
-
-    assert client.post.await_args.args[0] == f"{BASE_URL}/v1beta/models/gemini-test-model:generateContent"
+    assert result.sources == []
 
 
 @pytest.mark.parametrize(
-    ("status_code", "exception_type", "category", "diagnostic_category"),
+    ("index", "issue", "expected_verdict"),
     [
-        (400, ExternalAPIError, "request_rejected", "request_rejected"),
-        (401, ExternalAPIError, "auth_configuration", "auth_configuration"),
-        (403, ExternalAPIError, "auth_configuration", "auth_configuration"),
-        (429, ProviderInfrastructureError, "rate_limited", "unknown_rate_limit"),
-        (500, ProviderInfrastructureError, "unavailable", "unavailable"),
+        (91, None, "HIGH_CREDIBILITY"),
+        (18, _issue("FACTUAL_CONTRADICTION", "HIGH", "Динозавры живут под Ямалом.", "Утверждение противоречит общеизвестным научным данным."), "VERY_LOW_CREDIBILITY"),
+        (35, _issue("LOGICAL_INCONSISTENCY", "HIGH", "Причина одновременно исключает следствие.", "Вывод не следует из исходного условия."), "LOW_CREDIBILITY"),
+        (48, _issue("UNSUPPORTED_CLAIM", "MEDIUM", "Редкий факт без подтверждения.", "Недостаточно известных оснований для уверенного вывода."), "MIXED_CREDIBILITY"),
+        (75, None, "MOSTLY_CREDIBLE"),
     ],
 )
-@pytest.mark.asyncio
-async def test_grounded_credibility_classifies_http_failure_without_exposing_provider_content(
-    status_code, exception_type, category, diagnostic_category,
-):
-    client = _client(_response(status_code, {"error": {"message": "not safe to log"}}))
-    diagnostics: list[str] = []
-    config = _configured_gemini()
-    with config[0], config[1], config[2], patch(
-        "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
-    ):
-        with pytest.raises(exception_type) as raised:
-            await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
-
-    assert raised.value.service == "gemini"
-    assert raised.value.detail == category
-    assert raised.value.status_code == status_code
-    assert any(
-        f"stage=request_error category={diagnostic_category} status_code={status_code}" in message
-        for message in diagnostics
-    )
-    assert all("not safe to log" not in message for message in diagnostics)
+def test_credibility_preserves_server_validated_semantic_assessment(index, issue, expected_verdict):
+    result = GeminiCredibilityAdapter._result(_response(200, _body(index=index, issues=[] if issue is None else [issue])))
+    assert result.credibility_index == index
+    assert result.verdict == expected_verdict
+    assert result.sources == []
+    assert all(item.source_refs == [] for item in result.issues)
 
 
-@pytest.mark.asyncio
-async def test_grounded_credibility_classifies_timeout_and_transport_diagnostics():
-    config = _configured_gemini()
-    for error, expected_stage, expected_category in (
-        (httpx.ReadTimeout("timeout"), "request_timeout", "timeout"),
-        (httpx.ConnectError("network"), "request_error", "transport"),
-    ):
-        client = _client(error)
-        diagnostics: list[str] = []
-        with config[0], config[1], config[2], patch(
-            "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
-        ):
-            with pytest.raises(ProviderInfrastructureError) as raised:
-                await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
-        assert raised.value.kind == expected_category
-        assert any(
-            f"stage={expected_stage} category={expected_category} status_code=none" in message
-            for message in diagnostics
-        )
-
-
-def _quota_failure(quota_id, quota_metric, *, quota_value=None, model="gemini-test-model", location="global"):
-    violation = {"quotaId": quota_id, "quotaMetric": quota_metric, "quotaDimensions": {
-        "model": model, "location": location,
-    }}
-    if quota_value is not None:
-        violation["quotaValue"] = quota_value
-    return {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [violation]}
-
-
-def _retry_info(delay):
-    return {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay}
+def test_hypothetical_statement_can_return_credible_result_without_artificial_issue():
+    result = GeminiCredibilityAdapter._result(_response(200, _body(
+        index=82,
+        summary="Гипотетическая формулировка не заявлена как установленный факт.",
+        issues=[],
+    )))
+    assert result.verdict == "HIGH_CREDIBILITY"
+    assert result.issues == []
 
 
 @pytest.mark.parametrize(
-    ("detail", "expected_category"),
+    "body",
     [
-        (_quota_failure("GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "generate_content_free_tier_requests"), "rate_limit_minute"),
-        (_quota_failure("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "generate_content_free_tier_requests"), "daily_quota"),
-        (_quota_failure("GenerateInputTokensPerMinutePerProjectPerModel-FreeTier", "generate_content_input_tokens"), "rate_limit_tokens"),
-        (_quota_failure("GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "generate_content_free_tier_requests", quota_value="0"), "quota_unavailable_or_zero"),
+        {"candidates": [{"content": {"parts": [{"text": "not json"}]}}]},
+        _body(index=True), _body(index=101), _body(confidence=True), _body(confidence=1.1),
+        _body(issues=[_issue()] * 6),
+        _body(issues=[{**_issue(), "source_refs": [0]}]),
     ],
 )
-@pytest.mark.asyncio
-async def test_grounded_credibility_emits_allowlisted_429_quota_metadata(detail, expected_category):
-    client = _client(_response(429, {"error": {"details": [detail, _retry_info("1.25s")]}}))
-    diagnostics: list[str] = []
-    config = _configured_gemini()
-    with config[0], config[1], config[2], patch(
-        "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
-    ):
-        with pytest.raises(ProviderInfrastructureError) as raised:
-            await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
-
-    assert raised.value.kind == "rate_limited"
-    message = next(message for message in diagnostics if "stage=request_error" in message)
-    assert f"category={expected_category}" in message
-    assert "quota_id=GenerateRequestsPerMinutePerProjectPerModel-FreeTier" in message or "PerDay" in message or "InputTokens" in message
-    assert "quota_metric=generate_content_" in message
-    assert "quota_model=gemini-test-model" in message
-    assert "quota_location=global" in message
-    assert "retry_delay_ms=1250" in message
-
-
-@pytest.mark.asyncio
-async def test_grounded_credibility_429_without_valid_details_is_unknown_and_does_not_log_secrets():
-    body = {
-        "error": {
-            "details": [
-                {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": "malformed"},
-                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "not-a-duration"},
-                {"secret": "api_key=never-log-this", "message": "never-log-this"},
-            ],
-            "message": "never-log-this",
-            "authorization": "Bearer never-log-this",
-        },
-    }
-    client = _client(_response(429, body))
-    diagnostics: list[str] = []
-    config = _configured_gemini()
-    with config[0], config[1], config[2], patch(
-        "adapters.gemini_credibility.httpx.AsyncClient", return_value=client
-    ):
-        with pytest.raises(ProviderInfrastructureError):
-            await GeminiCredibilityAdapter().analyze(b"text", diagnostic_log=diagnostics.append)
-
-    message = next(message for message in diagnostics if "stage=request_error" in message)
-    assert "category=unknown_rate_limit" in message
-    assert "quota_" not in message
-    assert "never-log-this" not in message
-
-
-def test_grounded_credibility_malformed_429_json_is_safe_unknown_rate_limit():
-    response = _response(429, {})
-    response.json.side_effect = ValueError("not JSON")
-    assert GeminiCredibilityAdapter._rate_limit_metadata(response) == {
-        "category": "unknown_rate_limit",
-    }
-
-
-@pytest.mark.parametrize(
-    ("index", "verdict"),
-    [(0, "VERY_LOW_CREDIBILITY"), (20, "VERY_LOW_CREDIBILITY"), (21, "LOW_CREDIBILITY"),
-     (40, "LOW_CREDIBILITY"), (41, "MIXED_CREDIBILITY"), (60, "MIXED_CREDIBILITY"),
-     (61, "MOSTLY_CREDIBLE"), (80, "MOSTLY_CREDIBLE"), (81, "HIGH_CREDIBILITY"),
-     (100, "HIGH_CREDIBILITY")],
-)
-def test_credibility_verdict_boundaries(index, verdict):
-    assert GeminiCredibilityAdapter._verdict(index) == verdict
-
-
-@pytest.mark.parametrize("invalid", [True, -1, 101, 20.0])
-def test_credibility_rejects_invalid_index(invalid):
-    response = _response(200, _body(index=invalid))
+def test_credibility_rejects_malformed_or_unsupported_provider_output(body):
     with pytest.raises(ProviderInfrastructureError) as raised:
-        GeminiCredibilityAdapter._result(response)
-    assert raised.value.kind == "invalid_response"
-
-
-@pytest.mark.parametrize("invalid", [True, float("nan"), -0.1, 1.1, "0.8"])
-def test_credibility_rejects_invalid_confidence(invalid):
-    response = _response(200, _body(confidence=invalid))
-    with pytest.raises(ProviderInfrastructureError) as raised:
-        GeminiCredibilityAdapter._result(response)
-    assert raised.value.kind == "invalid_response"
-
-
-def test_credibility_limits_issues_and_sources_deduplicates_and_rejects_unsafe_urls():
-    issue = {
-        "type": "UNSUPPORTED_CLAIM", "severity": "MEDIUM", "claim": "Утверждение",
-        "explanation": "Для него нет достаточного подтверждения.", "source_refs": [],
-    }
-    chunks = [
-        {"web": {"title": "Надёжный источник", "uri": "https://example.org/a"}},
-        {"web": {"title": "Дубликат", "uri": "https://example.org/a"}},
-        {"web": {"title": "Небезопасный", "uri": "javascript:alert(1)"}},
-        {"web": {"title": "Локальный", "uri": "http://127.0.0.1/admin"}},
-        {"web": {"title": "Числовой loopback", "uri": "http://2130706433/admin"}},
-        *[{"web": {"title": f"Источник {number}", "uri": f"https://example.org/{number}"}}
-          for number in range(2, 8)],
-    ]
-    result = GeminiCredibilityAdapter._result(_response(200, _body(issues=[issue] * 5, chunks=chunks)))
-    assert len(result.issues) == 5
-    assert len(result.sources) == 5
-    assert [source.url for source in result.sources] == [
-        "https://example.org/a", "https://example.org/2", "https://example.org/3",
-        "https://example.org/4", "https://example.org/5",
-    ]
-
-
-def _issue(claim="Утверждение", explanation="Для него нет достаточного подтверждения.", **overrides):
-    return {
-        "type": "UNSUPPORTED_CLAIM", "severity": "MEDIUM", "claim": claim,
-        "explanation": explanation, "source_refs": [999, "bogus"], **overrides,
-    }
-
-
-def _source(title, url):
-    return {"web": {"title": title, "uri": url}}
-
-
-def _support(text, refs):
-    return {"segment": {"text": text}, "groundingChunkIndices": refs}
-
-
-def test_grounding_supports_build_canonical_raw_to_final_refs_and_ignore_model_refs():
-    issue = _issue("Ключевое утверждение", "Ключевое утверждение не подтверждается источниками.")
-    result = GeminiCredibilityAdapter._result(_response(200, _body(
-        issues=[issue],
-        chunks=[_source("A", "https://a.example"), _source("Unsafe", "javascript:alert(1)"), _source("B", "https://b.example")],
-        supports=[_support("Ключевое утверждение", [2])],
-    )))
-    assert [item.url for item in result.sources] == ["https://a.example", "https://b.example"]
-    assert result.issues[0].source_refs == [1]
-
-
-def test_grounding_supports_preserve_all_valid_raw_chunk_indexes():
-    result = GeminiCredibilityAdapter._result(_response(200, _body(
-        issues=[_issue("Третье утверждение", "Третье утверждение требует проверки.")],
-        chunks=[
-            _source("A", "https://a.example"), _source("B", "https://b.example"),
-            _source("C", "https://c.example"),
-        ],
-        supports=[_support("Третье утверждение", [0, 1, 2])],
-    )))
-    assert [item.url for item in result.sources] == [
-        "https://a.example", "https://b.example", "https://c.example",
-    ]
-    assert result.issues[0].source_refs == [0, 1, 2]
-
-
-def test_grounding_support_duplicate_and_removed_refs_are_canonical_and_unique():
-    issue = _issue("Факт", "Факт требует проверки.")
-    result = GeminiCredibilityAdapter._result(_response(200, _body(
-        issues=[issue],
-        chunks=[_source("A", "https://a.example"), _source("B", "https://b.example"), _source("A duplicate", "https://a.example"), _source("Unsafe", "http://127.0.0.1")],
-        supports=[_support("Факт", [2, 0, 2, 3, True])],
-    )))
-    assert [item.url for item in result.sources] == ["https://a.example", "https://b.example"]
-    assert result.issues[0].source_refs == [0]
-
-
-def test_unmatched_grounding_support_leaves_issue_refs_empty_without_invalidating_report():
-    result = GeminiCredibilityAdapter._result(_response(200, _body(
-        issues=[_issue("Утверждение", "Объяснение")],
-        chunks=[_source("A", "https://a.example")],
-        supports=[_support("Совершенно другой сегмент", [0])],
-    )))
-    assert result.issues[0].source_refs == []
-
-
-def test_credibility_rejects_more_than_five_issues():
-    issue = {
-        "type": "UNSUPPORTED_CLAIM", "severity": "LOW", "claim": "Утверждение",
-        "explanation": "Недостаточно подтверждений.", "source_refs": [],
-    }
-    with pytest.raises(ProviderInfrastructureError):
-        GeminiCredibilityAdapter._result(_response(200, _body(issues=[issue] * 6)))
-
-
-def test_credibility_rejects_non_russian_summary_and_keeps_grounding_url_without_title():
-    body = _body(chunks=[{"web": {"uri": "https://example.org/source"}}])
-    body["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
-        "credibility_index": 60, "confidence": 0.8, "summary": "English only summary.", "issues": [],
-    })
-    with pytest.raises(ProviderInfrastructureError):
         GeminiCredibilityAdapter._result(_response(200, body))
-
-    result = GeminiCredibilityAdapter._result(_response(200, _body(chunks=[
-        {"web": {"uri": "https://example.org/source"}},
-    ])))
-    assert result.sources[0].title == "example.org"
+    assert raised.value.kind == "invalid_response"
 
 
 @pytest.mark.asyncio
-async def test_insufficient_deadline_does_not_start_grounded_http():
+async def test_credibility_handles_missing_config_timeout_and_http_errors_without_provider_content():
+    with patch.object(settings, "gemini_api_key", ""):
+        with pytest.raises(ProviderInfrastructureError) as missing:
+            await GeminiCredibilityAdapter().analyze(b"text")
+    assert missing.value.kind == "missing_credentials"
+
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch(
+        "adapters.gemini_credibility.httpx.AsyncClient", return_value=_client(error=httpx.ReadTimeout("timeout"))
+    ):
+        with pytest.raises(ProviderInfrastructureError) as timeout:
+            await GeminiCredibilityAdapter().analyze(b"text")
+    assert timeout.value.kind == "timeout"
+
+    for status, error_type, category in ((400, ExternalAPIError, "request_rejected"), (429, ProviderInfrastructureError, "rate_limited"), (500, ProviderInfrastructureError, "unavailable")):
+        config = _configured_gemini()
+        with config[0], config[1], config[2], patch(
+            "adapters.gemini_credibility.httpx.AsyncClient", return_value=_client(_response(status, {"error": {"secret": "never-log"}}))
+        ):
+            with pytest.raises(error_type) as raised:
+                await GeminiCredibilityAdapter().analyze(b"text")
+        assert raised.value.detail == category
+
+
+@pytest.mark.asyncio
+async def test_insufficient_deadline_does_not_start_credibility_http():
     client = _client(_response(200, _body()))
     deadline = ExecutionDeadline.from_execution_timeout(3, 1, 1)
     token = set_execution_deadline(deadline)

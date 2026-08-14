@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     global_aiornot_words_monthly: int = 600_000
     global_sapling_chars_daily: int = 20_000
     global_sapling_chars_monthly: int = 120_000
+    # Comma-separated authoritative Appwrite account IDs.  This is server-only
+    # configuration; clients never receive or select this entitlement.
+    unlimited_user_ids: str = ""
 
     # FFmpeg / video
     max_video_duration_seconds: int = 60

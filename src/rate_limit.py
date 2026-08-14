@@ -61,6 +61,13 @@ class AdmissionPlan:
         return sum(units for name, units in self.provider_units if name == provider)
 
 
+def is_unlimited_user(authoritative_user_id: str) -> bool:
+    """Return a server-configured entitlement for an authenticated Appwrite ID."""
+    configured = os.getenv("UNLIMITED_USER_IDS", settings.unlimited_user_ids)
+    allowed = {item.strip() for item in configured.split(",") if item.strip()}
+    return isinstance(authoritative_user_id, str) and authoritative_user_id in allowed
+
+
 def normalize_client_ip(value: str) -> str:
     try:
         address = ipaddress.ip_address(value.strip())
@@ -735,7 +742,8 @@ def build_admission_plan(
     """Build the whole request admission before any provider can be contacted."""
     now = store.now
     created_at = _parse_created_at(account_created_at)
-    is_new_user = now < created_at + timedelta(days=settings.new_user_period_days)
+    unlimited = is_unlimited_user(user_id)
+    is_new_user = not unlimited and now < created_at + timedelta(days=settings.new_user_period_days)
     try:
         kind = MediaType(media_type)
     except ValueError as exc:
@@ -759,11 +767,11 @@ def build_admission_plan(
                 raise SecurityValidationError("file_too_large", "Файл превышает лимит для новых пользователей.", 413)
 
     day = _window(now, "day")
-    dimensions: list[AdmissionDimension] = [
-        _dimension("ip_total_daily", store.ip_subject(client_ip), day, 1, settings.ip_total_daily,
-                   "daily_quota_exceeded", "Достигнут дневной лимит проверок."),
-    ]
-    if kind in {MediaType.IMAGE, MediaType.AUDIO, MediaType.VIDEO}:
+    dimensions: list[AdmissionDimension] = []
+    if not unlimited:
+        dimensions.append(_dimension("ip_total_daily", store.ip_subject(client_ip), day, 1, settings.ip_total_daily,
+                   "daily_quota_exceeded", "Достигнут дневной лимит проверок."))
+    if not unlimited and kind in {MediaType.IMAGE, MediaType.AUDIO, MediaType.VIDEO}:
         dimensions.append(_dimension(
             "ip_heavy_media_daily", store.ip_subject(client_ip), day, 1, settings.ip_heavy_media_daily,
             "daily_quota_exceeded", "Достигнут дневной лимит проверок.",
@@ -834,6 +842,8 @@ def build_source_media_admission_plan(
     """
     now = store.now
     created_at = _parse_created_at(account_created_at)
+    if is_unlimited_user(user_id):
+        return AdmissionPlan(user_id, (), (), create_reservation=False)
     is_new_user = now < created_at + timedelta(days=settings.new_user_period_days)
     day = _window(now, "day")
     dimensions: list[AdmissionDimension] = []

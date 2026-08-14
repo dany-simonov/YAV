@@ -253,6 +253,24 @@ async def test_gemini_4xx_is_a_provider_request_error():
         "request_error",
         400,
     )
+    assert raised.value.operation == "files_start"
+
+
+@pytest.mark.asyncio
+async def test_gemini_403_exposes_only_safe_google_error_metadata():
+    client = _client(posts=[_response(403, {"error": {
+        "code": 403, "status": "PERMISSION_DENIED",
+        "message": "Permission denied for https://generativelanguage.googleapis.com/v1beta/files/secret",
+    }})])
+    config = _configured_gemini()
+    with config[0], config[1], config[2], patch("adapters.gemini_video.httpx.AsyncClient", return_value=client), pytest.raises(
+        ExternalAPIError
+    ) as raised:
+        await GeminiVideoAdapter().analyze(VIDEO)
+    assert raised.value.operation == "files_start"
+    assert raised.value.upstream_status == "PERMISSION_DENIED"
+    assert raised.value.upstream_code == 403
+    assert "[REDACTED_URL]" in (raised.value.provider_message or "")
 
 
 @pytest.mark.asyncio

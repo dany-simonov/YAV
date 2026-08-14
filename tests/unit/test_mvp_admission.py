@@ -7,7 +7,7 @@ import pytest
 from core.config import settings
 from src.rate_limit import (
     AdmissionDimension, AdmissionPlan, AppwriteTablesRateLimitStore, RateLimitError, Window,
-    build_admission_plan,
+    build_admission_plan, build_source_media_admission_plan,
 )
 from src.validation import SecurityValidationError
 
@@ -55,6 +55,27 @@ def test_complex_text_has_no_sapling_or_aiornot_and_exactly_two_gemini_operation
     assert plan.units_for("sapling") == 0
     assert plan.units_for("aiornot") == 0
     assert "global_gemini_daily" in names
+
+
+@pytest.mark.parametrize(
+    ("has_image", "has_video", "expected"),
+    [
+        (False, False, set()),
+        (True, False, {"ip_heavy_media_daily", "new_user_image_daily"}),
+        (True, True, {"ip_heavy_media_daily", "new_user_image_daily", "new_user_video_first7d"}),
+        (False, True, {"ip_heavy_media_daily", "new_user_video_first7d"}),
+    ],
+)
+def test_source_post_extraction_plan_charges_known_media_once_without_duplicate_check_dimensions(monkeypatch, has_image, has_video, expected):
+    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    plan = build_source_media_admission_plan(
+        _store(monkeypatch, now), user_id="user", client_ip="192.0.2.1",
+        account_created_at=(now - timedelta(hours=1)).isoformat(), has_image=has_image, has_video=has_video,
+    )
+    names = [item.dimension for item in plan.dimensions]
+    assert set(names) == expected
+    assert len(names) == len(set(names))
+    assert not {"ip_total_daily", "new_user_total_daily", "new_user_total_first7d", "new_user_hybrid_daily"} & set(names)
 
 
 @pytest.mark.parametrize(

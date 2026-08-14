@@ -59,3 +59,11 @@ def test_unsafe_external_urls_are_rejected(value):
 
 def test_https_external_url_is_allowed():
     assert safe_external_url("https://example.com/path") == "https://example.com/path"
+
+
+def test_source_complex_contract_accepts_only_a_source_url():
+    request = validate_request_payload({"mode": "complex_source", "sourceUrl": "https://example.com/post"})
+    assert request.source_url == "https://example.com/post"
+    with pytest.raises(SecurityValidationError) as raised:
+        validate_request_payload({"mode": "complex_source", "sourceUrl": "https://example.com", "text": "x" * 200})
+    assert raised.value.code == "conflicting_input"

@@ -19,3 +19,23 @@ export const buildComplexPayload = (text: string, user: User) => ({
   mode: 'hybrid_text' as const,
   sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
 });
+
+export const isComplexSourceSubmittable = (value: string, isAnalyzing: boolean): boolean => {
+  try {
+    const url = new URL(value.trim());
+    const defaultPort = (url.protocol === 'http:' && (url.port === '' || url.port === '80'))
+      || (url.protocol === 'https:' && (url.port === '' || url.port === '443'));
+    return (url.protocol === 'https:' || url.protocol === 'http:')
+      && Boolean(url.hostname) && !url.username && !url.password && defaultPort && !isAnalyzing;
+  } catch {
+    return false;
+  }
+};
+
+export const buildComplexSourcePayload = (sourceUrl: string, user: User) => ({
+  sourceUrl: sourceUrl.trim(),
+  userId: user.$id,
+  username: user.name,
+  firstName: user.name.split(' ')[0] || '',
+  mode: 'complex_source' as const,
+});

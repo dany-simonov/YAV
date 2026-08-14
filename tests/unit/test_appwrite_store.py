@@ -270,6 +270,38 @@ def test_complex_compaction_keeps_ai_confidence_and_high_priority_signal():
     assert details["ai_details"]["signals"][0]["severity"] == "HIGH"
 
 
+def test_source_compaction_keeps_canonical_credibility_and_media_zero_values():
+    media = [
+        {"kind": "image", "ordinal": index + 1, "status": "completed", "authenticity_index": 0 if index == 0 else 80,
+         "verdict": "REAL", "confidence": 0.0 if index == 0 else 0.8, "model": "sightengine",
+         "explanation": "М" * 600, "processing_ms": 0}
+        for index in range(3)
+    ] + [{"kind": "video", "ordinal": 1, "status": "completed", "authenticity_index": 30,
+            "verdict": "FAKE", "confidence": 0.7, "model": "gemini_video_verification",
+            "explanation": "В" * 600, "processing_ms": 60000}]
+    source = {"url": "https://example.org/" + "p" * 1800, "title": "З" * 300,
+              "description": "О" * 600, "site_name": "С" * 160, "text_found": True,
+              "text_truncated": True, "images_analyzed": 3, "video_analyzed": True,
+              "images_discovered": 3, "video_discovered": True, "media": media}
+    signals = [{"type": "GENERIC_FORMULATION", "severity": "LOW", "title": "Т" * 160,
+                "explanation": "П" * 400} for _ in range(5)]
+    credibility = {**_maximum_credibility_payload(), "credibility_index": 0, "confidence": 0.0,
+                   "credible_points": ["Д" * 250 for _ in range(4)]}
+    row = map_analysis_to_check_row(_canonical_result(
+        confidence=0.0, model_used="gemini_text_verification", media_type="text", analysis_mode="complex",
+        ai_details={"signals": signals, "human_signals": ["Ч" * 250 for _ in range(3)]},
+        credibility=credibility, source=source,
+    ), "user")
+    assert len(row["details"].encode("utf-8")) <= MAX_DETAILS_BYTES
+    details = json.loads(row["details"])
+    assert details["source"]["url"] == source["url"]
+    assert details["source"]["media"][0]["confidence"] == 0.0
+    assert details["credibility"]["status"] == "completed"
+    assert details["credibility"]["credibility_index"] == 0
+    assert details["credibility"]["confidence"] == 0.0
+    assert details["credibility"]["verdict"] == "LOW_CREDIBILITY"
+
+
 def test_gemini_video_persists_its_canonical_authenticity_index_without_inversion():
     row = map_analysis_to_check_row(
         _canonical_result(

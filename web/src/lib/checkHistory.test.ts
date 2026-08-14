@@ -66,13 +66,14 @@ describe('server-backed check history', () => {
         short_report: 'Общий вывод.',
         credibility: {
           status: 'completed', credibility_index: 34, verdict: 'LOW_CREDIBILITY',
-          confidence: 0.8, summary: 'Требуется дополнительная проверка.', issues: [],
+          confidence: 0.8, processing_ms: 8120, summary: 'Требуется дополнительная проверка.', issues: [],
           sources: [{ title: 'Источник', url: 'https://example.org/source' }],
         },
       }),
     }) as never);
     expect(check.short_report).toBe('Общий вывод.');
     expect(check.credibility?.credibility_index).toBe(34);
+    expect(check.credibility?.processing_ms).toBe(8120);
   });
 
   it('keeps repaired source refs from a compacted combined report', () => {

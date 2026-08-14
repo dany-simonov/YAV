@@ -43,7 +43,7 @@ describe('CheckResultCard short report', () => {
     const markup = renderToStaticMarkup(<CheckResultCard result={result({
       credibility: {
         status: 'completed', credibility_index: 34, verdict: 'LOW_CREDIBILITY', confidence: 0.8,
-        summary: 'Ключевые утверждения требуют проверки.',
+        model: 'gemini_credibility', processing_ms: 8120, summary: 'Ключевые утверждения требуют проверки.',
         issues: [{ type: 'UNSUPPORTED_CLAIM', severity: 'MEDIUM', claim: 'Сильное утверждение', explanation: 'Нет достаточного подтверждения.', source_refs: [1] }],
         sources: [{ title: 'Надёжный источник', url: 'https://example.org/source' }],
       },
@@ -52,14 +52,22 @@ describe('CheckResultCard short report', () => {
     expect(markup).toContain('>34<span');
     expect(markup).toContain('Ключевые несоответствия');
     expect(markup).toContain('https://example.org/source');
+    expect(markup).toContain('Проверка достоверности');
+    expect(markup).toContain('Низкая достоверность');
+    expect(markup).toContain('gemini_credibility');
+    expect(markup).toContain('8120 мс');
   });
 
   it('renders unavailable credibility without an invented score', () => {
     const markup = renderToStaticMarkup(<CheckResultCard result={result({
-      credibility: { status: 'unavailable', summary: 'Проверка достоверности временно недоступна.', issues: [], sources: [] },
+      credibility: { status: 'unavailable', model: 'gemini_credibility', summary: 'Проверка достоверности временно недоступна.', issues: [], sources: [] },
     })} />);
+    const technicalBlock = markup.slice(markup.lastIndexOf('Проверка достоверности'));
     expect(markup).toContain('Проверка временно недоступна');
+    expect(markup).toContain('Временно недоступна');
+    expect(markup).toContain('gemini_credibility');
     expect(markup).not.toContain('>0<span');
+    expect(technicalBlock).not.toContain('Время обработки');
   });
 
   it('does not invent an authenticity index when only the AI-origin branch is unavailable', () => {

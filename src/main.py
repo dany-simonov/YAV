@@ -478,13 +478,19 @@ async def _analyze_combined_normal_text(
     """Run independent normal-text branches concurrently and join their safe output."""
     text_bytes = text.encode("utf-8")
     ai_started = time.monotonic()
-    credibility_started = time.monotonic()
     _safe_diagnostic_log(diagnostic_log, "branch=ai_origin stage=branch_start")
     ai_diagnostic = _branch_diagnostic(diagnostic_log, "ai_origin") if diagnostic_log is not None else None
     ai_task = router.route(MediaType.TEXT, b"", text, diagnostic_log=ai_diagnostic)
-    credibility_task = GeminiCredibilityAdapter().analyze(
-        text_bytes, diagnostic_log=diagnostic_log,
-    )
+
+    async def _run_credibility_branch() -> CredibilityAssessment:
+        credibility_started = time.monotonic()
+        credibility = await GeminiCredibilityAdapter().analyze(text_bytes, diagnostic_log=diagnostic_log)
+        # This is deliberately only the credibility coroutine's elapsed time:
+        # it excludes waiting for the parallel AI-origin branch and persistence.
+        elapsed_ms = max(0, min(60_000, round((time.monotonic() - credibility_started) * 1000)))
+        return credibility.model_copy(update={"processing_ms": elapsed_ms})
+
+    credibility_task = _run_credibility_branch()
     ai_outcome, credibility_outcome = await asyncio.gather(
         ai_task, credibility_task, return_exceptions=True,
     )
@@ -497,7 +503,7 @@ async def _analyze_combined_normal_text(
         diagnostic_log,
         "branch=credibility stage=branch_"
         + ("error" if isinstance(credibility_outcome, BaseException) else "success")
-        + f" elapsed_ms={round((time.monotonic() - credibility_started) * 1000)}",
+        + (f" elapsed_ms={credibility_outcome.processing_ms}" if not isinstance(credibility_outcome, BaseException) else ""),
     )
 
     def _branch_error(value: Any) -> bool:

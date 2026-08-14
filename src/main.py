@@ -303,7 +303,7 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
     status = getattr(exc, "status_code", None)
     safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "none"
     provider_message = getattr(exc, "provider_message", None)
-    if provider not in {"aiornot", "sightengine"} or error_code != "request_error":
+    if provider not in {"aiornot", "sightengine", "gemini"} or error_code != "request_error":
         provider_message = None
     if isinstance(provider_message, str):
         provider_message = provider_message.replace("\r", " ").replace("\n", " ").strip()
@@ -329,10 +329,14 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
         candidate = getattr(exc, "operation", None)
         if candidate in {"files_start", "upload_finalize", "files_poll", "generate_content"}:
             operation = candidate
+    google_status = getattr(exc, "upstream_status", None)
+    google_status = google_status if isinstance(google_status, str) and re.fullmatch(r"[A-Z_]{1,64}", google_status) else "none"
+    google_code = getattr(exc, "upstream_code", None)
+    google_code = google_code if isinstance(google_code, int) and 100 <= google_code <= 599 else "none"
     message = (
         "provider_external_api_error operation=provider.external_api_error "
         f"provider={provider} safe_error_code={error_code} "
-        f"stage=request category={category} gemini_operation={operation} status_code={safe_status} "
+        f"stage=request category={category} gemini_operation={operation} google_status={google_status} google_code={google_code} status_code={safe_status} "
         f"exception_class={type(exc).__name__}"
     )
     if provider == "aiornot" and error_code == "request_error":

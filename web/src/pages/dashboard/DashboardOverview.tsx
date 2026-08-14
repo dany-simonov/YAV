@@ -279,7 +279,7 @@ export function DashboardOverview() {
                   Gemini Text Verification / AIOrNot
                 </td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-text-secondary font-semibold">—</span>
+                  <span className="text-mv-text-secondary font-semibold">98,7</span>
                 </td>
               </tr>
             </tbody>

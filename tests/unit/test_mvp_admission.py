@@ -95,6 +95,30 @@ def test_old_user_has_no_new_user_dimensions(monkeypatch):
     assert {item.dimension for item in plan.dimensions} == {"ip_total_daily", "global_gemini_daily"}
 
 
+def test_unlimited_user_skips_user_and_ip_dimensions_but_keeps_provider_budget(monkeypatch):
+    monkeypatch.setenv("UNLIMITED_USER_IDS", "trusted-user,other-user")
+    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    store = _store(monkeypatch, now)
+    plan = build_admission_plan(
+        store, user_id="trusted-user", client_ip="192.0.2.1",
+        account_created_at=(now - timedelta(hours=1)).isoformat(), media_type="text",
+        input_size=100, text="word " * 20, hybrid=True,
+    )
+    assert {item.dimension for item in plan.dimensions} == {"global_gemini_daily"}
+    assert plan.units_for("gemini") == 2
+
+
+@pytest.mark.parametrize(("has_image", "has_video"), [(True, False), (False, True), (True, True)])
+def test_unlimited_source_post_extraction_has_no_user_or_ip_dimensions(monkeypatch, has_image, has_video):
+    monkeypatch.setenv("UNLIMITED_USER_IDS", "trusted-user")
+    now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    plan = build_source_media_admission_plan(
+        _store(monkeypatch, now), user_id="trusted-user", client_ip="192.0.2.1",
+        account_created_at=(now - timedelta(hours=1)).isoformat(), has_image=has_image, has_video=has_video,
+    )
+    assert plan.dimensions == ()
+
+
 @pytest.mark.parametrize(
     ("media_type", "hybrid", "size"),
     [

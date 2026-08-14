@@ -103,6 +103,19 @@ async def test_missing_api_key_returns_controlled_result_without_http():
 
 
 @pytest.mark.asyncio
+async def test_list_models_missing_gemini_key_is_controlled_without_http():
+    with patch.object(settings, "gemini_api_key", ""), patch(
+        "src.gemini_smoke.httpx.AsyncClient"
+    ) as client:
+        result = await run_gemini_list_models()
+    assert result == {
+        "ok": False, "provider": "gemini", "operation": "list_models",
+        "provider_code": "MISSING_API_KEY",
+    }
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_list_models_returns_only_allowlisted_flash_generate_content_metadata():
     client = _client(response=_response(200, _models_response()))
     diagnostic_log = MagicMock()
@@ -146,7 +159,7 @@ async def test_list_models_malformed_response_is_safe_and_controlled():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [400, 503])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500])
 async def test_list_models_provider_errors_are_safe(status):
     client = _client(response=_response(status, {"error": {
         "status": "FAILED_PRECONDITION", "message": "api_key=never-return",
@@ -157,6 +170,36 @@ async def test_list_models_provider_errors_are_safe(status):
         "ok": False, "provider": "gemini", "operation": "list_models",
         "provider_status": status, "provider_code": "FAILED_PRECONDITION",
     }
+
+
+@pytest.mark.asyncio
+async def test_list_models_timeout_and_client_runtime_error_are_controlled_with_safe_logs():
+    for error, expected_code, expected_category in (
+        (httpx.ReadTimeout("timeout"), "TIMEOUT", "timeout"),
+        (RuntimeError("event loop problem"), "CLIENT_RUNTIME_ERROR", "transport"),
+    ):
+        client = _client(error=error)
+        logs: list[str] = []
+        with patch("src.gemini_smoke.httpx.AsyncClient", return_value=client):
+            result = await run_gemini_list_models(logs.append)
+        assert result["ok"] is False
+        assert result["provider_code"] == expected_code
+        assert any(f"stage=request_error category={expected_category}" in item for item in logs)
+        assert all("event loop problem" not in item for item in logs)
+
+
+@pytest.mark.asyncio
+async def test_list_models_malformed_models_array_is_controlled_and_safe():
+    client = _client(response=_response(200, {"models": {"not": "a list"}, "secret": "never-return"}))
+    logs: list[str] = []
+    with patch("src.gemini_smoke.httpx.AsyncClient", return_value=client):
+        result = await run_gemini_list_models(logs.append)
+    assert result == {
+        "ok": False, "provider": "gemini", "operation": "list_models",
+        "provider_status": 200, "provider_code": "INVALID_RESPONSE",
+    }
+    assert any("stage=parse_error category=invalid_response status_code=200" in item for item in logs)
+    assert "never-return" not in str(result) + str(logs)
 
 
 @pytest.mark.asyncio
@@ -314,6 +357,58 @@ async def test_disabled_or_wrong_secret_denies_list_models():
             )
         assert raised.value.code == "diagnostic_access_denied"
         list_models.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_diagnostic_secret_denies_list_models():
+    with patch.object(settings, "gemini_smoke_enabled", True), patch.object(
+        settings, "gemini_smoke_diagnostic_secret", ""
+    ), patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
+        "src.main.run_gemini_list_models", new=AsyncMock()
+    ) as list_models, pytest.raises(SecurityValidationError) as raised:
+        await _execute_request(
+            {"action": "gemini_list_models"}, "", "user", "jwt",
+            diagnostic_authorization="diagnostic-secret",
+        )
+    assert raised.value.code == "diagnostic_access_denied"
+    list_models.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_models_does_not_require_function_api_key_after_authenticated_diagnostic_guard():
+    response = {"ok": True, "provider": "gemini", "operation": "list_models", "models": []}
+    with patch.object(settings, "gemini_smoke_enabled", True), patch.object(
+        settings, "gemini_smoke_diagnostic_secret", "diagnostic-secret"
+    ), patch("src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "user", "emailVerification": True})), patch(
+        "src.main.run_gemini_list_models", new=AsyncMock(return_value=response)
+    ) as list_models:
+        result = await _execute_request(
+            {"action": "gemini_list_models"}, "", "user", "jwt",
+            diagnostic_authorization="diagnostic-secret",
+        )
+    assert result is response
+    list_models.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_list_models_turns_appwrite_account_runtime_error_into_controlled_diagnostic_result():
+    logs: list[str] = []
+    with patch.object(settings, "gemini_smoke_enabled", True), patch.object(
+        settings, "gemini_smoke_diagnostic_secret", "diagnostic-secret"
+    ), patch("src.main.get_authenticated_account", new=AsyncMock(side_effect=RuntimeError("account failed"))), patch(
+        "src.main.run_gemini_list_models", new=AsyncMock()
+    ) as list_models:
+        result = await _execute_request(
+            {"action": "gemini_list_models"}, "", "user", "jwt", diagnostic_log=logs.append,
+            diagnostic_authorization="diagnostic-secret",
+        )
+    assert result == {
+        "ok": False, "provider": "appwrite", "operation": "gemini_list_models",
+        "provider_code": "AUTHENTICATION_UNAVAILABLE",
+    }
+    assert "diagnostic=gemini_list_models stage=auth_error category=unavailable" in logs
+    assert all("account failed" not in item for item in logs)
+    list_models.assert_not_awaited()
 
 
 @pytest.mark.asyncio

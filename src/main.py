@@ -651,11 +651,16 @@ async def _execute_request(
     diagnostic_authorization: str = "",
 ) -> dict[str, Any]:
     """Authorize the execution, ensure its profile, and persist trusted results."""
-    if not api_key:
-        raise RuntimeError("Missing Appwrite Function API key")
     if not user_id or not user_jwt:
         raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
     request = validate_request_payload(payload) if isinstance(payload, dict) else payload
+    is_diagnostic = request.action in {"gemini_smoke_test", "gemini_list_models"}
+    if is_diagnostic:
+        _safe_diagnostic_log(diagnostic_log, f"diagnostic={request.action} stage=start")
+    # Diagnostics authenticate through the invoking user's JWT and do not use
+    # the Function API key.  Keep analysis and profile operations fail-closed.
+    if not api_key and not is_diagnostic:
+        raise RuntimeError("Missing Appwrite Function API key")
     is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest))
     if execution_deadline is None and request_started_at is not None and is_analyze:
         try:
@@ -673,7 +678,16 @@ async def _execute_request(
 
     deadline_token = set_execution_deadline(execution_deadline) if execution_deadline is not None else None
     try:
-        account = await _within_deadline(get_authenticated_account(user_id, user_jwt))
+        try:
+            account = await _within_deadline(get_authenticated_account(user_id, user_jwt))
+        except RuntimeError:
+            if is_diagnostic:
+                _safe_diagnostic_log(diagnostic_log, f"diagnostic={request.action} stage=auth_error category=unavailable")
+                return {
+                    "ok": False, "provider": "appwrite", "operation": request.action,
+                    "provider_code": "AUTHENTICATION_UNAVAILABLE",
+                }
+            raise
 
         if request.action == "ensure_profile":
             profile = await _within_deadline(ensure_user_profile(account, api_key))

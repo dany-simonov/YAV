@@ -103,11 +103,11 @@ def _safe_generation_methods(value: Any) -> list[str]:
     return [item for item in value[:32] if isinstance(item, str) and _METHOD.fullmatch(item)]
 
 
-def _safe_flash_models(body: Any) -> list[dict[str, str | list[str]]]:
+def _safe_flash_models(body: Any) -> list[dict[str, str | list[str]]] | None:
     """Return only curated model metadata needed for a generateContent probe."""
     models = body.get("models") if isinstance(body, dict) else None
     if not isinstance(models, list):
-        return []
+        return None
     result: list[dict[str, str | list[str]]] = []
     for item in models[:1000]:
         if not isinstance(item, dict):
@@ -156,6 +156,30 @@ def _log(diagnostic_log: Callable[[str], None] | None, *, model: str, duration_m
         f"provider=gemini stage=smoke_test model={model} http_status={status} "
         f"provider_code={code_value} duration_ms={duration_ms}"
     )
+
+
+def _list_log(diagnostic_log: Callable[[str], None] | None, stage: str, **fields: str | int) -> None:
+    """Emit only fixed, bounded ListModels observability fields."""
+    if diagnostic_log is None:
+        return
+    allowed = {"category", "elapsed_ms", "model_count", "status_code"}
+    suffix = " ".join(f"{name}={value}" for name, value in fields.items() if name in allowed)
+    try:
+        diagnostic_log(f"diagnostic=gemini_list_models stage={stage}" + (f" {suffix}" if suffix else ""))
+    except Exception:
+        pass
+
+
+def _list_error_category(status_code: int) -> str:
+    if status_code in {401, 403}:
+        return "auth_configuration"
+    if status_code == 404:
+        return "endpoint_not_found"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code >= 500:
+        return "unavailable"
+    return "request_rejected"
 
 
 async def run_gemini_smoke_test(
@@ -225,20 +249,29 @@ async def run_gemini_list_models(
 ) -> dict[str, Any]:
     """List only allowlisted Gemini Flash model metadata for an authorized diagnostic."""
     started = time.perf_counter()
+    _list_log(diagnostic_log, "start")
     if not settings.gemini_api_key:
-        return {
+        result = {
             "ok": False, "provider": PROVIDER, "operation": "list_models",
             "provider_code": "MISSING_API_KEY",
         }
+        _list_log(diagnostic_log, "config_error", category="missing_api_key")
+        _list_log(diagnostic_log, "response")
+        return result
     base_url = safe_gemini_base_url()
     if base_url is None:
-        return {
+        result = {
             "ok": False, "provider": PROVIDER, "operation": "list_models",
             "provider_code": "INVALID_CONFIGURATION",
         }
+        _list_log(diagnostic_log, "config_error", category="invalid_configuration")
+        _list_log(diagnostic_log, "response")
+        return result
     status: int | str = "network"
     code: str | None = None
+    _list_log(diagnostic_log, "config_ok")
     try:
+        _list_log(diagnostic_log, "request_start")
         async with asyncio.timeout(TOTAL_TIMEOUT_SECONDS):
             async with httpx.AsyncClient(timeout=TIMEOUT) as client:
                 response = await client.get(
@@ -249,9 +282,24 @@ async def run_gemini_list_models(
         result: dict[str, Any] = {
             "ok": False, "provider": PROVIDER, "operation": "list_models", "provider_code": code,
         }
+        _list_log(
+            diagnostic_log, "request_error", category="timeout", status_code="none",
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
     except httpx.TransportError:
         code = "NETWORK_ERROR"
         result = {"ok": False, "provider": PROVIDER, "operation": "list_models", "provider_code": code}
+        _list_log(
+            diagnostic_log, "request_error", category="transport", status_code="none",
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
+    except RuntimeError:
+        code = "CLIENT_RUNTIME_ERROR"
+        result = {"ok": False, "provider": PROVIDER, "operation": "list_models", "provider_code": code}
+        _list_log(
+            diagnostic_log, "request_error", category="transport", status_code="none",
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+        )
     else:
         if response.status_code != 200:
             status = response.status_code
@@ -262,17 +310,35 @@ async def run_gemini_list_models(
                 "provider_status": response.status_code,
                 **({"provider_code": code} if code is not None else {}),
             }
+            _list_log(
+                diagnostic_log, "request_error", category=_list_error_category(response.status_code),
+                status_code=response.status_code, elapsed_ms=int((time.perf_counter() - started) * 1000),
+            )
         else:
             status = 200
+            _list_log(
+                diagnostic_log, "request_success", status_code=200,
+                elapsed_ms=int((time.perf_counter() - started) * 1000),
+            )
             try:
                 all_flash_models = _safe_flash_models(response.json())
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RuntimeError):
                 code = "INVALID_RESPONSE"
                 result = {
                     "ok": False, "provider": PROVIDER, "operation": "list_models",
                     "provider_status": 200, "provider_code": code,
                 }
+                _list_log(diagnostic_log, "parse_error", category="invalid_response", status_code=200)
             else:
+                if all_flash_models is None:
+                    code = "INVALID_RESPONSE"
+                    result = {
+                        "ok": False, "provider": PROVIDER, "operation": "list_models",
+                        "provider_status": 200, "provider_code": code,
+                    }
+                    _list_log(diagnostic_log, "parse_error", category="invalid_response", status_code=200)
+                    _list_log(diagnostic_log, "response")
+                    return result
                 models = [
                     item for item in all_flash_models
                     if "generateContent" in item["supportedGenerationMethods"]
@@ -287,8 +353,6 @@ async def run_gemini_list_models(
                     },
                     "generate_content_models": [item["name"] for item in models],
                 }
-    _log(
-        diagnostic_log, model="models", duration_ms=int((time.perf_counter() - started) * 1000),
-        status=status, code=code,
-    )
+                _list_log(diagnostic_log, "parse_success", model_count=len(models))
+    _list_log(diagnostic_log, "response")
     return result

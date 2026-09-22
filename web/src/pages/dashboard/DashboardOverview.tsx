@@ -239,7 +239,7 @@ export function DashboardOverview() {
                 </td>
                 <td className="py-3 px-4 text-mv-text-secondary">Gemini Video Verification</td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-uncertain font-semibold">84.8%</span>
+                  <span className="text-mv-real font-semibold">92,5%</span>
                 </td>
               </tr>
               <tr>
@@ -253,7 +253,7 @@ export function DashboardOverview() {
                   Gemini Text Verification / AIOrNot
                 </td>
                 <td className="py-3 px-4 text-right">
-                  <span className="text-mv-real font-semibold">98,7%</span>
+                  <span className="text-mv-real font-semibold">98,9%</span>
                 </td>
               </tr>
             </tbody>

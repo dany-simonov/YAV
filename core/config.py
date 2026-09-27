@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     # Rate limits
     free_daily_limit: int = 3
     premium_monthly_limit: int = 100
+    free_heavy_media_daily_limit: int = 1
+    pro_heavy_media_monthly_limit: int = 25
+    enterprise_monthly_limit: int = 1_000
+    enterprise_heavy_media_monthly_limit: int = 250
+    custom_monthly_limit: int = 100
+    custom_heavy_media_monthly_limit: int = 25
+    # Comma-separated Appwrite account IDs. This is a global server-side role,
+    # never a client payload field or a mutable user-profile attribute.
+    system_admin_user_ids: str = ""
 
     # Production MVP abuse protection.  These are deliberately server-side
     # defaults: changing them needs no schema migration.

@@ -12,9 +12,14 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+
 from api.schemas import AnalysisResult, HybridAnalysisResponse
 from core.enums import MediaType, ModelUsed, ScoreKind, Verdict
 from core.result_normalization import authenticity_index_from_ai_probability
+from src.execution_deadline import (
+    bounded_persistence_timeout,
+    current_execution_deadline,
+)
 from src.validation import (
     MAX_DETAILS_BYTES,
     MAX_EXPLANATION,
@@ -22,8 +27,6 @@ from src.validation import (
     MAX_PROVIDER,
     MAX_SOURCE_LABEL,
 )
-from src.execution_deadline import bounded_persistence_timeout, current_execution_deadline
-
 
 DEFAULT_ENDPOINT = "https://fra.cloud.appwrite.io/v1"
 DEFAULT_PROJECT_ID = "6a67d79d000fcca992f3"
@@ -541,14 +544,22 @@ async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str
     base_url = f"{endpoint}/tablesdb/{database_id}/tables/{users_table_id}/rows"
     headers = {"X-Appwrite-Project": project_id, "X-Appwrite-Key": api_key}
     email_verified = account.get("emailVerification") is True
+    raw_email = account.get("email")
+    email = raw_email[:320] if isinstance(raw_email, str) else ""
 
     async def _sync_existing(client: httpx.AsyncClient, row: dict[str, Any]) -> dict[str, Any]:
-        if row.get("email_verified") is email_verified:
+        sync_data: dict[str, Any] = {"email_verified": email_verified}
+        # The runtime account normally supplies email. Preserve a legacy
+        # profile email if a malformed/older runtime shape omits it instead
+        # of replacing it with an empty value.
+        if isinstance(raw_email, str) and row.get("email") != email:
+            sync_data["email"] = email
+        if row.get("email_verified") is email_verified and len(sync_data) == 1:
             return row
         updated = await client.patch(
             f"{base_url}/{encoded_user}",
             headers=headers,
-            json={"data": {"email_verified": email_verified}},
+            json={"data": sync_data},
         )
         if updated.status_code != 200:
             raise RuntimeError(f"Profile verification sync failed ({updated.status_code})")
@@ -568,7 +579,11 @@ async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str
                 "rowId": user_id,
                 "data": {
                     "name": str(account.get("name") or "Пользователь")[:128],
+                    "email": email,
                     "plan": "free",
+                    "subscription": "free",
+                    "quota_overrides": "{}",
+                    "quota_usage_generations": "{}",
                     "status": "active",
                     "email_verified": email_verified,
                     "checks_count": 0,

@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_SOURCE_LABEL = 120
@@ -27,8 +26,12 @@ HYBRID_TEXT_MIN = 200
 MAX_TEXT_LENGTH = 10_000
 MAX_FILENAME_LENGTH = 255
 
-_FILE_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-_BIDI_SPOOFING = frozenset(chr(value) for value in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+_FILE_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+_BIDI_SPOOFING = frozenset(
+    chr(value) for value in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
 
 
 class SecurityValidationError(Exception):
@@ -58,9 +61,13 @@ def validate_text(value: str, *, hybrid: bool) -> str:
     if not value.strip():
         raise SecurityValidationError("invalid_request", "Текст не должен быть пустым.")
     if _contains_unsafe_control(value, permit_whitespace=True):
-        raise SecurityValidationError("invalid_request", "Текст содержит недопустимые управляющие символы.")
+        raise SecurityValidationError(
+            "invalid_request", "Текст содержит недопустимые управляющие символы."
+        )
     if len(value) > MAX_TEXT_LENGTH:
-        raise SecurityValidationError("text_too_long", "Текст превышает лимит в 10 000 символов.")
+        raise SecurityValidationError(
+            "text_too_long", "Текст превышает лимит в 10 000 символов."
+        )
     minimum = HYBRID_TEXT_MIN if hybrid else NORMAL_TEXT_MIN
     if len(value) < minimum:
         raise SecurityValidationError(
@@ -71,9 +78,15 @@ def validate_text(value: str, *, hybrid: bool) -> str:
 
 def validate_file_id(value: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 36:
-        raise SecurityValidationError("invalid_file_id", "Некорректный идентификатор файла.")
-    if value[0] not in _FILE_ID_CHARS or any(char not in _FILE_ID_CHARS for char in value):
-        raise SecurityValidationError("invalid_file_id", "Некорректный идентификатор файла.")
+        raise SecurityValidationError(
+            "invalid_file_id", "Некорректный идентификатор файла."
+        )
+    if value[0] not in _FILE_ID_CHARS or any(
+        char not in _FILE_ID_CHARS for char in value
+    ):
+        raise SecurityValidationError(
+            "invalid_file_id", "Некорректный идентификатор файла."
+        )
     return value
 
 
@@ -81,19 +94,29 @@ def normalize_source_label(value: str | None) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise SecurityValidationError("invalid_request", "Название источника должно быть строкой.")
+        raise SecurityValidationError(
+            "invalid_request", "Название источника должно быть строкой."
+        )
     normalized = unicodedata.normalize("NFC", value).strip()
     if len(normalized) > MAX_SOURCE_LABEL:
-        raise SecurityValidationError("invalid_request", "Название источника слишком длинное.")
-    if _contains_unsafe_control(normalized) or any(char in _BIDI_SPOOFING for char in normalized):
-        raise SecurityValidationError("invalid_request", "Название источника содержит недопустимые символы.")
+        raise SecurityValidationError(
+            "invalid_request", "Название источника слишком длинное."
+        )
+    if _contains_unsafe_control(normalized) or any(
+        char in _BIDI_SPOOFING for char in normalized
+    ):
+        raise SecurityValidationError(
+            "invalid_request", "Название источника содержит недопустимые символы."
+        )
     return normalized
 
 
 class _RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
-    action: Literal["analyze", "ensure_profile", "gemini_smoke_test", "gemini_list_models"] = "analyze"
+    action: Literal[
+        "analyze", "ensure_profile", "gemini_smoke_test", "gemini_list_models"
+    ] = "analyze"
     user_id: str | None = Field(default=None, alias="userId", max_length=128)
     username: str | None = Field(default=None, max_length=128)
     first_name: str | None = Field(default=None, alias="firstName", max_length=128)
@@ -109,6 +132,88 @@ class GeminiSmokeTestRequest(_RequestModel):
 
 class GeminiListModelsRequest(_RequestModel):
     action: Literal["gemini_list_models"]
+
+
+class GetMySubscriptionRequest(_RequestModel):
+    action: Literal["get_my_subscription"]
+
+
+class _AdminActionRequest(_RequestModel):
+    """Admin actions never accept caller-controlled identity or role hints."""
+
+    @model_validator(mode="after")
+    def _reject_spoofable_identity(self) -> "_AdminActionRequest":
+        if (
+            self.user_id is not None
+            or self.username is not None
+            or self.first_name is not None
+        ):
+            raise ValueError("admin requests cannot include caller identity fields")
+        return self
+
+
+class _AdminRequest(_AdminActionRequest):
+    target_user_id: str = Field(alias="targetUserId", min_length=1, max_length=36)
+
+
+class AdminGetUserPolicyRequest(_AdminRequest):
+    action: Literal["admin_get_user_policy"]
+
+
+class AdminSetSubscriptionRequest(_AdminRequest):
+    action: Literal["admin_set_subscription"]
+    subscription: str = Field(min_length=1, max_length=16)
+
+
+class AdminSetQuotaOverridesRequest(_AdminRequest):
+    action: Literal["admin_set_quota_overrides"]
+    overrides: dict[str, int]
+
+
+class AdminRemoveQuotaOverrideRequest(_AdminRequest):
+    action: Literal["admin_remove_quota_override"]
+    quota_key: str = Field(alias="quotaKey", min_length=1, max_length=32)
+
+
+class AdminResetQuotaOverridesRequest(_AdminRequest):
+    action: Literal["admin_reset_quota_overrides"]
+
+
+class AdminListUsersRequest(_AdminActionRequest):
+    action: Literal["admin_list_users"]
+    page_size: int = Field(default=25, alias="pageSize", ge=1, le=100)
+    cursor: str | None = Field(default=None, min_length=1, max_length=36)
+    search: str | None = Field(default=None, min_length=1, max_length=320)
+
+
+class AdminResetUserQuotaUsageRequest(_AdminRequest):
+    action: Literal["admin_reset_user_quota_usage"]
+    quota_key: str = Field(alias="quotaKey", min_length=1, max_length=32)
+    idempotency_key: str = Field(
+        alias="idempotencyKey",
+        min_length=16,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+
+
+class AdminResetAllUserUsageRequest(_AdminRequest):
+    action: Literal["admin_reset_all_user_usage"]
+    idempotency_key: str = Field(
+        alias="idempotencyKey",
+        min_length=16,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+
+
+class AdminListAuditEventsRequest(_AdminActionRequest):
+    action: Literal["admin_list_audit_events"]
+    page_size: int = Field(default=25, alias="pageSize", ge=1, le=100)
+    cursor: str | None = Field(default=None, min_length=1, max_length=36)
+    target_user_id: str | None = Field(
+        default=None, alias="targetUserId", min_length=1, max_length=36
+    )
 
 
 class TextAnalyzeRequest(_RequestModel):
@@ -133,7 +238,9 @@ class TextAnalyzeRequest(_RequestModel):
 class FileAnalyzeRequest(_RequestModel):
     action: Literal["analyze"] = "analyze"
     file_id: str = Field(alias="fileId")
-    media_type: Literal["image", "audio", "video"] | None = Field(default=None, alias="mediaType")
+    media_type: Literal["image", "audio", "video"] | None = Field(
+        default=None, alias="mediaType"
+    )
     source_label: str | None = Field(default=None, alias="sourceLabel")
 
     @model_validator(mode="after")
@@ -145,6 +252,7 @@ class FileAnalyzeRequest(_RequestModel):
 
 class SourceAnalyzeRequest(_RequestModel):
     """A public URL is the sole input for source-based Complex analysis."""
+
     action: Literal["analyze"] = "analyze"
     mode: Literal["complex_source"]
     source_url: str = Field(alias="sourceUrl", min_length=8, max_length=2_048)
@@ -152,9 +260,12 @@ class SourceAnalyzeRequest(_RequestModel):
 
 class ComplexAnalyzeRequest(_RequestModel):
     """Unified Complex input: each source is optional, one is required."""
+
     action: Literal["analyze"] = "analyze"
     mode: Literal["complex"]
-    source_url: str | None = Field(default=None, alias="sourceUrl", min_length=8, max_length=2_048)
+    source_url: str | None = Field(
+        default=None, alias="sourceUrl", min_length=8, max_length=2_048
+    )
     text: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     file_ids: list[str] = Field(default_factory=list, alias="fileIds", max_length=4)
 
@@ -174,8 +285,23 @@ class ComplexAnalyzeRequest(_RequestModel):
 
 
 ValidatedRequest = (
-    EnsureProfileRequest | GeminiSmokeTestRequest | GeminiListModelsRequest
-    | TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest | ComplexAnalyzeRequest
+    EnsureProfileRequest
+    | GeminiSmokeTestRequest
+    | GeminiListModelsRequest
+    | GetMySubscriptionRequest
+    | AdminGetUserPolicyRequest
+    | AdminSetSubscriptionRequest
+    | AdminSetQuotaOverridesRequest
+    | AdminRemoveQuotaOverrideRequest
+    | AdminResetQuotaOverridesRequest
+    | AdminListUsersRequest
+    | AdminResetUserQuotaUsageRequest
+    | AdminResetAllUserUsageRequest
+    | AdminListAuditEventsRequest
+    | TextAnalyzeRequest
+    | FileAnalyzeRequest
+    | SourceAnalyzeRequest
+    | ComplexAnalyzeRequest
 )
 
 
@@ -183,7 +309,9 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise SecurityValidationError("invalid_json", "JSON содержит повторяющееся поле.")
+            raise SecurityValidationError(
+                "invalid_json", "JSON содержит повторяющееся поле."
+            )
         result[key] = value
     return result
 
@@ -191,21 +319,29 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def parse_json_object(raw: str | bytes | bytearray) -> dict[str, Any]:
     if isinstance(raw, (bytes, bytearray)):
         if len(raw) > MAX_REQUEST_BYTES:
-            raise SecurityValidationError("payload_too_large", "Запрос превышает лимит в 64 KiB.", 413)
+            raise SecurityValidationError(
+                "payload_too_large", "Запрос превышает лимит в 64 KiB.", 413
+            )
         try:
             raw = bytes(raw).decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise SecurityValidationError("invalid_json", "Некорректный UTF-8 JSON.") from exc
+            raise SecurityValidationError(
+                "invalid_json", "Некорректный UTF-8 JSON."
+            ) from exc
     if not isinstance(raw, str):
         raise SecurityValidationError("invalid_json", "Некорректный JSON запроса.")
     if len(raw.encode("utf-8")) > MAX_REQUEST_BYTES:
-        raise SecurityValidationError("payload_too_large", "Запрос превышает лимит в 64 KiB.", 413)
+        raise SecurityValidationError(
+            "payload_too_large", "Запрос превышает лимит в 64 KiB.", 413
+        )
     try:
         parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
     except SecurityValidationError:
         raise
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise SecurityValidationError("invalid_json", "Некорректный JSON запроса.") from exc
+        raise SecurityValidationError(
+            "invalid_json", "Некорректный JSON запроса."
+        ) from exc
     if not isinstance(parsed, dict):
         raise SecurityValidationError("invalid_json", "JSON должен быть объектом.")
     return parsed
@@ -215,11 +351,17 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
     if not isinstance(payload, dict):
         raise SecurityValidationError("invalid_request", "JSON должен быть объектом.")
     try:
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
     except (TypeError, ValueError) as exc:
-        raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.") from exc
+        raise SecurityValidationError(
+            "invalid_request", "Некорректные параметры запроса."
+        ) from exc
     if len(encoded) > MAX_REQUEST_BYTES:
-        raise SecurityValidationError("payload_too_large", "Запрос превышает лимит в 64 KiB.", 413)
+        raise SecurityValidationError(
+            "payload_too_large", "Запрос превышает лимит в 64 KiB.", 413
+        )
 
     action = payload.get("action", "analyze")
     if action == "ensure_profile":
@@ -228,6 +370,26 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         model = GeminiSmokeTestRequest
     elif action == "gemini_list_models":
         model = GeminiListModelsRequest
+    elif action == "get_my_subscription":
+        model = GetMySubscriptionRequest
+    elif action == "admin_get_user_policy":
+        model = AdminGetUserPolicyRequest
+    elif action == "admin_set_subscription":
+        model = AdminSetSubscriptionRequest
+    elif action == "admin_set_quota_overrides":
+        model = AdminSetQuotaOverridesRequest
+    elif action == "admin_remove_quota_override":
+        model = AdminRemoveQuotaOverrideRequest
+    elif action == "admin_reset_quota_overrides":
+        model = AdminResetQuotaOverridesRequest
+    elif action == "admin_list_users":
+        model = AdminListUsersRequest
+    elif action == "admin_reset_user_quota_usage":
+        model = AdminResetUserQuotaUsageRequest
+    elif action == "admin_reset_all_user_usage":
+        model = AdminResetAllUserUsageRequest
+    elif action == "admin_list_audit_events":
+        model = AdminListAuditEventsRequest
     elif action == "analyze" or "action" not in payload:
         has_text = "text" in payload
         has_file = "fileId" in payload
@@ -236,7 +398,10 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
             model = ComplexAnalyzeRequest
         elif has_source:
             if has_text or has_file or payload.get("mode") != "complex_source":
-                raise SecurityValidationError("conflicting_input", "Передайте один источник для комплексного анализа.")
+                raise SecurityValidationError(
+                    "conflicting_input",
+                    "Передайте один источник для комплексного анализа.",
+                )
             model = SourceAnalyzeRequest
         elif has_text == has_file:
             raise SecurityValidationError(
@@ -245,13 +410,17 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         else:
             model = TextAnalyzeRequest if has_text else FileAnalyzeRequest
     else:
-        raise SecurityValidationError("unsupported_action", "Неподдерживаемое действие.")
+        raise SecurityValidationError(
+            "unsupported_action", "Неподдерживаемое действие."
+        )
     try:
         return model.model_validate(payload)
     except SecurityValidationError:
         raise
     except ValidationError as exc:
-        raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.") from exc
+        raise SecurityValidationError(
+            "invalid_request", "Некорректные параметры запроса."
+        ) from exc
 
 
 def normalize_confidence(value: Any) -> float:
@@ -271,7 +440,12 @@ def safe_external_url(value: Any) -> str:
         parsed = urlsplit(value)
     except ValueError:
         return ""
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
         return ""
     return value
 

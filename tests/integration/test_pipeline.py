@@ -7,6 +7,8 @@ All tests skip gracefully if sample files are not present.
 Results should be recorded in tests/integration/results.md.
 """
 
+import os
+
 import pytest
 
 from core.enums import ModelUsed, Verdict
@@ -180,6 +182,10 @@ async def test_router_audio_end_to_end():
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.getenv("GEMINI_API_KEY"),
+    reason="GEMINI_API_KEY is required for Gemini integration",
+)
 async def test_router_text_end_to_end():
     from core.enums import MediaType
     from router.media_router import MediaRouter

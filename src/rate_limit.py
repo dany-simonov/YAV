@@ -15,10 +15,10 @@ from typing import Any
 
 import httpx
 
-from src.validation import SecurityValidationError
 from core.config import settings
 from core.enums import MediaType
-
+from src.subscriptions import EffectiveQuotaPolicy
+from src.validation import SecurityValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +81,21 @@ def normalize_client_ip(value: str) -> str:
 def _window(now: datetime, period: str) -> Window:
     now = now.astimezone(timezone.utc)
     if period == "minute":
-        start = now.replace(second=0, microsecond=0); end = start + timedelta(minutes=1); key = start.strftime("%Y-%m-%dT%H:%M")
+        start = now.replace(second=0, microsecond=0)
+        end = start + timedelta(minutes=1)
+        key = start.strftime("%Y-%m-%dT%H:%M")
     elif period == "hour":
-        start = now.replace(minute=0, second=0, microsecond=0); end = start + timedelta(hours=1); key = start.strftime("%Y-%m-%dT%H")
+        start = now.replace(minute=0, second=0, microsecond=0)
+        end = start + timedelta(hours=1)
+        key = start.strftime("%Y-%m-%dT%H")
     elif period == "day":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0); end = start + timedelta(days=1); key = start.strftime("%Y-%m-%d")
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        key = start.strftime("%Y-%m-%d")
     else:
-        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0); end = (start.replace(day=28) + timedelta(days=4)).replace(day=1); key = start.strftime("%Y-%m")
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        key = start.strftime("%Y-%m")
     return Window(key, end)
 
 
@@ -707,6 +715,50 @@ def _dimension(
     return AdmissionDimension(name, subject, window, units, limit, code, detail)
 
 
+def _subscription_dimensions(
+    policy: EffectiveQuotaPolicy | None, user_id: str, now: datetime, *, include_checks: bool,
+    include_heavy_media: bool,
+) -> list[AdmissionDimension]:
+    """Translate the canonical effective policy into existing atomic counters."""
+    if policy is None or is_unlimited_user(user_id):
+        return []
+    requested = (("checks", include_checks), ("heavy_media_checks", include_heavy_media))
+    dimensions: list[AdmissionDimension] = []
+    for key, enabled in requested:
+        if not enabled:
+            continue
+        quota = policy.quota(key)
+        generation = policy.generation(key)
+        period = quota.period
+        if period not in {"day", "month"}:
+            raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+        # Dimension names are stable across plan changes so usage remains
+        # authoritative if an administrator changes a subscription mid-window.
+        dimension = "subscription_checks" if key == "checks" else "subscription_heavy_media"
+        # Generation zero deliberately retains the historical subject format so
+        # deployment does not discard existing in-window usage. A reset moves
+        # only subsequent admissions to an isolated new counter generation.
+        subject = user_id if generation == 0 else f"{user_id}:g{generation}"
+        dimensions.append(_dimension(
+            f"{dimension}_{period}", subject, _window(now, period), 1, quota.limit,
+            "monthly_quota_exceeded" if period == "month" else "daily_quota_exceeded",
+            "Месячный лимит проверок исчерпан." if period == "month" else "Дневной лимит проверок исчерпан.",
+        ))
+    return dimensions
+
+
+def build_subscription_admission_plan(
+    store: AppwriteTablesRateLimitStore, *, user_id: str, policy: EffectiveQuotaPolicy | None,
+    include_heavy_media: bool = False,
+) -> AdmissionPlan:
+    """Reserve only policy counters for a unified Complex request once."""
+    return AdmissionPlan(
+        user_id,
+        tuple(_subscription_dimensions(policy, user_id, store.now, include_checks=True, include_heavy_media=include_heavy_media)),
+        (),
+    )
+
+
 def _provider_plan(store: AppwriteTablesRateLimitStore, provider: str, units: int) -> AdmissionPlan:
     if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
         raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
@@ -738,6 +790,7 @@ def _provider_plan(store: AppwriteTablesRateLimitStore, provider: str, units: in
 def build_admission_plan(
     store: AppwriteTablesRateLimitStore, *, user_id: str, client_ip: str, account_created_at: Any,
     media_type: str, input_size: int, text: str = "", hybrid: bool = False,
+    effective_policy: EffectiveQuotaPolicy | None = None,
 ) -> AdmissionPlan:
     """Build the whole request admission before any provider can be contacted."""
     now = store.now
@@ -768,6 +821,10 @@ def build_admission_plan(
 
     day = _window(now, "day")
     dimensions: list[AdmissionDimension] = []
+    dimensions.extend(_subscription_dimensions(
+        effective_policy, user_id, now, include_checks=True,
+        include_heavy_media=kind in {MediaType.IMAGE, MediaType.AUDIO, MediaType.VIDEO},
+    ))
     if not unlimited:
         dimensions.append(_dimension("ip_total_daily", store.ip_subject(client_ip), day, 1, settings.ip_total_daily,
                    "daily_quota_exceeded", "Достигнут дневной лимит проверок."))
@@ -834,6 +891,7 @@ def build_admission_plan(
 def build_source_media_admission_plan(
     store: AppwriteTablesRateLimitStore, *, user_id: str, client_ip: str,
     account_created_at: Any, has_image: bool, has_video: bool,
+    effective_policy: EffectiveQuotaPolicy | None = None,
 ) -> AdmissionPlan:
     """Reserve only source dimensions learned after safe extraction.
 
@@ -847,6 +905,10 @@ def build_source_media_admission_plan(
     is_new_user = now < created_at + timedelta(days=settings.new_user_period_days)
     day = _window(now, "day")
     dimensions: list[AdmissionDimension] = []
+    dimensions.extend(_subscription_dimensions(
+        effective_policy, user_id, now, include_checks=False,
+        include_heavy_media=has_image or has_video,
+    ))
     if has_image or has_video:
         dimensions.append(_dimension("ip_heavy_media_daily", store.ip_subject(client_ip), day, 1,
             settings.ip_heavy_media_daily, "daily_quota_exceeded", "Достигнут дневной лимит проверок."))

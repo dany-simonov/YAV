@@ -20,6 +20,10 @@ Environment variables required:
 
 from __future__ import annotations
 
+# This is an executable scenario (`python tests/e2e_test.py`), not a pytest
+# suite. Its helper functions deliberately accept an httpx client argument.
+__test__ = False
+
 import os
 import sys
 import time
@@ -116,7 +120,9 @@ def wait_for_api(max_wait: int = 60) -> bool:
             r = httpx.get(HEALTH_URL, timeout=5.0)
             if r.status_code == 200:
                 data = r.json()
-                print(f"✅ API ready — status={data.get('status')}, db={data.get('db')}")
+                print(
+                    f"✅ API ready — status={data.get('status')}, db={data.get('db')}"
+                )
                 return True
         except Exception:
             pass
@@ -127,7 +133,14 @@ def wait_for_api(max_wait: int = 60) -> bool:
 def _validate_response(body: dict[str, Any]) -> list[str]:
     """Return list of validation errors (empty = OK)."""
     errors: list[str] = []
-    required_fields = ["verdict", "confidence", "model_used", "explanation", "media_type", "processing_ms"]
+    required_fields = [
+        "verdict",
+        "confidence",
+        "model_used",
+        "explanation",
+        "media_type",
+        "processing_ms",
+    ]
     for f in required_fields:
         if f not in body:
             errors.append(f"Missing field: {f}")
@@ -199,12 +212,18 @@ def print_results(cases: list[TestCase]) -> int:
             latency = f"{tc.latency_ms}ms"
             expected_ok = verdict in tc.expected_verdicts
             status = "✅ OK" if expected_ok else "⚠️  UNEXPECTED"
-            print(f"{tc.name:<25} {verdict:<10} {confidence:<12} {model:<30} {latency:<10} {status}")
+            print(
+                f"{tc.name:<25} {verdict:<10} {confidence:<12} {model:<30} {latency:<10} {status}"
+            )
             if not expected_ok:
                 failures += 1
 
     print("=" * 90)
-    passed = sum(1 for tc in cases if not tc.error and tc.result.get("verdict") in tc.expected_verdicts)
+    passed = sum(
+        1
+        for tc in cases
+        if not tc.error and tc.result.get("verdict") in tc.expected_verdicts
+    )
     skipped = sum(1 for tc in cases if tc.error and tc.error.startswith("SKIP"))
     total = len(cases) - skipped
     print(f"Passed: {passed}/{total}  |  Skipped: {skipped}  |  Failures: {failures}")
@@ -215,6 +234,7 @@ def print_results(cases: list[TestCase]) -> int:
 # ---------------------------------------------------------------------------
 # Test: rate limit (send 429)
 # ---------------------------------------------------------------------------
+
 
 def test_missing_secret(client: httpx.Client) -> bool:
     """POST /analyze without x-api-secret must return 403."""

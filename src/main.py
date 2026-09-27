@@ -37,7 +37,12 @@ from core.exceptions import (  # noqa: E402
 from core.short_report import build_combined_text_report, build_short_report  # noqa: E402
 from adapters.gemini_credibility import GeminiCredibilityAdapter  # noqa: E402
 from adapters.gemini_text import GeminiTextAdapter  # noqa: E402
-from api.schemas import AnalysisResult, CredibilityAssessment, SourceDetails, SourceMediaResult  # noqa: E402
+from api.schemas import (
+    AnalysisResult,
+    CredibilityAssessment,
+    SourceDetails,
+    SourceMediaResult,
+)  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
     ChecksPersistenceError,
@@ -48,8 +53,28 @@ from src.appwrite_store import (  # noqa: E402
 from src.media_validation import validate_media_bytes  # noqa: E402
 from src.gemini_smoke import run_gemini_list_models, run_gemini_smoke_test  # noqa: E402
 from src.rate_limit import (  # noqa: E402
-    AppwriteTablesRateLimitStore, RateLimitError, build_admission_plan, build_source_media_admission_plan,
+    AppwriteTablesRateLimitStore,
+    RateLimitError,
+    build_admission_plan,
+    build_source_media_admission_plan,
+    build_subscription_admission_plan,
     enforce_admission,  # retained as a test-compatibility import; production uses AdmissionPlan.
+)
+from src.subscriptions import (  # noqa: E402
+    AppwriteSubscriptionStore,
+    EffectiveQuotaPolicy,
+    SubscriptionPersistenceError,
+    SubscriptionValidationError,
+    effective_policy_from_profile,
+    require_system_admin,
+)
+from src.admin import (  # noqa: E402
+    AdminAuditPersistenceError,
+    AdminOperationPendingError,
+    AdminPersistenceError,
+    AdminUserNotFoundError,
+    AppwriteAdminStore,
+    QuotaResetConflictError,
 )
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
 from src.execution_deadline import (  # noqa: E402
@@ -62,7 +87,18 @@ from src.execution_deadline import (  # noqa: E402
 )
 from src.validation import (  # noqa: E402
     FileAnalyzeRequest,
-    ComplexAnalyzeRequest, SourceAnalyzeRequest,
+    ComplexAnalyzeRequest,
+    SourceAnalyzeRequest,
+    AdminGetUserPolicyRequest,
+    AdminRemoveQuotaOverrideRequest,
+    AdminResetQuotaOverridesRequest,
+    AdminSetQuotaOverridesRequest,
+    AdminSetSubscriptionRequest,
+    AdminListUsersRequest,
+    AdminListAuditEventsRequest,
+    AdminResetUserQuotaUsageRequest,
+    AdminResetAllUserUsageRequest,
+    GetMySubscriptionRequest,
     SecurityValidationError,
     TextAnalyzeRequest,
     ValidatedRequest,
@@ -122,7 +158,9 @@ def _extract_payload(req: Any) -> dict[str, Any]:
             value = value()
         if value is not None:
             if not isinstance(value, dict):
-                raise SecurityValidationError("invalid_json", "JSON должен быть объектом.")
+                raise SecurityValidationError(
+                    "invalid_json", "JSON должен быть объектом."
+                )
             return value
     raise SecurityValidationError("invalid_json", "Некорректный JSON запроса.")
 
@@ -162,7 +200,9 @@ def _validate_storage_metadata(metadata: Any) -> dict[str, Any]:
     them after validating the narrow subset required for analysis.
     """
     if not isinstance(metadata, dict):
-        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
+        raise SecurityValidationError(
+            "storage_unavailable", "Хранилище временно недоступно.", 502
+        )
 
     filename = metadata.get("name")
     mime_type = metadata.get("mimeType")
@@ -176,11 +216,15 @@ def _validate_storage_metadata(metadata: Any) -> dict[str, Any]:
         or isinstance(size, bool)
         or not isinstance(size, int)
     ):
-        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
+        raise SecurityValidationError(
+            "invalid_media", "Некорректные метаданные файла.", 422
+        )
     if size <= 0:
         raise SecurityValidationError("invalid_media", "Файл пустой.", 422)
     if size > MAX_FILE_BYTES:
-        raise SecurityValidationError("file_too_large", "Файл превышает лимит в 20 MiB.", 413)
+        raise SecurityValidationError(
+            "file_too_large", "Файл превышает лимит в 20 MiB.", 413
+        )
 
     return {"name": filename, "mimeType": mime_type, "sizeOriginal": size}
 
@@ -190,12 +234,16 @@ def _metadata_media_type(metadata: dict[str, Any]) -> MediaType:
     mime = metadata.get("mimeType")
     filename = metadata.get("name")
     if not isinstance(mime, str) or not isinstance(filename, str):
-        raise SecurityValidationError("invalid_media", "Некорректные метаданные файла.", 422)
+        raise SecurityValidationError(
+            "invalid_media", "Некорректные метаданные файла.", 422
+        )
     mime_type = _METADATA_MIME_TYPES.get(mime.split(";", 1)[0].strip().lower())
     suffix = Path(filename).suffix.lower()
     extension_type = _METADATA_EXTENSIONS.get(suffix)
     if not mime_type or not extension_type:
-        raise SecurityValidationError("unsupported_media_type", "Неподдерживаемый формат файла.", 415)
+        raise SecurityValidationError(
+            "unsupported_media_type", "Неподдерживаемый формат файла.", 415
+        )
     if mime_type != extension_type:
         raise SecurityValidationError(
             "media_type_mismatch", "Метаданные файла не соответствуют формату.", 415
@@ -215,7 +263,9 @@ def _response_json(context: Any, payload: dict[str, Any], status: int = 200):
             return safe_payload
 
 
-def _log_analysis_result(context: Any, result: dict[str, Any], media_type: MediaType) -> None:
+def _log_analysis_result(
+    context: Any, result: dict[str, Any], media_type: MediaType
+) -> None:
     """Log a compact result summary without request data or credentials."""
     log = getattr(context, "log", None)
     if not callable(log):
@@ -223,7 +273,11 @@ def _log_analysis_result(context: Any, result: dict[str, Any], media_type: Media
 
     def _safe_value(value: Any) -> str:
         raw = getattr(value, "value", value)
-        return str(raw if raw is not None else "unknown").replace("\r", " ").replace("\n", " ")[:64]
+        return (
+            str(raw if raw is not None else "unknown")
+            .replace("\r", " ")
+            .replace("\n", " ")[:64]
+        )
 
     message = (
         f"analysis_result media_type={_safe_value(result.get('media_type', media_type))} "
@@ -263,7 +317,9 @@ def _safe_diagnostic_log(diagnostic_log: Any, message: str) -> None:
         pass
 
 
-def _log_internal_error(context: Any, exc: BaseException, *, operation: str = "unclassified") -> None:
+def _log_internal_error(
+    context: Any, exc: BaseException, *, operation: str = "unclassified"
+) -> None:
     """Emit bounded runtime diagnostics without rendering exception text or request data."""
     log = getattr(context, "log", None)
     if not callable(log):
@@ -277,7 +333,11 @@ def _log_internal_error(context: Any, exc: BaseException, *, operation: str = "u
             f"string_lengths={exc.string_lengths}"
         )
     else:
-        safe_operation = operation if operation in {"complex_url_only", "unclassified"} else "unclassified"
+        safe_operation = (
+            operation
+            if operation in {"complex_url_only", "unclassified"}
+            else "unclassified"
+        )
         message = f"internal_error operation={safe_operation} exception_class={type(exc).__name__}"
     try:
         log(message)
@@ -298,21 +358,37 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
     if not callable(log):
         return
 
-    known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
-    known_codes = {"request_error", "request_rejected", "auth_configuration", "rate_limit"}
+    known_providers = {
+        "aiornot",
+        "sapling",
+        "sightengine",
+        "gemini",
+        "resemble",
+        "huggingface",
+    }
+    known_codes = {
+        "request_error",
+        "request_rejected",
+        "auth_configuration",
+        "rate_limit",
+    }
     provider = exc.service if exc.service in known_providers else "unknown"
     error_code = exc.detail if exc.detail in known_codes else "unknown"
     status = getattr(exc, "status_code", None)
     safe_status = status if isinstance(status, int) and 100 <= status <= 599 else "none"
     provider_message = getattr(exc, "provider_message", None)
     allows_safe_provider_message = (
-        (provider in {"aiornot", "sightengine"} and error_code == "request_error")
-        or (provider == "gemini" and error_code in {"request_error", "request_rejected", "auth_configuration"})
+        provider in {"aiornot", "sightengine"} and error_code == "request_error"
+    ) or (
+        provider == "gemini"
+        and error_code in {"request_error", "request_rejected", "auth_configuration"}
     )
     if not allows_safe_provider_message:
         provider_message = None
     if isinstance(provider_message, str):
-        provider_message = provider_message.replace("\r", " ").replace("\n", " ").strip()
+        provider_message = (
+            provider_message.replace("\r", " ").replace("\n", " ").strip()
+        )
         provider_message = re.sub(
             r"(?i)\b(authorization|x-appwrite(?:-[a-z0-9_-]+)?|api[-_ ]?(?:key|secret|user))\s*[:=]\s*"
             r"(?:bearer\s+)?[^\s,;]+",
@@ -333,12 +409,26 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
     operation = "unknown"
     if provider == "gemini":
         candidate = getattr(exc, "operation", None)
-        if candidate in {"files_start", "upload_finalize", "files_poll", "generate_content"}:
+        if candidate in {
+            "files_start",
+            "upload_finalize",
+            "files_poll",
+            "generate_content",
+        }:
             operation = candidate
     google_status = getattr(exc, "upstream_status", None)
-    google_status = google_status if isinstance(google_status, str) and re.fullmatch(r"[A-Z_]{1,64}", google_status) else "none"
+    google_status = (
+        google_status
+        if isinstance(google_status, str)
+        and re.fullmatch(r"[A-Z_]{1,64}", google_status)
+        else "none"
+    )
     google_code = getattr(exc, "upstream_code", None)
-    google_code = google_code if isinstance(google_code, int) and 100 <= google_code <= 599 else "none"
+    google_code = (
+        google_code
+        if isinstance(google_code, int) and 100 <= google_code <= 599
+        else "none"
+    )
     message = (
         "provider_external_api_error operation=provider.external_api_error "
         f"provider={provider} safe_error_code={error_code} "
@@ -357,9 +447,14 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
         message += f" content_type={content_type} response_length={response_length}"
         for field_name in ("response_keys", "response_paths"):
             values = getattr(exc, field_name, ())
-            if isinstance(values, tuple) and values and all(
-                isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,80}", value)
-                for value in values
+            if (
+                isinstance(values, tuple)
+                and values
+                and all(
+                    isinstance(value, str)
+                    and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,80}", value)
+                    for value in values
+                )
             ):
                 message += f" {field_name}={','.join(values)}"
     if provider_message:
@@ -370,23 +465,43 @@ def _log_provider_external_api_error(context: Any, exc: ExternalAPIError) -> Non
         pass
 
 
-def _log_provider_infrastructure_error(context: Any, exc: ProviderInfrastructureError) -> None:
+def _log_provider_infrastructure_error(
+    context: Any, exc: ProviderInfrastructureError
+) -> None:
     """Log a bounded failure classification without provider or user data."""
     log = getattr(context, "log", None)
     if not callable(log):
         return
 
-    known_providers = {"aiornot", "sapling", "sightengine", "gemini", "resemble", "huggingface"}
+    known_providers = {
+        "aiornot",
+        "sapling",
+        "sightengine",
+        "gemini",
+        "resemble",
+        "huggingface",
+    }
     known_kinds = {
-        "capacity", "config", "invalid_configuration", "invalid_response", "missing_credentials", "model_loading", "processing_timeout",
-        "rate_limited", "timeout", "transport", "unavailable",
+        "capacity",
+        "config",
+        "invalid_configuration",
+        "invalid_response",
+        "missing_credentials",
+        "model_loading",
+        "processing_timeout",
+        "rate_limited",
+        "timeout",
+        "transport",
+        "unavailable",
     }
     known_stages = {"admission", "config", "request", "response"}
     known_reasons = {"api_key_missing"}
     provider = exc.service if exc.service in known_providers else "unknown"
     kind = exc.kind if exc.kind in known_kinds else "unknown"
-    stage = exc.stage if exc.stage in known_stages else (
-        "admission" if kind == "capacity" else "unknown"
+    stage = (
+        exc.stage
+        if exc.stage in known_stages
+        else ("admission" if kind == "capacity" else "unknown")
     )
     reason = exc.reason if exc.reason in known_reasons else "none"
     status = exc.status_code
@@ -402,12 +517,16 @@ def _log_provider_infrastructure_error(context: Any, exc: ProviderInfrastructure
         pass
 
 
-async def _get_file_metadata(file_id: str, bucket_id: str, user_jwt: str) -> dict[str, Any]:
+async def _get_file_metadata(
+    file_id: str, bucket_id: str, user_jwt: str
+) -> dict[str, Any]:
     """Read Storage metadata with the invoking user's JWT before download."""
     endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", "").rstrip("/")
     project_id = os.getenv("APPWRITE_FUNCTION_PROJECT_ID", "")
     if not user_jwt:
-        raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
+        raise SecurityValidationError(
+            "authentication_required", "Требуется авторизация.", 401
+        )
     if not endpoint or not project_id:
         raise RuntimeError("Storage configuration is unavailable")
     url = f"{endpoint}/storage/buckets/{quote(bucket_id, safe='')}/files/{quote(file_id, safe='')}"
@@ -417,11 +536,15 @@ async def _get_file_metadata(file_id: str, bucket_id: str, user_jwt: str) -> dic
     if response.status_code in (401, 403, 404):
         raise SecurityValidationError("file_not_accessible", "Файл недоступен.", 404)
     if response.status_code >= 400:
-        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
+        raise SecurityValidationError(
+            "storage_unavailable", "Хранилище временно недоступно.", 502
+        )
     try:
         metadata = response.json()
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502) from exc
+        raise SecurityValidationError(
+            "storage_unavailable", "Хранилище временно недоступно.", 502
+        ) from exc
     return _validate_storage_metadata(metadata)
 
 
@@ -431,7 +554,9 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
     project_id = os.getenv("APPWRITE_FUNCTION_PROJECT_ID", "")
 
     if not user_jwt:
-        raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
+        raise SecurityValidationError(
+            "authentication_required", "Требуется авторизация.", 401
+        )
     if not endpoint or not project_id:
         raise RuntimeError("Missing APPWRITE_FUNCTION_API_ENDPOINT/PROJECT_ID")
 
@@ -449,13 +574,19 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
     async with httpx.AsyncClient(timeout=bounded_timeout(60.0)) as client:
         async with client.stream("GET", url, headers=headers) as response:
             if response.status_code in (401, 403, 404):
-                raise SecurityValidationError("file_not_accessible", "Файл недоступен.", 404)
+                raise SecurityValidationError(
+                    "file_not_accessible", "Файл недоступен.", 404
+                )
             if response.status_code >= 400:
-                raise SecurityValidationError("storage_unavailable", "Хранилище временно недоступно.", 502)
+                raise SecurityValidationError(
+                    "storage_unavailable", "Хранилище временно недоступно.", 502
+                )
             async for chunk in response.aiter_bytes():
                 total += len(chunk)
                 if total > MAX_FILE_BYTES:
-                    raise SecurityValidationError("file_too_large", "Файл превышает лимит в 20 MiB.", 413)
+                    raise SecurityValidationError(
+                        "file_too_large", "Файл превышает лимит в 20 MiB.", 413
+                    )
                 chunks.append(chunk)
     if total == 0:
         raise SecurityValidationError("invalid_media", "Файл пустой.", 422)
@@ -464,8 +595,10 @@ async def _download_file_bytes(file_id: str, bucket_id: str, user_jwt: str) -> b
 
 def _branch_diagnostic(diagnostic_log: Any, branch: str):
     """Attach an allowlisted branch label without exposing request data."""
+
     def _log(message: str) -> None:
         _safe_diagnostic_log(diagnostic_log, f"branch={branch} {message}")
+
     return _log
 
 
@@ -491,37 +624,54 @@ def _unavailable_ai_result(*, complex_mode: bool = False) -> AnalysisResult:
 
 
 async def _analyze_combined_normal_text(
-    router: MediaRouter, text: str, diagnostic_log: Any,
+    router: MediaRouter,
+    text: str,
+    diagnostic_log: Any,
 ) -> AnalysisResult:
     """Run independent normal-text branches concurrently and join their safe output."""
     text_bytes = text.encode("utf-8")
     ai_started = time.monotonic()
     _safe_diagnostic_log(diagnostic_log, "branch=ai_origin stage=branch_start")
-    ai_diagnostic = _branch_diagnostic(diagnostic_log, "ai_origin") if diagnostic_log is not None else None
+    ai_diagnostic = (
+        _branch_diagnostic(diagnostic_log, "ai_origin")
+        if diagnostic_log is not None
+        else None
+    )
     ai_task = router.route(MediaType.TEXT, b"", text, diagnostic_log=ai_diagnostic)
 
     async def _run_credibility_branch() -> CredibilityAssessment:
         credibility_started = time.monotonic()
-        credibility = await GeminiCredibilityAdapter().analyze(text_bytes, diagnostic_log=diagnostic_log)
+        credibility = await GeminiCredibilityAdapter().analyze(
+            text_bytes, diagnostic_log=diagnostic_log
+        )
         # This is deliberately only the credibility coroutine's elapsed time:
         # it excludes waiting for the parallel AI-origin branch and persistence.
-        elapsed_ms = max(0, min(60_000, round((time.monotonic() - credibility_started) * 1000)))
+        elapsed_ms = max(
+            0, min(60_000, round((time.monotonic() - credibility_started) * 1000))
+        )
         return credibility.model_copy(update={"processing_ms": elapsed_ms})
 
     credibility_task = _run_credibility_branch()
     ai_outcome, credibility_outcome = await asyncio.gather(
-        ai_task, credibility_task, return_exceptions=True,
+        ai_task,
+        credibility_task,
+        return_exceptions=True,
     )
     _safe_diagnostic_log(
         diagnostic_log,
-        "branch=ai_origin stage=branch_" + ("error" if isinstance(ai_outcome, BaseException) else "success")
+        "branch=ai_origin stage=branch_"
+        + ("error" if isinstance(ai_outcome, BaseException) else "success")
         + f" elapsed_ms={round((time.monotonic() - ai_started) * 1000)}",
     )
     _safe_diagnostic_log(
         diagnostic_log,
         "branch=credibility stage=branch_"
         + ("error" if isinstance(credibility_outcome, BaseException) else "success")
-        + (f" elapsed_ms={credibility_outcome.processing_ms}" if not isinstance(credibility_outcome, BaseException) else ""),
+        + (
+            f" elapsed_ms={credibility_outcome.processing_ms}"
+            if not isinstance(credibility_outcome, BaseException)
+            else ""
+        ),
     )
 
     def _branch_error(value: Any) -> bool:
@@ -529,74 +679,123 @@ async def _analyze_combined_normal_text(
 
     if isinstance(ai_outcome, BaseException) and not _branch_error(ai_outcome):
         raise ai_outcome
-    if isinstance(credibility_outcome, BaseException) and not _branch_error(credibility_outcome):
+    if isinstance(credibility_outcome, BaseException) and not _branch_error(
+        credibility_outcome
+    ):
         raise credibility_outcome
-    if isinstance(ai_outcome, BaseException) and isinstance(credibility_outcome, BaseException):
+    if isinstance(ai_outcome, BaseException) and isinstance(
+        credibility_outcome, BaseException
+    ):
         # Preserve an existing controlled provider classification when neither
         # independent branch could provide a user-facing report.
         raise ai_outcome
 
-    ai_result = _unavailable_ai_result() if isinstance(ai_outcome, BaseException) else ai_outcome
+    ai_result = (
+        _unavailable_ai_result()
+        if isinstance(ai_outcome, BaseException)
+        else ai_outcome
+    )
     credibility = (
         _unavailable_credibility()
         if isinstance(credibility_outcome, BaseException)
         else credibility_outcome
     )
-    return ai_result.model_copy(update={
-        "credibility": credibility,
-        "short_report": build_combined_text_report(ai_result, credibility),
-    })
+    return ai_result.model_copy(
+        update={
+            "credibility": credibility,
+            "short_report": build_combined_text_report(ai_result, credibility),
+        }
+    )
 
 
 async def _analyze_complex_text(text: str, diagnostic_log: Any) -> AnalysisResult:
     """Run the two independent expanded Gemini branches, with no legacy Hybrid providers."""
     text_bytes = text.encode("utf-8")
     ai_started = time.monotonic()
-    ai_diagnostic = _branch_diagnostic(diagnostic_log, "ai_origin") if diagnostic_log is not None else None
+    ai_diagnostic = (
+        _branch_diagnostic(diagnostic_log, "ai_origin")
+        if diagnostic_log is not None
+        else None
+    )
 
     async def _run_ai_branch() -> AnalysisResult:
-        return await GeminiTextAdapter().analyze(text_bytes, diagnostic_log=ai_diagnostic, complex_mode=True)
+        return await GeminiTextAdapter().analyze(
+            text_bytes, diagnostic_log=ai_diagnostic, complex_mode=True
+        )
 
     async def _run_credibility_branch() -> CredibilityAssessment:
         started = time.monotonic()
         assessment = await GeminiCredibilityAdapter().analyze(
-            text_bytes, diagnostic_log=diagnostic_log, complex_mode=True,
+            text_bytes,
+            diagnostic_log=diagnostic_log,
+            complex_mode=True,
         )
-        return assessment.model_copy(update={
-            "processing_ms": max(0, min(60_000, round((time.monotonic() - started) * 1000))),
-        })
+        return assessment.model_copy(
+            update={
+                "processing_ms": max(
+                    0, min(60_000, round((time.monotonic() - started) * 1000))
+                ),
+            }
+        )
 
     ai_outcome, credibility_outcome = await asyncio.gather(
-        _run_ai_branch(), _run_credibility_branch(), return_exceptions=True,
+        _run_ai_branch(),
+        _run_credibility_branch(),
+        return_exceptions=True,
     )
     _safe_diagnostic_log(
-        diagnostic_log, "branch=ai_origin stage=branch_"
+        diagnostic_log,
+        "branch=ai_origin stage=branch_"
         + ("error" if isinstance(ai_outcome, BaseException) else "success")
         + f" elapsed_ms={round((time.monotonic() - ai_started) * 1000)}",
     )
     _safe_diagnostic_log(
-        diagnostic_log, "branch=credibility stage=branch_"
+        diagnostic_log,
+        "branch=credibility stage=branch_"
         + ("error" if isinstance(credibility_outcome, BaseException) else "success"),
     )
     provider_errors = (ProviderInfrastructureError, ExternalAPIError)
-    if isinstance(ai_outcome, BaseException) and not isinstance(ai_outcome, provider_errors):
+    if isinstance(ai_outcome, BaseException) and not isinstance(
+        ai_outcome, provider_errors
+    ):
         raise ai_outcome
-    if isinstance(credibility_outcome, BaseException) and not isinstance(credibility_outcome, provider_errors):
+    if isinstance(credibility_outcome, BaseException) and not isinstance(
+        credibility_outcome, provider_errors
+    ):
         raise credibility_outcome
-    if isinstance(ai_outcome, BaseException) and isinstance(credibility_outcome, BaseException):
+    if isinstance(ai_outcome, BaseException) and isinstance(
+        credibility_outcome, BaseException
+    ):
         raise ai_outcome
-    ai_result = _unavailable_ai_result(complex_mode=True) if isinstance(ai_outcome, BaseException) else ai_outcome
-    credibility = _unavailable_credibility() if isinstance(credibility_outcome, BaseException) else credibility_outcome
-    return ai_result.model_copy(update={
-        "analysis_mode": "complex",
-        "credibility": credibility,
-        "short_report": build_combined_text_report(ai_result, credibility),
-    })
+    ai_result = (
+        _unavailable_ai_result(complex_mode=True)
+        if isinstance(ai_outcome, BaseException)
+        else ai_outcome
+    )
+    credibility = (
+        _unavailable_credibility()
+        if isinstance(credibility_outcome, BaseException)
+        else credibility_outcome
+    )
+    return ai_result.model_copy(
+        update={
+            "analysis_mode": "complex",
+            "credibility": credibility,
+            "short_report": build_combined_text_report(ai_result, credibility),
+        }
+    )
 
 
 async def _analyze_complex_source(
-    source_url: str, diagnostic_log: Any, *, quota_store: AppwriteTablesRateLimitStore | None = None,
-    user_id: str = "", client_ip: str = "", account_created_at: Any = None, additional_text: str = "",
+    source_url: str,
+    diagnostic_log: Any,
+    *,
+    quota_store: AppwriteTablesRateLimitStore | None = None,
+    user_id: str = "",
+    client_ip: str = "",
+    account_created_at: Any = None,
+    additional_text: str = "",
+    effective_policy: EffectiveQuotaPolicy | None = None,
 ) -> AnalysisResult:
     """Ingest one public source and deterministically combine existing analyzers."""
     ingestor = SourceIngestor()
@@ -619,7 +818,9 @@ async def _analyze_complex_source(
         # Retain a final aggregation/cancellation window inside that budget.
         return max(0.01, deadline.remaining_analysis_time() - 0.5)
 
-    async def _branch_outcome(operation: Any, *, timeout_seconds: float | None = None) -> Any:
+    async def _branch_outcome(
+        operation: Any, *, timeout_seconds: float | None = None
+    ) -> Any:
         """Finish source branches before the shared analysis deadline expires."""
         deadline = current_execution_deadline()
         if deadline is None:
@@ -627,7 +828,9 @@ async def _analyze_complex_source(
         # Keep a small window for cancellation/normalization so completed
         # sibling branches can still become a partial response.
         try:
-            timeout = timeout_seconds if timeout_seconds is not None else _child_timeout()
+            timeout = (
+                timeout_seconds if timeout_seconds is not None else _child_timeout()
+            )
             assert timeout is not None
         except ExecutionDeadlineExceeded:
             close = getattr(operation, "close", None)
@@ -640,41 +843,116 @@ async def _analyze_complex_source(
         except TimeoutError:
             return None
 
-    async def _media_result(kind: MediaType, ordinal: int, url: str) -> SourceMediaResult:
+    async def _media_result(
+        kind: MediaType, ordinal: int, url: str
+    ) -> SourceMediaResult:
         try:
             child_timeout = _child_timeout()
             acquired = await _branch_outcome(
-                ingestor.download_media(url, timeout_seconds=child_timeout), timeout_seconds=child_timeout,
+                ingestor.download_media(url, timeout_seconds=child_timeout),
+                timeout_seconds=child_timeout,
             )
             if not isinstance(acquired, tuple):
-                return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model=("gemini_video_verification" if kind == MediaType.VIDEO else "sightengine"))
+                return SourceMediaResult(
+                    kind=kind.value,
+                    ordinal=ordinal,
+                    status="unavailable",
+                    model=(
+                        "gemini_video_verification"
+                        if kind == MediaType.VIDEO
+                        else "sightengine"
+                    ),
+                )
             data, mime_type = acquired
             info = validate_media_bytes(data)
             if info.media_type != kind:
-                return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model="unsupported_media")
+                return SourceMediaResult(
+                    kind=kind.value,
+                    ordinal=ordinal,
+                    status="unavailable",
+                    model="unsupported_media",
+                )
             provider_timeout = _child_timeout()
-            result = await _branch_outcome(router.route(info.media_type, data, mime_type=mime_type, diagnostic_log=diagnostic_log), timeout_seconds=provider_timeout)
+            result = await _branch_outcome(
+                router.route(
+                    info.media_type,
+                    data,
+                    mime_type=mime_type,
+                    diagnostic_log=diagnostic_log,
+                ),
+                timeout_seconds=provider_timeout,
+            )
             if not isinstance(result, AnalysisResult):
-                return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model=("gemini_video_verification" if kind == MediaType.VIDEO else "sightengine"))
-            return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="completed", authenticity_index=result.authenticity_index,
-                verdict=result.verdict, confidence=result.confidence, model=result.model_used.value, explanation=result.explanation,
-                processing_ms=max(0, min(60_000, result.processing_ms)))
+                return SourceMediaResult(
+                    kind=kind.value,
+                    ordinal=ordinal,
+                    status="unavailable",
+                    model=(
+                        "gemini_video_verification"
+                        if kind == MediaType.VIDEO
+                        else "sightengine"
+                    ),
+                )
+            return SourceMediaResult(
+                kind=kind.value,
+                ordinal=ordinal,
+                status="completed",
+                authenticity_index=result.authenticity_index,
+                verdict=result.verdict,
+                confidence=result.confidence,
+                model=result.model_used.value,
+                explanation=result.explanation,
+                processing_ms=max(0, min(60_000, result.processing_ms)),
+            )
         except asyncio.CancelledError:
             raise
-        except (SecurityValidationError, ExternalAPIError, ProviderInfrastructureError, ExecutionDeadlineExceeded):
-            return SourceMediaResult(kind=kind.value, ordinal=ordinal, status="unavailable", model=("gemini_video_verification" if kind == MediaType.VIDEO else "sightengine"))
+        except (
+            SecurityValidationError,
+            ExternalAPIError,
+            ProviderInfrastructureError,
+            ExecutionDeadlineExceeded,
+        ):
+            return SourceMediaResult(
+                kind=kind.value,
+                ordinal=ordinal,
+                status="unavailable",
+                model=(
+                    "gemini_video_verification"
+                    if kind == MediaType.VIDEO
+                    else "sightengine"
+                ),
+            )
 
     has_images, has_video = bool(document.image_urls), bool(document.video_urls)
-    if quota_store is not None and account_created_at is not None and (has_images or has_video):
-        plan = build_source_media_admission_plan(quota_store, user_id=user_id, client_ip=client_ip,
-            account_created_at=account_created_at, has_image=has_images, has_video=has_video)
+    if (
+        quota_store is not None
+        and account_created_at is not None
+        and (has_images or has_video)
+    ):
+        plan = build_source_media_admission_plan(
+            quota_store,
+            user_id=user_id,
+            client_ip=client_ip,
+            account_created_at=account_created_at,
+            has_image=has_images,
+            has_video=has_video,
+            effective_policy=effective_policy,
+        )
         deadline = current_execution_deadline()
-        if deadline is None: await quota_store.admit(plan)
-        else: await deadline.run(quota_store.admit(plan))
-    media_task = asyncio.gather(*(
-        [_media_result(MediaType.IMAGE, index + 1, url) for index, url in enumerate(document.image_urls)]
-        + [_media_result(MediaType.VIDEO, 1, url) for url in document.video_urls]
-    ), return_exceptions=True)
+        if deadline is None:
+            await quota_store.admit(plan)
+        else:
+            await deadline.run(quota_store.admit(plan))
+    media_task = asyncio.gather(
+        *(
+            [
+                _media_result(MediaType.IMAGE, index + 1, url)
+                for index, url in enumerate(document.image_urls)
+            ]
+            + [_media_result(MediaType.VIDEO, 1, url) for url in document.video_urls]
+        ),
+        return_exceptions=True,
+    )
     source_text, manual_text = document.text.strip(), additional_text.strip()
     if source_text and manual_text:
         # Preserve provenance and a bounded part of each input instead of
@@ -684,7 +962,9 @@ async def _analyze_complex_source(
     elif source_text:
         combined_text = "[Текст публикации]\n" + source_text[:MAX_TEXT_LENGTH]
     elif manual_text:
-        combined_text = "[Дополнительный текст пользователя]\n" + manual_text[:MAX_TEXT_LENGTH]
+        combined_text = (
+            "[Дополнительный текст пользователя]\n" + manual_text[:MAX_TEXT_LENGTH]
+        )
     else:
         combined_text = ""
     _safe_diagnostic_log(
@@ -698,7 +978,9 @@ async def _analyze_complex_source(
         f"truncated={'yes' if len(source_text) > MAX_TEXT_LENGTH or len(manual_text) > MAX_TEXT_LENGTH else 'no'}",
     )
     has_text = len(combined_text) >= 200
-    text_task = _analyze_complex_text(combined_text, diagnostic_log) if has_text else None
+    text_task = (
+        _analyze_complex_text(combined_text, diagnostic_log) if has_text else None
+    )
     if text_task is None:
         media_outcomes = await media_task
         text_result = None
@@ -707,9 +989,13 @@ async def _analyze_complex_source(
         # completed text branch must not be downgraded when a sibling media
         # download exhausts its own child budget; the outer execution deadline
         # remains the root cancellation boundary for the whole request.
-        text_outcome, media_outcomes = await asyncio.gather(text_task, media_task, return_exceptions=True)
+        text_outcome, media_outcomes = await asyncio.gather(
+            text_task, media_task, return_exceptions=True
+        )
         text_result = text_outcome if isinstance(text_outcome, AnalysisResult) else None
-    media_results = [item for item in media_outcomes if isinstance(item, SourceMediaResult)]
+    media_results = [
+        item for item in media_outcomes if isinstance(item, SourceMediaResult)
+    ]
     completed_media = [item for item in media_results if item.status == "completed"]
     if text_result is None and not completed_media:
         raise SecurityValidationError(
@@ -719,28 +1005,53 @@ async def _analyze_complex_source(
         )
 
     source = SourceDetails(
-        url=document.url, title=document.title[:300], description=document.description[:600],
-        site_name=document.site_name[:160], text_found=has_text, text_truncated=document.text_truncated,
-        images_discovered=len(document.image_urls), video_discovered=has_video,
+        url=document.url,
+        title=document.title[:300],
+        description=document.description[:600],
+        site_name=document.site_name[:160],
+        text_found=has_text,
+        text_truncated=document.text_truncated,
+        images_discovered=len(document.image_urls),
+        video_discovered=has_video,
         images_analyzed=sum(1 for item in completed_media if item.kind == "image"),
-        video_analyzed=any(item.kind == "video" for item in completed_media), media=media_results,
+        video_analyzed=any(item.kind == "video" for item in completed_media),
+        media=media_results,
     )
     if text_result is not None:
         return text_result.model_copy(update={"source": source})
     # A source with no usable text still exposes a real media result; no score
     # is fabricated or blended with unavailable text branches.
-    primary = next(item for item in completed_media if item.authenticity_index is not None)
-    return AnalysisResult(verdict=primary.verdict, confidence=primary.confidence or 0.5,
-        model_used=next((model for model in ModelUsed if model.value == primary.model), ModelUsed.SIGHTENGINE),
-        explanation=primary.explanation or "Доступен частичный результат медиаанализа.", media_type=MediaType.TEXT,
-        authenticity_index=primary.authenticity_index, analysis_mode="complex", source=source,
-        short_report="Текст источника недостаточен для расширенного анализа; показаны результаты доступного медиа.")
+    primary = next(
+        item for item in completed_media if item.authenticity_index is not None
+    )
+    return AnalysisResult(
+        verdict=primary.verdict,
+        confidence=primary.confidence or 0.5,
+        model_used=next(
+            (model for model in ModelUsed if model.value == primary.model),
+            ModelUsed.SIGHTENGINE,
+        ),
+        explanation=primary.explanation or "Доступен частичный результат медиаанализа.",
+        media_type=MediaType.TEXT,
+        authenticity_index=primary.authenticity_index,
+        analysis_mode="complex",
+        source=source,
+        short_report="Текст источника недостаточен для расширенного анализа; показаны результаты доступного медиа.",
+    )
 
 
 async def _analyze(
-    request: TextAnalyzeRequest | FileAnalyzeRequest | SourceAnalyzeRequest | ComplexAnalyzeRequest, user_jwt: str, diagnostic_log: Any = None,
-    quota_store: AppwriteTablesRateLimitStore | None = None, user_id: str = "",
-    account_created_at: Any = None, client_ip: str = "",
+    request: TextAnalyzeRequest
+    | FileAnalyzeRequest
+    | SourceAnalyzeRequest
+    | ComplexAnalyzeRequest,
+    user_jwt: str,
+    diagnostic_log: Any = None,
+    quota_store: AppwriteTablesRateLimitStore | None = None,
+    user_id: str = "",
+    account_created_at: Any = None,
+    client_ip: str = "",
+    effective_policy: EffectiveQuotaPolicy | None = None,
 ) -> dict[str, Any]:
     router = MediaRouter()
     started = time.perf_counter()
@@ -752,15 +1063,24 @@ async def _analyze(
             deadline = current_execution_deadline()
 
             async def _within_deadline(awaitable: Any) -> Any:
-                return await deadline.run(awaitable) if deadline is not None else await awaitable
+                return (
+                    await deadline.run(awaitable)
+                    if deadline is not None
+                    else await awaitable
+                )
 
             # Admission is deliberately final: a provider 429, timeout or an
             # invalid response never refunds any of the committed counters.
             await _within_deadline(quota_store.admit(admission_plan))
-            prepaid = {provider: admission_plan.units_for(provider) for provider, _ in admission_plan.provider_units}
+            prepaid = {
+                provider: admission_plan.units_for(provider)
+                for provider, _ in admission_plan.provider_units
+            }
 
             async def _admit_unplanned_provider(provider: str, units: int) -> None:
-                await _within_deadline(quota_store.admit_provider_units(provider, units))
+                await _within_deadline(
+                    quota_store.admit_provider_units(provider, units)
+                )
 
             budget_token = begin_provider_budget(_admit_unplanned_provider, prepaid)
             try:
@@ -771,10 +1091,18 @@ async def _analyze(
         deadline = current_execution_deadline()
 
         async def _within_deadline(awaitable: Any) -> Any:
-            return await deadline.run(awaitable) if deadline is not None else await awaitable
+            return (
+                await deadline.run(awaitable)
+                if deadline is not None
+                else await awaitable
+            )
 
         async def _within_persistence_deadline(awaitable: Any) -> Any:
-            return await deadline.run_persistence(awaitable) if deadline is not None else await awaitable
+            return (
+                await deadline.run_persistence(awaitable)
+                if deadline is not None
+                else await awaitable
+            )
 
         reservation = await _within_deadline(quota_store.reserve_quota(user_id))
         reservations_finalized = False
@@ -787,13 +1115,19 @@ async def _analyze(
             nonlocal reservations_finalized
             if reservations_finalized:
                 return
-            await _within_persistence_deadline(quota_store.transition_quota(reservation, target))
+            await _within_persistence_deadline(
+                quota_store.transition_quota(reservation, target)
+            )
             reservations_finalized = True
 
         async def _run_operation():
             deadline = current_execution_deadline()
             operation_result = operation()
-            return await deadline.run(operation_result) if deadline is not None else await operation_result
+            return (
+                await deadline.run(operation_result)
+                if deadline is not None
+                else await operation_result
+            )
 
         try:
             result = await _run_operation()
@@ -823,10 +1157,33 @@ async def _analyze(
     if isinstance(request, ComplexAnalyzeRequest):
         # The unified request keeps the old source-only path intact while
         # allowing trusted Storage files and manual text to run alongside it.
+        if (
+            quota_store is not None
+            and effective_policy is not None
+            and account_created_at is not None
+        ):
+            subscription_plan = build_subscription_admission_plan(
+                quota_store,
+                user_id=user_id,
+                policy=effective_policy,
+            )
+            deadline = current_execution_deadline()
+            if deadline is None:
+                await quota_store.admit(subscription_plan)
+            else:
+                await deadline.run(quota_store.admit(subscription_plan))
         source_result = None
         if request.source_url:
-            source_result = await _analyze_complex_source(request.source_url, diagnostic_log, quota_store=quota_store,
-                user_id=user_id, client_ip=client_ip, account_created_at=account_created_at, additional_text=request.text or "")
+            source_result = await _analyze_complex_source(
+                request.source_url,
+                diagnostic_log,
+                quota_store=quota_store,
+                user_id=user_id,
+                client_ip=client_ip,
+                account_created_at=account_created_at,
+                additional_text=request.text or "",
+                effective_policy=effective_policy,
+            )
         text_result = None
         if request.text and not request.source_url:
             _safe_diagnostic_log(
@@ -838,50 +1195,127 @@ async def _analyze(
             text_result = await _analyze_complex_text(request.text, diagnostic_log)
         manual_results: list[AnalysisResult] = []
         manual_media: list[SourceMediaResult] = []
-        bucket_id = os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID") or os.getenv("UPLOADS_BUCKET_ID") or "uploads"
+        bucket_id = (
+            os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
+            or os.getenv("UPLOADS_BUCKET_ID")
+            or "uploads"
+        )
         for file_id in request.file_ids:
             metadata = await _get_file_metadata(file_id, bucket_id, user_jwt)
             file_bytes = await _download_file_bytes(file_id, bucket_id, user_jwt)
             info = validate_media_bytes(file_bytes)
             if _metadata_media_type(metadata) != info.media_type:
-                raise SecurityValidationError("media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415)
+                raise SecurityValidationError(
+                    "media_type_mismatch",
+                    "Содержимое файла не соответствует метаданным.",
+                    415,
+                )
             try:
-                item = await router.route(info.media_type, file_bytes, mime_type=metadata["mimeType"].split(";", 1)[0].lower())
+                item = await router.route(
+                    info.media_type,
+                    file_bytes,
+                    mime_type=metadata["mimeType"].split(";", 1)[0].lower(),
+                )
                 manual_results.append(item)
-                manual_media.append(SourceMediaResult(kind=info.media_type.value, origin="manual", ordinal=len(manual_media) + 1, status="completed",
-                    authenticity_index=item.authenticity_index, verdict=item.verdict, confidence=item.confidence,
-                    model=item.model_used.value, explanation=item.explanation, processing_ms=item.processing_ms))
-            except (ExternalAPIError, ProviderInfrastructureError, ExecutionDeadlineExceeded):
-                manual_media.append(SourceMediaResult(kind=info.media_type.value, origin="manual", ordinal=len(manual_media) + 1, status="unavailable",
-                    model="gemini_video_verification" if info.media_type == MediaType.VIDEO else info.media_type.value))
-        result = source_result or text_result or (manual_results[0] if manual_results else None)
+                manual_media.append(
+                    SourceMediaResult(
+                        kind=info.media_type.value,
+                        origin="manual",
+                        ordinal=len(manual_media) + 1,
+                        status="completed",
+                        authenticity_index=item.authenticity_index,
+                        verdict=item.verdict,
+                        confidence=item.confidence,
+                        model=item.model_used.value,
+                        explanation=item.explanation,
+                        processing_ms=item.processing_ms,
+                    )
+                )
+            except (
+                ExternalAPIError,
+                ProviderInfrastructureError,
+                ExecutionDeadlineExceeded,
+            ):
+                manual_media.append(
+                    SourceMediaResult(
+                        kind=info.media_type.value,
+                        origin="manual",
+                        ordinal=len(manual_media) + 1,
+                        status="unavailable",
+                        model="gemini_video_verification"
+                        if info.media_type == MediaType.VIDEO
+                        else info.media_type.value,
+                    )
+                )
+        result = (
+            source_result
+            or text_result
+            or (manual_results[0] if manual_results else None)
+        )
         if result is None:
-            raise SecurityValidationError("source_unavailable", "Нет пригодного материала для анализа.", 422)
+            raise SecurityValidationError(
+                "source_unavailable", "Нет пригодного материала для анализа.", 422
+            )
         if manual_media:
-            result = result.model_copy(update={"analysis_mode": "complex", "complex_media": manual_media})
+            result = result.model_copy(
+                update={"analysis_mode": "complex", "complex_media": manual_media}
+            )
     elif isinstance(request, SourceAnalyzeRequest):
         source_url = await validate_source_url(request.source_url)
         admission_plan = (
             build_admission_plan(
-                quota_store, user_id=user_id, client_ip=client_ip, account_created_at=account_created_at,
-                media_type=MediaType.TEXT.value, input_size=len(source_url), text="", hybrid=True,
-            ) if quota_store is not None and account_created_at is not None else None
+                quota_store,
+                user_id=user_id,
+                client_ip=client_ip,
+                account_created_at=account_created_at,
+                media_type=MediaType.TEXT.value,
+                input_size=len(source_url),
+                text="",
+                hybrid=True,
+                effective_policy=effective_policy,
+            )
+            if quota_store is not None and account_created_at is not None
+            else None
         )
-        result = await _with_quota(lambda: _analyze_complex_source(source_url, diagnostic_log, quota_store=quota_store,
-            user_id=user_id, client_ip=client_ip, account_created_at=account_created_at), admission_plan)
+        result = await _with_quota(
+            lambda: _analyze_complex_source(
+                source_url,
+                diagnostic_log,
+                quota_store=quota_store,
+                user_id=user_id,
+                client_ip=client_ip,
+                account_created_at=account_created_at,
+                effective_policy=effective_policy,
+            ),
+            admission_plan,
+        )
     elif isinstance(request, TextAnalyzeRequest):
         text = request.text
         mode = request.mode or request.analysis_type
         admission_plan = (
             build_admission_plan(
-                quota_store, user_id=user_id, client_ip=client_ip, account_created_at=account_created_at,
-                media_type=MediaType.TEXT.value, input_size=len(text), text=text, hybrid=bool(mode),
-            ) if quota_store is not None and account_created_at is not None else None
+                quota_store,
+                user_id=user_id,
+                client_ip=client_ip,
+                account_created_at=account_created_at,
+                media_type=MediaType.TEXT.value,
+                input_size=len(text),
+                text=text,
+                hybrid=bool(mode),
+                effective_policy=effective_policy,
+            )
+            if quota_store is not None and account_created_at is not None
+            else None
         )
         if mode:
-            result = await _with_quota(lambda: _analyze_complex_text(text, diagnostic_log), admission_plan)
+            result = await _with_quota(
+                lambda: _analyze_complex_text(text, diagnostic_log), admission_plan
+            )
         else:
-            result = await _with_quota(lambda: _analyze_combined_normal_text(router, text, diagnostic_log), admission_plan)
+            result = await _with_quota(
+                lambda: _analyze_combined_normal_text(router, text, diagnostic_log),
+                admission_plan,
+            )
     else:
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
@@ -890,11 +1324,19 @@ async def _analyze(
         )
         deadline = current_execution_deadline()
         metadata_operation = _get_file_metadata(request.file_id, bucket_id, user_jwt)
-        metadata = await deadline.run(metadata_operation) if deadline is not None else await metadata_operation
+        metadata = (
+            await deadline.run(metadata_operation)
+            if deadline is not None
+            else await metadata_operation
+        )
         if diagnostic_log:
             diagnostic_log("media_validation stage=metadata result=ok")
         download_operation = _download_file_bytes(request.file_id, bucket_id, user_jwt)
-        file_bytes = await deadline.run(download_operation) if deadline is not None else await download_operation
+        file_bytes = (
+            await deadline.run(download_operation)
+            if deadline is not None
+            else await download_operation
+        )
         if diagnostic_log:
             diagnostic_log("media_validation stage=download result=ok")
             diagnostic_log(
@@ -903,17 +1345,32 @@ async def _analyze(
                 f"ffmpeg={'present' if shutil.which('ffmpeg') else 'missing'}"
             )
         expected = MediaType(request.media_type) if request.media_type else None
-        validation_operation = asyncio.to_thread(validate_media_bytes, file_bytes, expected, diagnostic_log)
-        media_info = await deadline.run(validation_operation) if deadline is not None else await validation_operation
+        validation_operation = asyncio.to_thread(
+            validate_media_bytes, file_bytes, expected, diagnostic_log
+        )
+        media_info = (
+            await deadline.run(validation_operation)
+            if deadline is not None
+            else await validation_operation
+        )
         if _metadata_media_type(metadata) != media_info.media_type:
             raise SecurityValidationError(
-                "media_type_mismatch", "Содержимое файла не соответствует метаданным.", 415
+                "media_type_mismatch",
+                "Содержимое файла не соответствует метаданным.",
+                415,
             )
         admission_plan = (
             build_admission_plan(
-                quota_store, user_id=user_id, client_ip=client_ip, account_created_at=account_created_at,
-                media_type=media_info.media_type.value, input_size=len(file_bytes),
-            ) if quota_store is not None and account_created_at is not None else None
+                quota_store,
+                user_id=user_id,
+                client_ip=client_ip,
+                account_created_at=account_created_at,
+                media_type=media_info.media_type.value,
+                input_size=len(file_bytes),
+                effective_policy=effective_policy,
+            )
+            if quota_store is not None and account_created_at is not None
+            else None
         )
         result = await _with_quota(
             lambda: router.route(
@@ -921,7 +1378,8 @@ async def _analyze(
                 file_bytes,
                 "",
                 mime_type=metadata["mimeType"].split(";", 1)[0].strip().lower(),
-            ), admission_plan,
+            ),
+            admission_plan,
         )
 
     processing_ms = int((time.perf_counter() - started) * 1000)
@@ -940,17 +1398,41 @@ async def _analyze(
     return body
 
 
+def _subscription_response(
+    user_id: str, policy: EffectiveQuotaPolicy
+) -> dict[str, Any]:
+    """Return a compact server-derived policy without exposing profile internals."""
+    return {
+        "user_id": user_id,
+        "subscription": policy.subscription,
+        "overrides": dict(policy.overrides),
+        "effective_limits": {
+            key: {"period": quota.period, "limit": quota.limit}
+            for key, quota in policy.limits.items()
+        },
+    }
+
+
 async def _execute_request(
-    payload: dict[str, Any] | ValidatedRequest, api_key: str, user_id: str, user_jwt: str,
-    diagnostic_log: Any = None, client_ip: str = "", *,
+    payload: dict[str, Any] | ValidatedRequest,
+    api_key: str,
+    user_id: str,
+    user_jwt: str,
+    diagnostic_log: Any = None,
+    client_ip: str = "",
+    *,
     execution_deadline: ExecutionDeadline | None = None,
     request_started_at: float | None = None,
     diagnostic_authorization: str = "",
 ) -> dict[str, Any]:
     """Authorize the execution, ensure its profile, and persist trusted results."""
     if not user_id or not user_jwt:
-        raise SecurityValidationError("authentication_required", "Требуется авторизация.", 401)
-    request = validate_request_payload(payload) if isinstance(payload, dict) else payload
+        raise SecurityValidationError(
+            "authentication_required", "Требуется авторизация.", 401
+        )
+    request = (
+        validate_request_payload(payload) if isinstance(payload, dict) else payload
+    )
     is_diagnostic = request.action in {"gemini_smoke_test", "gemini_list_models"}
     if is_diagnostic:
         _safe_diagnostic_log(diagnostic_log, f"diagnostic={request.action} stage=start")
@@ -958,7 +1440,15 @@ async def _execute_request(
     # the Function API key.  Keep analysis and profile operations fail-closed.
     if not api_key and not is_diagnostic:
         raise RuntimeError("Missing Appwrite Function API key")
-    is_analyze = isinstance(request, (TextAnalyzeRequest, FileAnalyzeRequest, SourceAnalyzeRequest, ComplexAnalyzeRequest))
+    is_analyze = isinstance(
+        request,
+        (
+            TextAnalyzeRequest,
+            FileAnalyzeRequest,
+            SourceAnalyzeRequest,
+            ComplexAnalyzeRequest,
+        ),
+    )
     if execution_deadline is None and request_started_at is not None and is_analyze:
         try:
             execution_deadline = ExecutionDeadline.from_execution_timeout(
@@ -968,20 +1458,37 @@ async def _execute_request(
                 request_start=request_started_at,
             )
         except ValueError as exc:
-            raise RuntimeError("Synchronous analysis deadline is not configured") from exc
+            raise RuntimeError(
+                "Synchronous analysis deadline is not configured"
+            ) from exc
 
     async def _within_deadline(awaitable: Any) -> Any:
-        return await execution_deadline.run(awaitable) if execution_deadline is not None else await awaitable
+        return (
+            await execution_deadline.run(awaitable)
+            if execution_deadline is not None
+            else await awaitable
+        )
 
-    deadline_token = set_execution_deadline(execution_deadline) if execution_deadline is not None else None
+    deadline_token = (
+        set_execution_deadline(execution_deadline)
+        if execution_deadline is not None
+        else None
+    )
     try:
         try:
-            account = await _within_deadline(get_authenticated_account(user_id, user_jwt))
+            account = await _within_deadline(
+                get_authenticated_account(user_id, user_jwt)
+            )
         except RuntimeError:
             if is_diagnostic:
-                _safe_diagnostic_log(diagnostic_log, f"diagnostic={request.action} stage=auth_error category=unavailable")
+                _safe_diagnostic_log(
+                    diagnostic_log,
+                    f"diagnostic={request.action} stage=auth_error category=unavailable",
+                )
                 return {
-                    "ok": False, "provider": "appwrite", "operation": request.action,
+                    "ok": False,
+                    "provider": "appwrite",
+                    "operation": request.action,
                     "provider_code": "AUTHENTICATION_UNAVAILABLE",
                 }
             raise
@@ -1000,19 +1507,148 @@ async def _execute_request(
                 or not configured_secret
                 or not hmac.compare_digest(diagnostic_authorization, configured_secret)
             ):
-                raise SecurityValidationError("diagnostic_access_denied", "Доступ к диагностике запрещён.", 403)
+                raise SecurityValidationError(
+                    "diagnostic_access_denied", "Доступ к диагностике запрещён.", 403
+                )
             if request.action == "gemini_list_models":
                 return await run_gemini_list_models(diagnostic_log)
             return await run_gemini_smoke_test(diagnostic_log)
 
         profile = await _within_deadline(ensure_user_profile(account, api_key))
 
+        if isinstance(request, GetMySubscriptionRequest):
+            return _subscription_response(
+                user_id, effective_policy_from_profile(profile)
+            )
+
+        if isinstance(
+            request,
+            (
+                AdminGetUserPolicyRequest,
+                AdminSetSubscriptionRequest,
+                AdminSetQuotaOverridesRequest,
+                AdminRemoveQuotaOverrideRequest,
+                AdminResetQuotaOverridesRequest,
+                AdminListUsersRequest,
+                AdminResetUserQuotaUsageRequest,
+                AdminResetAllUserUsageRequest,
+                AdminListAuditEventsRequest,
+            ),
+        ):
+            # The target is client input, but authority comes exclusively from
+            # the JWT-resolved account and the configured server allowlist.
+            require_system_admin(account, user_id)
+            admin_store = AppwriteAdminStore(api_key)
+            try:
+                if isinstance(request, AdminListUsersRequest):
+                    return await _within_deadline(
+                        admin_store.list_users(
+                            page_size=request.page_size,
+                            cursor=request.cursor,
+                            search=request.search,
+                        )
+                    )
+                if isinstance(request, AdminListAuditEventsRequest):
+                    return await _within_deadline(
+                        admin_store.list_audit_events(
+                            page_size=request.page_size,
+                            cursor=request.cursor,
+                            target_user_id=request.target_user_id,
+                        )
+                    )
+                if isinstance(request, AdminGetUserPolicyRequest):
+                    return await _within_deadline(
+                        admin_store.get_user_details(request.target_user_id)
+                    )
+                elif isinstance(request, AdminSetSubscriptionRequest):
+                    policy = await _within_deadline(
+                        admin_store.change_subscription(
+                            user_id, request.target_user_id, request.subscription
+                        )
+                    )
+                elif isinstance(request, AdminSetQuotaOverridesRequest):
+                    policy = await _within_deadline(
+                        admin_store.change_quota_overrides(
+                            user_id, request.target_user_id, request.overrides
+                        )
+                    )
+                elif isinstance(request, AdminRemoveQuotaOverrideRequest):
+                    policy = await _within_deadline(
+                        admin_store.remove_override(
+                            user_id, request.target_user_id, request.quota_key
+                        )
+                    )
+                elif isinstance(request, AdminResetQuotaOverridesRequest):
+                    policy = await _within_deadline(
+                        admin_store.reset_overrides(user_id, request.target_user_id)
+                    )
+                elif isinstance(request, AdminResetUserQuotaUsageRequest):
+                    policy = await _within_deadline(
+                        admin_store.reset_user_quota_usage(
+                            user_id,
+                            request.target_user_id,
+                            request.quota_key,
+                            idempotency_key=request.idempotency_key,
+                        )
+                    )
+                else:
+                    policy = await _within_deadline(
+                        admin_store.reset_all_user_usage(
+                            user_id,
+                            request.target_user_id,
+                            idempotency_key=request.idempotency_key,
+                        )
+                    )
+            except SubscriptionValidationError as exc:
+                raise SecurityValidationError(
+                    "invalid_subscription_policy",
+                    "Некорректные параметры подписки или лимитов.",
+                ) from exc
+            except AdminUserNotFoundError as exc:
+                raise SecurityValidationError(
+                    "user_not_found", "Пользователь не найден.", 404
+                ) from exc
+            except QuotaResetConflictError as exc:
+                raise SecurityValidationError(
+                    "quota_reset_conflict",
+                    "Не удалось безопасно сбросить использование квоты.",
+                    409,
+                ) from exc
+            except AdminAuditPersistenceError as exc:
+                raise SecurityValidationError(
+                    "admin_audit_unavailable",
+                    "Изменение могло быть выполнено, но аудит недоступен. Проверьте состояние пользователя.",
+                    503,
+                ) from exc
+            except AdminOperationPendingError as exc:
+                raise SecurityValidationError(
+                    "admin_operation_pending",
+                    "Операция уже принята, но её итог ещё не подтверждён. Проверьте аудит перед повтором.",
+                    409,
+                ) from exc
+            return _subscription_response(request.target_user_id, policy)
+
         if not is_analyze:
-            raise SecurityValidationError("invalid_request", "Некорректные параметры запроса.")
+            raise SecurityValidationError(
+                "invalid_request", "Некорректные параметры запроса."
+            )
         rate_store = AppwriteTablesRateLimitStore(api_key)
+        if "quota_usage_generations" in profile:
+            subscription_store = AppwriteSubscriptionStore(api_key)
+            effective_policy = await _within_deadline(
+                subscription_store.effective_policy_for_profile(profile, user_id)
+            )
+        else:
+            effective_policy = effective_policy_from_profile(profile)
         result = await _analyze(
-            request, user_jwt, diagnostic_log, rate_store, user_id,
-            account_created_at=account.get("$createdAt"), client_ip=client_ip,
+            request,
+            user_jwt,
+            diagnostic_log,
+            rate_store,
+            user_id,
+            account_created_at=account.get("$createdAt"),
+            client_ip=client_ip,
+            effective_policy=effective_policy,
         )
         is_gemini_text = result.get("model_used") == "gemini_text_verification"
         if isinstance(request, (SourceAnalyzeRequest, ComplexAnalyzeRequest)):
@@ -1024,7 +1660,9 @@ async def _execute_request(
             source_label = request.source_label or ""
         persistence_started = time.monotonic()
         if is_gemini_text:
-            _safe_diagnostic_log(diagnostic_log, "provider=gemini_text stage=persistence_start")
+            _safe_diagnostic_log(
+                diagnostic_log, "provider=gemini_text stage=persistence_start"
+            )
         try:
             check_id = await (
                 execution_deadline.run_persistence(
@@ -1043,14 +1681,14 @@ async def _execute_request(
                 _safe_diagnostic_log(
                     diagnostic_log,
                     "provider=gemini_text stage=persistence_error "
-                    f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
+                    f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}",
                 )
             raise
         if is_gemini_text:
             _safe_diagnostic_log(
                 diagnostic_log,
                 "provider=gemini_text stage=persistence_success "
-                f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}"
+                f"elapsed_ms={round((time.monotonic() - persistence_started) * 1000)}",
             )
         result["check_id"] = check_id
         if execution_deadline is not None:
@@ -1121,14 +1759,21 @@ def main(context: Any):
         user_id = _extract_request_header(context.req, "x-appwrite-user-id")
         user_jwt = _extract_request_header(context.req, "x-appwrite-user-jwt")
         result = _run_coro_sync(
-            _execute_request(request, api_key, user_id, user_jwt, _media_diagnostic_logger(context),
-                             _extract_request_header(context.req, "x-appwrite-client-ip"),
-                             execution_deadline=execution_deadline,
-                             request_started_at=request_start,
-                             diagnostic_authorization=_extract_request_header(
-                                 context.req, "x-yav-diagnostic-authorization"
-                             ))
+            _execute_request(
+                request,
+                api_key,
+                user_id,
+                user_jwt,
+                _media_diagnostic_logger(context),
+                _extract_request_header(context.req, "x-appwrite-client-ip"),
+                execution_deadline=execution_deadline,
+                request_started_at=request_start,
+                diagnostic_authorization=_extract_request_header(
+                    context.req, "x-yav-diagnostic-authorization"
+                ),
+            )
         )
+
         def _build_success_response():
             if request.action == "analyze":
                 try:
@@ -1158,21 +1803,47 @@ def main(context: Any):
             and not request.file_ids
         ):
             safe_source_codes = {
-                "invalid_source_url", "unsafe_source_url", "source_unavailable",
-                "source_timeout", "unsupported_source", "source_too_large",
+                "invalid_source_url",
+                "unsafe_source_url",
+                "source_unavailable",
+                "source_timeout",
+                "unsupported_source",
+                "source_too_large",
                 "source_no_analyzable_content",
             }
-            source_code = exc.code if exc.code in safe_source_codes else "source_unavailable"
+            source_code = (
+                exc.code if exc.code in safe_source_codes else "source_unavailable"
+            )
             _safe_diagnostic_log(
                 _media_diagnostic_logger(context),
                 f"complex_stage=source_failed source_error_code={source_code}",
             )
-        return _response_json(context, {"detail": exc.detail, "code": exc.code}, exc.status_code)
+        return _response_json(
+            context, {"detail": exc.detail, "code": exc.code}, exc.status_code
+        )
     except RateLimitError as exc:
         payload = {"detail": exc.detail, "code": exc.code}
         if exc.retry_after is not None:
             payload["retry_after"] = exc.retry_after
         return _response_json(context, payload, exc.status_code)
+    except SubscriptionPersistenceError:
+        return _response_json(
+            context,
+            {
+                "detail": "Сервис управления подписками временно недоступен.",
+                "code": "subscription_unavailable",
+            },
+            503,
+        )
+    except AdminPersistenceError:
+        return _response_json(
+            context,
+            {
+                "detail": "Сервис администрирования временно недоступен.",
+                "code": "admin_unavailable",
+            },
+            503,
+        )
     except ExecutionDeadlineExceeded:
         return _response_json(
             context,

@@ -164,10 +164,12 @@ def test_main_handles_url_only_unified_complex_through_source_ingest_and_persist
         authenticity_index=95,
         analysis_mode="complex",
     )
+    quota_store = MagicMock()
+    quota_store.admit = AsyncMock()
     with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
         "src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})
     ), patch("src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})), patch(
-        "src.main.AppwriteTablesRateLimitStore"
+        "src.main.AppwriteTablesRateLimitStore", return_value=quota_store,
     ), patch("src.main.SourceIngestor", return_value=UrlOnlyIngestor()) as ingestor, patch(
         "src.main._analyze_complex_text", new=AsyncMock(return_value=complex_result)
     ), patch("src.main.persist_check_result", new=AsyncMock(return_value="check-1")) as persist:
@@ -201,10 +203,12 @@ def test_main_returns_distinct_safe_error_for_url_only_source_without_content():
     )
     now = time.monotonic()
     deadline = ExecutionDeadline(now, now + 10, now + 8, now + 9)
+    quota_store = MagicMock()
+    quota_store.admit = AsyncMock()
     with patch("src.main.ExecutionDeadline.from_execution_timeout", return_value=deadline), patch(
         "src.main.get_authenticated_account", new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True})
     ), patch("src.main.ensure_user_profile", new=AsyncMock(return_value={"$id": "runtime-user"})), patch(
-        "src.main.AppwriteTablesRateLimitStore"
+        "src.main.AppwriteTablesRateLimitStore", return_value=quota_store,
     ), patch("src.main.SourceIngestor", return_value=EmptyIngestor()):
         payload, status = main(context)
 

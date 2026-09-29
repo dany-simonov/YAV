@@ -45,6 +45,8 @@ from api.schemas import (
 )  # noqa: E402
 from router.media_router import MediaRouter  # noqa: E402
 from src.appwrite_store import (  # noqa: E402
+    AppwriteCheckHistoryStore,
+    CheckHistoryError,
     ChecksPersistenceError,
     ensure_user_profile,
     get_authenticated_account,
@@ -54,10 +56,11 @@ from src.media_validation import validate_media_bytes  # noqa: E402
 from src.gemini_smoke import run_gemini_list_models, run_gemini_smoke_test  # noqa: E402
 from src.rate_limit import (  # noqa: E402
     AppwriteTablesRateLimitStore,
+    ComplexAdmissionInput,
     RateLimitError,
     build_admission_plan,
+    build_complex_admission_plan,
     build_source_media_admission_plan,
-    build_subscription_admission_plan,
     enforce_admission,  # retained as a test-compatibility import; production uses AdmissionPlan.
 )
 from src.subscriptions import (  # noqa: E402
@@ -66,6 +69,7 @@ from src.subscriptions import (  # noqa: E402
     SubscriptionPersistenceError,
     SubscriptionValidationError,
     effective_policy_from_profile,
+    effective_policy_from_workspace,
     require_system_admin,
 )
 from src.admin import (  # noqa: E402
@@ -75,6 +79,11 @@ from src.admin import (  # noqa: E402
     AdminUserNotFoundError,
     AppwriteAdminStore,
     QuotaResetConflictError,
+)
+from src.workspaces import (  # noqa: E402
+    AppwriteWorkspaceStore,
+    WorkspaceAccess,
+    WorkspaceError,
 )
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
 from src.execution_deadline import (  # noqa: E402
@@ -99,6 +108,19 @@ from src.validation import (  # noqa: E402
     AdminResetUserQuotaUsageRequest,
     AdminResetAllUserUsageRequest,
     GetMySubscriptionRequest,
+    WorkspaceAcceptInvitationRequest,
+    WorkspaceCancelInvitationRequest,
+    WorkspaceCreateRequest,
+    WorkspaceGetRequest,
+    WorkspaceInviteMemberRequest,
+    WorkspaceListInvitationsRequest,
+    WorkspaceListHistoryRequest,
+    WorkspaceListMembersRequest,
+    WorkspaceListMyInvitationsRequest,
+    WorkspaceRejectInvitationRequest,
+    DeleteMyCheckRequest,
+    GetMyCheckRequest,
+    ListMyHistoryRequest,
     SecurityValidationError,
     TextAnalyzeRequest,
     ValidatedRequest,
@@ -796,6 +818,7 @@ async def _analyze_complex_source(
     account_created_at: Any = None,
     additional_text: str = "",
     effective_policy: EffectiveQuotaPolicy | None = None,
+    workspace_access: WorkspaceAccess | None = None,
 ) -> AnalysisResult:
     """Ingest one public source and deterministically combine existing analyzers."""
     ingestor = SourceIngestor()
@@ -937,6 +960,9 @@ async def _analyze_complex_source(
             has_image=has_images,
             has_video=has_video,
             effective_policy=effective_policy,
+            workspace_id=(
+                workspace_access.workspace_id if workspace_access is not None else None
+            ),
         )
         deadline = current_execution_deadline()
         if deadline is None:
@@ -1052,7 +1078,10 @@ async def _analyze(
     account_created_at: Any = None,
     client_ip: str = "",
     effective_policy: EffectiveQuotaPolicy | None = None,
+    workspace_access: WorkspaceAccess | None = None,
 ) -> dict[str, Any]:
+    # This immutable context crosses the analysis boundary now so the next
+    # workspace-quota/persistence step can consume it without another lookup.
     router = MediaRouter()
     started = time.perf_counter()
 
@@ -1157,49 +1186,17 @@ async def _analyze(
     if isinstance(request, ComplexAnalyzeRequest):
         # The unified request keeps the old source-only path intact while
         # allowing trusted Storage files and manual text to run alongside it.
-        if (
-            quota_store is not None
-            and effective_policy is not None
-            and account_created_at is not None
-        ):
-            subscription_plan = build_subscription_admission_plan(
-                quota_store,
-                user_id=user_id,
-                policy=effective_policy,
-            )
-            deadline = current_execution_deadline()
-            if deadline is None:
-                await quota_store.admit(subscription_plan)
-            else:
-                await deadline.run(quota_store.admit(subscription_plan))
-        source_result = None
-        if request.source_url:
-            source_result = await _analyze_complex_source(
-                request.source_url,
-                diagnostic_log,
-                quota_store=quota_store,
-                user_id=user_id,
-                client_ip=client_ip,
-                account_created_at=account_created_at,
-                additional_text=request.text or "",
-                effective_policy=effective_policy,
-            )
-        text_result = None
-        if request.text and not request.source_url:
-            _safe_diagnostic_log(
-                diagnostic_log,
-                "complex_text_corpus manual_text_present=yes source_text_present=no "
-                f"combined_corpus_length={len(request.text)} combined_corpus_empty=no "
-                "combined_corpus_type=str truncated=no",
-            )
-            text_result = await _analyze_complex_text(request.text, diagnostic_log)
-        manual_results: list[AnalysisResult] = []
-        manual_media: list[SourceMediaResult] = []
+        source_url = (
+            await validate_source_url(request.source_url)
+            if request.source_url
+            else None
+        )
         bucket_id = (
             os.getenv("VITE_APPWRITE_UPLOADS_BUCKET_ID")
             or os.getenv("UPLOADS_BUCKET_ID")
             or "uploads"
         )
+        manual_inputs: list[tuple[dict[str, Any], bytes, Any]] = []
         for file_id in request.file_ids:
             metadata = await _get_file_metadata(file_id, bucket_id, user_jwt)
             file_bytes = await _download_file_bytes(file_id, bucket_id, user_jwt)
@@ -1210,6 +1207,68 @@ async def _analyze(
                     "Содержимое файла не соответствует метаданным.",
                     415,
                 )
+            manual_inputs.append((metadata, file_bytes, info))
+        if (
+            quota_store is not None
+            and effective_policy is not None
+            and account_created_at is not None
+        ):
+            complex_inputs: list[ComplexAdmissionInput] = []
+            if source_url is not None:
+                complex_inputs.append(ComplexAdmissionInput(
+                    MediaType.TEXT.value, len(source_url), hybrid=True,
+                ))
+            if request.text:
+                complex_inputs.append(ComplexAdmissionInput(
+                    MediaType.TEXT.value, len(request.text), text=request.text, hybrid=True,
+                ))
+            complex_inputs.extend(
+                ComplexAdmissionInput(info.media_type.value, len(file_bytes))
+                for _, file_bytes, info in manual_inputs
+            )
+            admission_plan = build_complex_admission_plan(
+                quota_store,
+                user_id=user_id,
+                client_ip=client_ip,
+                account_created_at=account_created_at,
+                inputs=tuple(complex_inputs),
+                effective_policy=effective_policy,
+                workspace_id=(
+                    workspace_access.workspace_id
+                    if workspace_access is not None
+                    else None
+                ),
+            )
+            deadline = current_execution_deadline()
+            if deadline is None:
+                await quota_store.admit(admission_plan)
+            else:
+                await deadline.run(quota_store.admit(admission_plan))
+        source_result = None
+        if source_url:
+            source_result = await _analyze_complex_source(
+                source_url,
+                diagnostic_log,
+                quota_store=quota_store,
+                user_id=user_id,
+                client_ip=client_ip,
+                account_created_at=account_created_at,
+                additional_text=request.text or "",
+                effective_policy=effective_policy,
+                workspace_access=workspace_access,
+            )
+        text_result = None
+        if request.text and not source_url:
+            _safe_diagnostic_log(
+                diagnostic_log,
+                "complex_text_corpus manual_text_present=yes source_text_present=no "
+                f"combined_corpus_length={len(request.text)} combined_corpus_empty=no "
+                "combined_corpus_type=str truncated=no",
+            )
+            text_result = await _analyze_complex_text(request.text, diagnostic_log)
+        manual_results: list[AnalysisResult] = []
+        manual_media: list[SourceMediaResult] = []
+        for metadata, file_bytes, info in manual_inputs:
             try:
                 item = await router.route(
                     info.media_type,
@@ -1273,6 +1332,11 @@ async def _analyze(
                 text="",
                 hybrid=True,
                 effective_policy=effective_policy,
+                workspace_id=(
+                    workspace_access.workspace_id
+                    if workspace_access is not None
+                    else None
+                ),
             )
             if quota_store is not None and account_created_at is not None
             else None
@@ -1286,6 +1350,7 @@ async def _analyze(
                 client_ip=client_ip,
                 account_created_at=account_created_at,
                 effective_policy=effective_policy,
+                workspace_access=workspace_access,
             ),
             admission_plan,
         )
@@ -1303,6 +1368,11 @@ async def _analyze(
                 text=text,
                 hybrid=bool(mode),
                 effective_policy=effective_policy,
+                workspace_id=(
+                    workspace_access.workspace_id
+                    if workspace_access is not None
+                    else None
+                ),
             )
             if quota_store is not None and account_created_at is not None
             else None
@@ -1368,6 +1438,11 @@ async def _analyze(
                 media_type=media_info.media_type.value,
                 input_size=len(file_bytes),
                 effective_policy=effective_policy,
+                workspace_id=(
+                    workspace_access.workspace_id
+                    if workspace_access is not None
+                    else None
+                ),
             )
             if quota_store is not None and account_created_at is not None
             else None
@@ -1522,6 +1597,121 @@ async def _execute_request(
             )
 
         if isinstance(
+            request, (ListMyHistoryRequest, GetMyCheckRequest, DeleteMyCheckRequest)
+        ):
+            history_store = AppwriteCheckHistoryStore(api_key)
+            try:
+                if isinstance(request, ListMyHistoryRequest):
+                    return await _within_deadline(
+                        history_store.list_my_history(
+                            user_id,
+                            page_size=request.page_size,
+                            cursor_after=request.cursor_after,
+                        )
+                    )
+                if isinstance(request, GetMyCheckRequest):
+                    return await _within_deadline(
+                        history_store.get_my_check(user_id, request.check_id)
+                    )
+                await _within_deadline(
+                    history_store.delete_my_check(user_id, request.check_id)
+                )
+                return {"check_id": request.check_id, "deleted": True}
+            except CheckHistoryError as exc:
+                raise SecurityValidationError(
+                    exc.code, exc.detail, exc.status_code
+                ) from exc
+
+        if isinstance(
+            request,
+            (
+                WorkspaceCreateRequest,
+                WorkspaceGetRequest,
+                WorkspaceListMembersRequest,
+                WorkspaceListInvitationsRequest,
+                WorkspaceListHistoryRequest,
+                WorkspaceInviteMemberRequest,
+                WorkspaceCancelInvitationRequest,
+                WorkspaceListMyInvitationsRequest,
+                WorkspaceAcceptInvitationRequest,
+                WorkspaceRejectInvitationRequest,
+            ),
+        ):
+            workspace_store = AppwriteWorkspaceStore(api_key)
+            try:
+                if isinstance(request, WorkspaceCreateRequest):
+                    return await _within_deadline(
+                        workspace_store.create_workspace(user_id, request.name)
+                    )
+                if isinstance(request, WorkspaceGetRequest):
+                    return await _within_deadline(
+                        workspace_store.get_my_workspaces(
+                            user_id,
+                            page_size=request.page_size,
+                            cursor=request.cursor,
+                        )
+                    )
+                if isinstance(request, WorkspaceListMembersRequest):
+                    return await _within_deadline(
+                        workspace_store.list_members(user_id, request.workspace_id)
+                    )
+                if isinstance(request, WorkspaceListInvitationsRequest):
+                    return await _within_deadline(
+                        workspace_store.list_invitations(
+                            user_id,
+                            request.workspace_id,
+                            page_size=request.page_size,
+                            cursor=request.cursor,
+                        )
+                    )
+                if isinstance(request, WorkspaceListHistoryRequest):
+                    return await _within_deadline(
+                        workspace_store.list_history(
+                            user_id,
+                            request.workspace_id,
+                            page_size=request.page_size,
+                            cursor_after=request.cursor_after,
+                        )
+                    )
+                if isinstance(request, WorkspaceInviteMemberRequest):
+                    return await _within_deadline(
+                        workspace_store.invite_member(
+                            user_id, request.workspace_id, request.email
+                        )
+                    )
+                if isinstance(request, WorkspaceCancelInvitationRequest):
+                    return await _within_deadline(
+                        workspace_store.cancel_invitation(
+                            user_id, request.workspace_id, request.email
+                        )
+                    )
+                if isinstance(request, WorkspaceListMyInvitationsRequest):
+                    return await _within_deadline(
+                        workspace_store.list_my_invitations(
+                            str(account.get("email") or ""),
+                            page_size=request.page_size,
+                            cursor=request.cursor,
+                        )
+                    )
+                if isinstance(request, WorkspaceAcceptInvitationRequest):
+                    return await _within_deadline(
+                        workspace_store.accept_invitation(
+                            user_id,
+                            str(account.get("email") or ""),
+                            request.workspace_id,
+                        )
+                    )
+                return await _within_deadline(
+                    workspace_store.reject_invitation(
+                        user_id, str(account.get("email") or ""), request.workspace_id
+                    )
+                )
+            except WorkspaceError as exc:
+                raise SecurityValidationError(
+                    exc.code, exc.detail, exc.status_code
+                ) from exc
+
+        if isinstance(
             request,
             (
                 AdminGetUserPolicyRequest,
@@ -1632,24 +1822,62 @@ async def _execute_request(
             raise SecurityValidationError(
                 "invalid_request", "Некорректные параметры запроса."
             )
+        workspace_access = None
+        if request.workspace_id is not None:
+            workspace_store = AppwriteWorkspaceStore(api_key)
+            try:
+                workspace_access = await _within_deadline(
+                    workspace_store.resolve_workspace_access(
+                        user_id, request.workspace_id
+                    )
+                )
+            except WorkspaceError as exc:
+                raise SecurityValidationError(
+                    exc.code, exc.detail, exc.status_code
+                ) from exc
         rate_store = AppwriteTablesRateLimitStore(api_key)
-        if "quota_usage_generations" in profile:
+        if workspace_access is not None:
+            effective_policy = effective_policy_from_workspace(
+                workspace_access.workspace
+            )
+        elif "quota_usage_generations" in profile:
             subscription_store = AppwriteSubscriptionStore(api_key)
             effective_policy = await _within_deadline(
                 subscription_store.effective_policy_for_profile(profile, user_id)
             )
         else:
             effective_policy = effective_policy_from_profile(profile)
-        result = await _analyze(
-            request,
-            user_jwt,
-            diagnostic_log,
-            rate_store,
-            user_id,
-            account_created_at=account.get("$createdAt"),
-            client_ip=client_ip,
-            effective_policy=effective_policy,
-        )
+        if isinstance(request, ComplexAnalyzeRequest):
+            async def _admit_complex_provider(provider: str, units: int) -> None:
+                await _within_deadline(rate_store.admit_provider_units(provider, units))
+
+            budget_token = begin_provider_budget(_admit_complex_provider, {})
+            try:
+                result = await _analyze(
+                    request,
+                    user_jwt,
+                    diagnostic_log,
+                    rate_store,
+                    user_id,
+                    account_created_at=account.get("$createdAt"),
+                    client_ip=client_ip,
+                    effective_policy=effective_policy,
+                    workspace_access=workspace_access,
+                )
+            finally:
+                end_provider_budget(budget_token)
+        else:
+            result = await _analyze(
+                request,
+                user_jwt,
+                diagnostic_log,
+                rate_store,
+                user_id,
+                account_created_at=account.get("$createdAt"),
+                client_ip=client_ip,
+                effective_policy=effective_policy,
+                workspace_access=workspace_access,
+            )
         is_gemini_text = result.get("model_used") == "gemini_text_verification"
         if isinstance(request, (SourceAnalyzeRequest, ComplexAnalyzeRequest)):
             # Source metadata is optional for unified Complex.  In particular,
@@ -1671,10 +1899,25 @@ async def _execute_request(
                         user_id,
                         source_label,
                         api_key,
+                        workspace_id=(
+                            workspace_access.workspace_id
+                            if workspace_access is not None
+                            else None
+                        ),
                     )
                 )
                 if execution_deadline is not None
-                else persist_check_result(result, user_id, source_label, api_key)
+                else persist_check_result(
+                    result,
+                    user_id,
+                    source_label,
+                    api_key,
+                    workspace_id=(
+                        workspace_access.workspace_id
+                        if workspace_access is not None
+                        else None
+                    ),
+                )
             )
         except Exception:
             if is_gemini_text:
@@ -1841,6 +2084,16 @@ def main(context: Any):
             {
                 "detail": "Сервис администрирования временно недоступен.",
                 "code": "admin_unavailable",
+            },
+            503,
+        )
+    except ChecksPersistenceError as exc:
+        _log_internal_error(context, exc)
+        return _response_json(
+            context,
+            {
+                "detail": "Сохранение результата временно недоступно. Попробуйте позже.",
+                "code": "checks_persistence_unavailable",
             },
             503,
         )

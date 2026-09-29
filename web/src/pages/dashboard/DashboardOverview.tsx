@@ -26,7 +26,7 @@ export function DashboardOverview() {
   useEffect(() => {
     let cancelled = false;
     if (!user?.$id) return undefined;
-    getHistoryStats(user.$id)
+    getHistoryStats()
       .then((historyStats) => {
         if (!cancelled) setStats({ ...historyStats, dailyLimit });
       })

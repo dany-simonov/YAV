@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 
 from core.exceptions import ProviderInfrastructureError
@@ -33,3 +35,17 @@ async def test_cross_provider_fallback_attempts_share_one_twelve_operation_budge
     finally:
         end_provider_budget(tokens)
     assert (raised.value.service, raised.value.kind) == ("sightengine", "capacity")
+
+
+@pytest.mark.asyncio
+async def test_prepaid_provider_operation_is_not_admitted_twice():
+    guard = AsyncMock()
+    tokens = begin_provider_budget(guard, {"gemini": 1})
+    try:
+        await admit_provider_operation("gemini")
+        guard.assert_not_awaited()
+        await admit_provider_operation("gemini")
+    finally:
+        end_provider_budget(tokens)
+
+    guard.assert_awaited_once_with("gemini", 1)

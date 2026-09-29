@@ -4,10 +4,13 @@ import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
 from src.appwrite_store import (
+    AppwriteCheckHistoryStore,
+    CheckHistoryError,
     ChecksPersistenceError,
     ensure_user_profile,
     get_authenticated_account,
@@ -15,7 +18,11 @@ from src.appwrite_store import (
     persist_check_result,
     serialize_check_details,
 )
-from src.execution_deadline import ExecutionDeadline, reset_execution_deadline, set_execution_deadline
+from src.execution_deadline import (
+    ExecutionDeadline,
+    reset_execution_deadline,
+    set_execution_deadline,
+)
 from src.validation import MAX_DETAILS_BYTES
 
 
@@ -24,6 +31,7 @@ def _client_with(*responses):
     client.get = AsyncMock(side_effect=[response for response in responses if response._method == "get"])
     client.post = AsyncMock(side_effect=[response for response in responses if response._method == "post"])
     client.patch = AsyncMock(side_effect=[response for response in responses if response._method == "patch"])
+    client.delete = AsyncMock(side_effect=[response for response in responses if response._method == "delete"])
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
     return client
@@ -635,6 +643,31 @@ async def test_profile_mirrors_authoritative_email_verification(stored, authorit
 
 
 @pytest.mark.asyncio
+async def test_profile_syncs_auth_email_to_canonical_form():
+    client = _client_with(
+        _response(
+            "get",
+            200,
+            {"$id": "user-1", "email_verified": True, "email": "User@Test.com"},
+        ),
+        _response("patch", 200, {"$id": "user-1", "email": "user@test.com"}),
+    )
+    account = {
+        "$id": "user-1",
+        "email": " User@Test.com ",
+        "emailVerification": True,
+    }
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        profile = await ensure_user_profile(account, "dynamic-key")
+
+    assert profile["email"] == "user@test.com"
+    assert client.patch.await_args.kwargs["json"] == {
+        "data": {"email_verified": True, "email": "user@test.com"}
+    }
+
+
+@pytest.mark.asyncio
 async def test_authenticated_account_rejects_foreign_runtime_identity():
     client = _client_with(_response("get", 200, {"$id": "other-user"}))
     with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
@@ -653,7 +686,7 @@ async def test_account_error_does_not_expose_response_body():
 
 
 @pytest.mark.asyncio
-async def test_check_creation_uses_exact_owner_permissions():
+async def test_personal_check_creation_uses_function_only_permissions():
     client = _client_with(
         _response("post", 201, {"$id": "check-1"}),
         _response("patch", 200),
@@ -669,10 +702,294 @@ async def test_check_creation_uses_exact_owner_permissions():
 
     body = client.post.await_args.kwargs["json"]
     assert body["data"]["user_id"] == "user-1"
-    assert body["permissions"] == [
-        'read("user:user-1")',
-        'delete("user:user-1")',
+    assert "workspace_id" not in body["data"]
+    assert body["permissions"] == []
+
+
+def test_personal_check_mapping_omits_workspace_id():
+    row = map_analysis_to_check_row(
+        {"verdict": "REAL", "confidence": 0.2, "media_type": "text"},
+        "user-1",
+    )
+
+    assert "workspace_id" not in row
+
+
+@pytest.mark.asyncio
+async def test_workspace_check_persistence_keeps_actor_and_uses_function_only_permissions():
+    client = _client_with(
+        _response("post", 201, {"$id": "check-1"}),
+        _response("patch", 200),
+        _response("patch", 200),
+    )
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        await persist_check_result(
+            {"verdict": "REAL", "confidence": 0.2, "media_type": "text"},
+            "member-1",
+            "source",
+            "dynamic-key",
+            workspace_id="workspace-1",
+        )
+
+    body = client.post.await_args.kwargs["json"]
+    assert body["data"]["user_id"] == "member-1"
+    assert body["data"]["workspace_id"] == "workspace-1"
+    assert body["permissions"] == []
+    client.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_personal_history_uses_server_side_actor_and_null_workspace_filter():
+    client = _client_with(
+        _response(
+            "get",
+            200,
+            {
+                "rows": [
+                    {
+                        "$id": "personal-1",
+                        "user_id": "user-a",
+                        "workspace_id": None,
+                        "media_type": "text",
+                        "status": "completed",
+                        "verdict": "REAL",
+                        "explanation": "Сохранённое пояснение",
+                        "$createdAt": "2026-09-28T10:00:00+00:00",
+                        "$permissions": ["must-not-leak"],
+                    }
+                ]
+            },
+        )
+    )
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        result = await store.list_my_history(
+            "user-a", page_size=1, cursor_after="before-1"
+        )
+
+    assert result == {
+        "checks": [
+            {
+                "check_id": "personal-1",
+                "user_id": "user-a",
+                "media_type": "text",
+                "status": "completed",
+                "verdict": "REAL",
+                "provider": "",
+                "model": "",
+                "ai_probability": None,
+                "decision_confidence": None,
+                "authenticity_index": None,
+                "processing_ms": None,
+                "source_label": "",
+                "created_at": "2026-09-28T10:00:00+00:00",
+                "explanation": "Сохранённое пояснение",
+            }
+        ],
+        "next_cursor": "personal-1",
+        "page_size": 1,
+    }
+    queries = [value for name, value in client.get.await_args.kwargs["params"] if name == "queries[]"]
+    assert 'equal("user_id",["user-a"])' in queries
+    assert 'isNull("workspace_id")' in queries
+    assert 'orderDesc("$sequence")' in queries
+    assert 'cursorAfter("before-1")' in queries
+    assert "$permissions" not in result["checks"][0]
+    assert "workspace_id" not in result["checks"][0]
+
+
+@pytest.mark.asyncio
+async def test_personal_history_empty_page_is_stable():
+    client = _client_with(_response("get", 200, {"rows": []}))
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        result = await store.list_my_history("user-a", page_size=25)
+
+    assert result == {"checks": [], "next_cursor": None, "page_size": 25}
+
+
+@pytest.mark.asyncio
+async def test_personal_history_sequence_pagination_handles_equal_timestamps_without_duplicates():
+    def row(check_id, sequence):
+        return {
+            "$id": check_id,
+            "$sequence": sequence,
+            "$createdAt": "2026-09-28T10:00:00+00:00",
+            "user_id": "user-a",
+            "workspace_id": None,
+            "media_type": "text",
+            "status": "completed",
+            "verdict": "REAL",
+        }
+
+    client = _client_with(
+        _response("get", 200, {"rows": [row("check-5", 5), row("check-4", 4)]}),
+        _response("get", 200, {"rows": [row("check-3", 3), row("check-2", 2)]}),
+        _response("get", 200, {"rows": [row("check-1", 1)]}),
+    )
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        first = await store.list_my_history("user-a", page_size=2)
+        second = await store.list_my_history(
+            "user-a", page_size=2, cursor_after=first["next_cursor"]
+        )
+        third = await store.list_my_history(
+            "user-a", page_size=2, cursor_after=second["next_cursor"]
+        )
+
+    assert [item["check_id"] for page in (first, second, third) for item in page["checks"]] == [
+        "check-5", "check-4", "check-3", "check-2", "check-1"
     ]
+    assert (first["next_cursor"], second["next_cursor"], third["next_cursor"]) == (
+        "check-4", "check-2", None
+    )
+    all_queries = [
+        value
+        for call in client.get.await_args_list
+        for name, value in call.kwargs["params"]
+        if name == "queries[]"
+    ]
+    assert all('orderDesc("$sequence")' in all_queries[index : index + 4] for index in (0, 4, 9))
+
+
+@pytest.mark.asyncio
+async def test_personal_get_returns_safe_dto_for_own_personal_row():
+    client = _client_with(
+        _response(
+            "get",
+            200,
+            {
+                "$id": "personal-1",
+                "user_id": "user-a",
+                "workspace_id": None,
+                "media_type": "image",
+                "status": "completed",
+                "verdict": "FAKE",
+                "explanation": "Полное пояснение",
+                "details": '{"analysis_mode":"complex"}',
+                "$permissions": ["must-not-leak"],
+            },
+        )
+    )
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        result = await store.get_my_check("user-a", "personal-1")
+
+    assert result["check_id"] == "personal-1"
+    assert result["user_id"] == "user-a"
+    assert "workspace_id" not in result
+    assert "$permissions" not in result
+    assert result["explanation"] == "Полное пояснение"
+    assert result["details"] == '{"analysis_mode":"complex"}'
+
+
+@pytest.mark.asyncio
+async def test_personal_detail_preserves_malformed_legacy_details_without_failing():
+    client = _client_with(
+        _response(
+            "get",
+            200,
+            {
+                "$id": "personal-1",
+                "user_id": "user-a",
+                "workspace_id": None,
+                "details": "not-json",
+            },
+        )
+    )
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        result = await store.get_my_check("user-a", "personal-1")
+
+    assert result["details"] == "not-json"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"$id": "check-b", "user_id": "user-b", "workspace_id": None},
+        {"$id": "check-w", "user_id": "user-a", "workspace_id": "workspace-1"},
+    ],
+)
+async def test_personal_get_hides_foreign_and_workspace_rows(row):
+    client = _client_with(_response("get", 200, row))
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client), pytest.raises(
+        CheckHistoryError
+    ) as raised:
+        await store.get_my_check("user-a", row["$id"])
+
+    assert (raised.value.code, raised.value.status_code) == ("check_not_found", 404)
+
+
+@pytest.mark.asyncio
+async def test_personal_get_missing_check_has_controlled_not_found_contract():
+    client = _client_with(_response("get", 404))
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client), pytest.raises(
+        CheckHistoryError
+    ) as raised:
+        await store.get_my_check("user-a", "missing-check")
+
+    assert (raised.value.code, raised.value.status_code) == ("check_not_found", 404)
+
+
+@pytest.mark.asyncio
+async def test_personal_delete_verifies_scope_then_uses_function_credentials():
+    client = _client_with(
+        _response("get", 200, {"$id": "personal-1", "user_id": "user-a", "workspace_id": None}),
+        _response("delete", 204),
+    )
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client):
+        await store.delete_my_check("user-a", "personal-1")
+
+    assert client.delete.await_args.kwargs["headers"]["X-Appwrite-Key"] == "runtime-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"$id": "foreign-1", "user_id": "user-b", "workspace_id": None},
+        {"$id": "workspace-1", "user_id": "user-a", "workspace_id": "workspace-a"},
+    ],
+)
+async def test_personal_delete_refuses_foreign_and_workspace_rows_without_delete(row):
+    client = _client_with(
+        _response("get", 200, row)
+    )
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client), pytest.raises(
+        CheckHistoryError
+    ) as raised:
+        await store.delete_my_check("user-a", row["$id"])
+
+    assert raised.value.code == "check_not_found"
+    client.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_personal_delete_missing_or_repeated_row_is_controlled_not_found():
+    client = _client_with(_response("get", 404))
+    store = AppwriteCheckHistoryStore("runtime-key")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client), pytest.raises(
+        CheckHistoryError
+    ) as raised:
+        await store.delete_my_check("user-a", "missing-check")
+
+    assert (raised.value.code, raised.value.status_code) == ("check_not_found", 404)
 
 
 @pytest.mark.asyncio
@@ -732,6 +1049,60 @@ async def test_check_create_failure_exposes_only_safe_structural_diagnostics(sta
     assert len(error.appwrite_message) <= 300
     for sensitive_value in (private_text, "user-1", "dynamic-key", "jwt-token"):
         assert sensitive_value not in error.appwrite_message
+
+
+@pytest.mark.asyncio
+async def test_check_create_timeout_is_a_typed_persistence_failure():
+    client = _client_with()
+    client.post.side_effect = httpx.ReadTimeout("timed out")
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client), pytest.raises(
+        ChecksPersistenceError
+    ) as raised:
+        await persist_check_result(_canonical_result(), "user-1", "source", "dynamic-key")
+
+    assert raised.value.operation == "checks.persistence.transport"
+
+
+@pytest.mark.asyncio
+async def test_malformed_successful_check_create_response_is_typed_persistence_failure():
+    response = _response("post", 201)
+    response.json.side_effect = ValueError("not json")
+    client = _client_with(response)
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client), pytest.raises(
+        ChecksPersistenceError
+    ) as raised:
+        await persist_check_result(_canonical_result(), "user-1", "source", "dynamic-key")
+
+    assert raised.value.operation == "checks.create.response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_patch", "expected_operation"),
+    [
+        (1, "profile.checks_count.increment"),
+        (2, "profile.last_check_at.update"),
+    ],
+)
+async def test_profile_metadata_persistence_failures_remain_typed(
+    failed_patch, expected_operation
+):
+    patches = [_response("patch", 200), _response("patch", 200)]
+    patches[failed_patch - 1] = _response("patch", 500)
+    client = _client_with(_response("post", 201, {"$id": "check-1"}), *patches)
+
+    with patch("src.appwrite_store.httpx.AsyncClient", return_value=client), pytest.raises(
+        ChecksPersistenceError
+    ) as raised:
+        await persist_check_result(_canonical_result(), "user-1", "source", "dynamic-key")
+
+    assert raised.value.operation == expected_operation
+    # The check create is intentionally not rolled back or retried: the current
+    # persistence flow has no distributed transaction across checks and users.
+    client.post.assert_awaited_once()
+    assert client.patch.await_count == failed_patch
 
 
 @pytest.mark.asyncio

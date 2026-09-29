@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     global_aiornot_words_monthly: int = 600_000
     global_sapling_chars_daily: int = 20_000
     global_sapling_chars_monthly: int = 120_000
+    # Resemble and HuggingFace are operation-priced external inference
+    # providers, so their conservative defaults mirror Sightengine's existing
+    # operation budget and remain overrideable only through server env.
+    global_resemble_daily: int = 50
+    global_resemble_monthly: int = 1_500
+    global_huggingface_daily: int = 50
+    global_huggingface_monthly: int = 1_500
     # Comma-separated authoritative Appwrite account IDs.  This is server-only
     # configuration; clients never receive or select this entitlement.
     unlimited_user_ids: str = ""

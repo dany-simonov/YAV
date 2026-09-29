@@ -59,7 +59,7 @@ export function HistoryPage() {
     }
     setLoading(true);
     setHistoryError(null);
-    loadChecksHistory(user.$id)
+    loadChecksHistory()
       .then((items) => {
         if (!cancelled) setChecks(items);
       })
@@ -80,7 +80,7 @@ export function HistoryPage() {
     if (!user?.$id) return;
     setHistoryError(null);
     try {
-      await deleteCheckFromHistory(user.$id, checkId);
+      await deleteCheckFromHistory(checkId);
       setChecks((current) => current.filter((check) => check.id !== checkId));
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : 'Не удалось удалить проверку');
@@ -91,7 +91,7 @@ export function HistoryPage() {
     if (!user?.$id) return;
     setHistoryError(null);
     try {
-      await clearChecksHistory(user.$id);
+      await clearChecksHistory();
       setChecks([]);
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : 'Не удалось очистить историю');

@@ -1,103 +1,88 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AppwriteException, Query } from 'appwrite';
+import { AppwriteException } from 'appwrite';
 
-const tablesDBMock = vi.hoisted(() => ({
-  listRows: vi.fn(),
-  getRow: vi.fn(),
-  deleteRow: vi.fn(),
+const functionsMock = vi.hoisted(() => ({
+  createExecution: vi.fn(),
 }));
 
 vi.mock('./appwrite', () => ({
-  APPWRITE_CONFIG: { databaseId: 'yav', tables: { checks: 'checks' } },
-  tablesDB: tablesDBMock,
+  APPWRITE_CONFIG: { functions: { analyze: 'analyze-function' } },
+  functions: functionsMock,
 }));
 
 import {
   clearChecksHistory,
   deleteCheckFromHistory,
+  loadCheckFromHistory,
   loadChecksHistory,
   mapHistoryRow,
 } from './checkHistory';
 
 const row = (overrides: Record<string, unknown> = {}) => ({
-  $id: 'check-1',
-  $createdAt: '2026-08-08T12:00:00.000Z',
+  check_id: 'check-1',
   user_id: 'user-1',
   media_type: 'text',
   status: 'completed',
   verdict: 'REAL',
-  authenticity_index: 81,
+  provider: '',
   model: 'sapling',
-  source_label: 'Материал',
+  ai_probability: null,
+  decision_confidence: null,
+  authenticity_index: 81,
   processing_ms: 120,
+  source_label: 'Материал',
+  created_at: '2026-08-08T12:00:00.000Z',
+  explanation: 'Сохранённое пояснение',
   ...overrides,
 });
 
-describe('server-backed check history', () => {
+const execution = (body: unknown, responseStatusCode = 200) => ({
+  responseBody: JSON.stringify(body),
+  responseStatusCode,
+});
+
+const page = (checks: Record<string, unknown>[], nextCursor: string | null = null) => execution({
+  checks,
+  next_cursor: nextCursor,
+  page_size: 100,
+});
+
+const payloads = () => functionsMock.createExecution.mock.calls.map(
+  ([request]) => JSON.parse(request.body as string),
+);
+
+describe('Function-backed check history', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    tablesDBMock.listRows.mockResolvedValue({ rows: [], total: 0 });
   });
 
-  it('maps a TablesDB row to the existing UI contract', () => {
-    expect(mapHistoryRow(row() as never)).toEqual({
+  it('maps a summary DTO to the existing UI contract', () => {
+    expect(mapHistoryRow(row())).toEqual({
       id: 'check-1',
       media_type: 'text',
       verdict: 'REAL',
       confidence: 81,
       authenticity_index: 81,
       model_used: 'sapling',
-      explanation: 'Материал',
+      explanation: 'Сохранённое пояснение',
       processing_ms: 120,
       created_at: '2026-08-08T12:00:00.000Z',
     });
   });
 
-  it('preserves the canonical history authenticity index', () => {
-    expect(mapHistoryRow(row({ authenticity_index: 95 }) as never)).toMatchObject({
-      confidence: 95,
-      authenticity_index: 95,
-    });
-  });
-
-  it('round-trips the combined credibility report from safe details', () => {
+  it('parses full persisted Complex details only from the detail DTO', () => {
     const check = mapHistoryRow(row({
+      verdict: 'FAKE',
+      authenticity_index: 0,
+      processing_ms: 0,
       details: JSON.stringify({
-        short_report: 'Общий вывод.',
-        credibility: {
-          status: 'completed', credibility_index: 34, verdict: 'LOW_CREDIBILITY',
-          confidence: 0.8, processing_ms: 8120, summary: 'Требуется дополнительная проверка.', issues: [],
-          sources: [{ title: 'Источник', url: 'https://example.org/source' }],
+        analysis_mode: 'complex',
+        ai_confidence: 0,
+        short_report: 'Итог.',
+        ai_details: {
+          signals: [{ type: 'GENERIC_FORMULATION', severity: 'LOW', title: 'Шаблон', explanation: 'Пояснение.' }],
+          human_signals: ['Авторская деталь.'],
         },
-      }),
-    }) as never);
-    expect(check.short_report).toBe('Общий вывод.');
-    expect(check.credibility?.credibility_index).toBe(34);
-    expect(check.credibility?.processing_ms).toBe(8120);
-  });
-
-  it('keeps repaired source refs from a compacted combined report', () => {
-    const check = mapHistoryRow(row({
-      details: JSON.stringify({
-        details_compacted: true,
-        credibility: {
-          status: 'completed', credibility_index: 34, verdict: 'LOW_CREDIBILITY',
-          confidence: 0.8, summary: 'Требуется дополнительная проверка.',
-          issues: [{ type: 'UNSUPPORTED_CLAIM', severity: 'HIGH', claim: 'Утверждение', explanation: 'Пояснение', source_refs: [0] }],
-          sources: [{ title: 'Источник', url: 'https://example.org/source' }],
-        },
-      }),
-    }) as never);
-    expect(check.credibility?.issues[0].source_refs).toEqual([0]);
-    expect(check.credibility?.sources).toHaveLength(1);
-  });
-
-  it('round-trips all persisted Complex fields without treating authenticity index as AI confidence', () => {
-    const check = mapHistoryRow(row({
-      verdict: 'FAKE', authenticity_index: 0, processing_ms: 0,
-      details: JSON.stringify({
-        analysis_mode: 'complex', ai_confidence: 0, short_report: 'Итог.',
-        ai_details: { signals: [{ type: 'GENERIC_FORMULATION', severity: 'LOW', title: 'Шаблон', explanation: 'Пояснение.' }], human_signals: ['Авторская деталь.'] },
         credibility: {
           status: 'completed', credibility_index: 0, verdict: 'VERY_LOW_CREDIBILITY', confidence: 0,
           processing_ms: 0, summary: 'Недостаточно оснований.', issues: [], credible_points: [], sources: [],
@@ -106,111 +91,119 @@ describe('server-backed check history', () => {
     }) as never);
 
     expect(check).toMatchObject({
-      analysis_mode: 'complex', authenticity_index: 0, confidence: 0, processing_ms: 0,
-      short_report: 'Итог.', ai_details: { human_signals: ['Авторская деталь.'] },
+      analysis_mode: 'complex',
+      authenticity_index: 0,
+      confidence: 0,
+      short_report: 'Итог.',
+      ai_details: { human_signals: ['Авторская деталь.'] },
       credibility: { credibility_index: 0, confidence: 0, processing_ms: 0 },
     });
   });
 
-  it('restores the persisted live Complex confidence independently from authenticity index', () => {
-    const check = mapHistoryRow(row({
-      verdict: 'FAKE', authenticity_index: 4,
-      details: JSON.stringify({ analysis_mode: 'complex', ai_confidence: 0.96 }),
-    }) as never);
+  it('lists history through the Function without sending userId and forwards the opaque cursor', async () => {
+    functionsMock.createExecution
+      .mockResolvedValueOnce(page([row()], 'cursor-1'))
+      .mockResolvedValueOnce(page([row({ check_id: 'check-2' })]));
 
-    expect(check.verdict).toBe('FAKE');
-    expect(check.authenticity_index).toBe(4);
+    const checks = await loadChecksHistory();
+
+    expect(checks.map((check) => check.id)).toEqual(['check-1', 'check-2']);
+    expect(functionsMock.createExecution).toHaveBeenCalledTimes(2);
+    expect(payloads()).toEqual([
+      { action: 'list_my_history', pageSize: 100 },
+      { action: 'list_my_history', pageSize: 100, cursorAfter: 'cursor-1' },
+    ]);
+    expect(functionsMock.createExecution.mock.calls[0]?.[0]).toMatchObject({
+      functionId: 'analyze-function',
+    });
+    expect(JSON.stringify(payloads())).not.toContain('userId');
+  });
+
+  it('returns an empty history from an empty Function page', async () => {
+    functionsMock.createExecution.mockResolvedValueOnce(page([]));
+
+    await expect(loadChecksHistory()).resolves.toEqual([]);
+  });
+
+  it('uses get_my_check and preserves detail explanation and details', async () => {
+    functionsMock.createExecution.mockResolvedValueOnce(execution(row({
+      details: JSON.stringify({ analysis_mode: 'complex', ai_confidence: 0.96 }),
+    })));
+
+    const check = await loadCheckFromHistory('check-1');
+
+    expect(payloads()).toEqual([{ action: 'get_my_check', checkId: 'check-1' }]);
+    expect(check.explanation).toBe('Сохранённое пояснение');
+    expect(check.analysis_mode).toBe('complex');
     expect(check.confidence).toBe(0.96);
   });
 
-  it('leaves Complex AI confidence absent when persistence did not store it', () => {
-    const check = mapHistoryRow(row({
-      authenticity_index: 86,
-      details: JSON.stringify({ analysis_mode: 'complex' }),
-    }) as never);
+  it('maps malformed legacy detail JSON to an optional empty report without failing the detail', async () => {
+    functionsMock.createExecution.mockResolvedValueOnce(execution(row({ details: 'not-json' })));
 
-    expect(check.confidence).toBeNull();
-    expect(check.authenticity_index).toBe(86);
-  });
-
-  it('uses the authenticated TablesDB client with owner, order, pagination, and projection queries', async () => {
-    tablesDBMock.listRows.mockResolvedValue({ rows: [row(), row({ $id: 'foreign', user_id: 'user-2' })], total: 0 });
-
-    const checks = await loadChecksHistory('user-1');
-
-    expect(checks.map((check) => check.id)).toEqual(['check-1']);
-    expect(tablesDBMock.listRows).toHaveBeenCalledWith({
-      databaseId: 'yav',
-      tableId: 'checks',
-      queries: [
-        Query.equal('user_id', ['user-1']),
-        Query.orderDesc('$createdAt'),
-        Query.limit(100),
-        Query.offset(0),
-        Query.select([
-          '$id', '$createdAt', 'user_id', 'media_type', 'verdict', 'authenticity_index',
-          'provider', 'model', 'explanation', 'source_label', 'processing_ms', 'details',
-        ]),
-      ],
-      total: false,
-      ttl: 0,
+    await expect(loadCheckFromHistory('check-1')).resolves.toMatchObject({
+      id: 'check-1',
+      explanation: 'Сохранённое пояснение',
+      analysis_mode: undefined,
     });
   });
 
-  it('loads more than one page in newest-first order', async () => {
-    const firstPage = Array.from({ length: 100 }, (_, index) => row({ $id: `check-${index}` }));
-    const secondPage = Array.from({ length: 30 }, (_, index) => row({ $id: `check-${index + 100}` }));
-    tablesDBMock.listRows.mockResolvedValueOnce({ rows: firstPage, total: 0 }).mockResolvedValueOnce({ rows: secondPage, total: 0 });
+  it('deletes through delete_my_check without a client ownership check', async () => {
+    functionsMock.createExecution.mockResolvedValueOnce(execution({ check_id: 'check-1', deleted: true }));
 
-    const checks = await loadChecksHistory('user-1');
+    await deleteCheckFromHistory('check-1');
 
-    expect(checks).toHaveLength(130);
-    expect(tablesDBMock.listRows).toHaveBeenCalledTimes(2);
+    expect(payloads()).toEqual([{ action: 'delete_my_check', checkId: 'check-1' }]);
   });
 
-  it('clears every page of the current user history', async () => {
-    const firstPage = Array.from({ length: 100 }, (_, index) => row({ $id: `check-${index}` }));
-    const secondPage = Array.from({ length: 30 }, (_, index) => row({ $id: `check-${index + 100}` }));
-    tablesDBMock.listRows.mockResolvedValueOnce({ rows: firstPage, total: 0 }).mockResolvedValueOnce({ rows: secondPage, total: 0 });
-    tablesDBMock.getRow.mockImplementation(async ({ rowId }: { rowId: string }) => row({ $id: rowId }));
-    tablesDBMock.deleteRow.mockResolvedValue({});
+  it('maps not-found without exposing a row or backend response', async () => {
+    functionsMock.createExecution.mockResolvedValueOnce(execution({
+      code: 'check_not_found', detail: 'Проверка не найдена.',
+    }, 404));
 
-    await clearChecksHistory('user-1');
-
-    expect(tablesDBMock.deleteRow).toHaveBeenCalledTimes(130);
+    await expect(loadCheckFromHistory('foreign-check')).rejects.toThrow('Проверка не найдена');
+    expect(JSON.stringify(payloads())).not.toContain('userId');
   });
 
-  it('refuses to delete a readable row belonging to another user', async () => {
-    tablesDBMock.getRow.mockResolvedValue(row({ user_id: 'user-2' }));
+  it('maps history_unavailable to a controlled user-facing error', async () => {
+    functionsMock.createExecution.mockResolvedValueOnce(execution({
+      code: 'history_unavailable', detail: 'internal Appwrite response',
+    }, 503));
 
-    await expect(deleteCheckFromHistory('user-1', 'check-1')).rejects.toThrow(
-      'Нельзя удалить чужую проверку'
+    await expect(loadChecksHistory()).rejects.toThrow('История проверок временно недоступна');
+  });
+
+  it('clears history by repeatedly loading the first page and never reusing a deleted cursor', async () => {
+    functionsMock.createExecution
+      .mockResolvedValueOnce(page([row(), row({ check_id: 'check-2' })], 'ignored-cursor'))
+      .mockResolvedValueOnce(execution({ check_id: 'check-1', deleted: true }))
+      .mockResolvedValueOnce(execution({ check_id: 'check-2', deleted: true }))
+      .mockResolvedValueOnce(page([]));
+
+    await clearChecksHistory();
+
+    expect(payloads()).toEqual([
+      { action: 'list_my_history', pageSize: 100 },
+      { action: 'delete_my_check', checkId: 'check-1' },
+      { action: 'delete_my_check', checkId: 'check-2' },
+      { action: 'list_my_history', pageSize: 100 },
+    ]);
+  });
+
+  it('stops clear on a partial delete failure instead of looping', async () => {
+    functionsMock.createExecution
+      .mockResolvedValueOnce(page([row()]))
+      .mockResolvedValueOnce(execution({ code: 'history_unavailable', detail: 'unavailable' }, 503));
+
+    await expect(clearChecksHistory()).rejects.toThrow('История проверок временно недоступна');
+    expect(functionsMock.createExecution).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not expose raw Appwrite transport errors', async () => {
+    functionsMock.createExecution.mockRejectedValueOnce(
+      new AppwriteException('response contained secret-token', 500, 'internal_error'),
     );
-    expect(tablesDBMock.deleteRow).not.toHaveBeenCalled();
-  });
 
-  it('does not expose raw backend errors', async () => {
-    tablesDBMock.listRows.mockRejectedValue(new AppwriteException('response contained secret-token', 500, 'internal_error'));
-
-    await expect(loadChecksHistory('user-1')).rejects.toThrow(
-      'Не удалось загрузить историю проверок'
-    );
-  });
-
-  it('logs only redacted Appwrite diagnostics during development', async () => {
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    tablesDBMock.listRows.mockRejectedValue(
-      new AppwriteException('Bearer jwt-secret Authorization: session-token "private input"', 400, 'query_invalid')
-    );
-
-    await expect(loadChecksHistory('user-1')).rejects.toThrow('Не удалось загрузить историю проверок');
-
-    expect(warning).toHaveBeenCalledWith('check_history_appwrite_error', {
-      code: 400,
-      type: 'query_invalid',
-      message: expect.not.stringContaining('jwt-secret'),
-    });
-    expect(warning.mock.calls[0]?.[1]).not.toHaveProperty('stack');
-    warning.mockRestore();
+    await expect(loadChecksHistory()).rejects.toThrow('Не удалось загрузить историю проверок');
   });
 });

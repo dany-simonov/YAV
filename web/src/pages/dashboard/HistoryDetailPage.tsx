@@ -25,7 +25,7 @@ export function HistoryDetailPage() {
 
     setLoading(true);
     setError(null);
-    loadCheckFromHistory(user.$id, checkId)
+    loadCheckFromHistory(checkId)
       .then((item) => {
         if (!cancelled) setCheck(item);
       })

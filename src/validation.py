@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import unicodedata
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -32,6 +33,8 @@ _FILE_ID_CHARS = frozenset(
 _BIDI_SPOOFING = frozenset(
     chr(value) for value in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
 )
+_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
+_APPWRITE_ID = re.compile(r"^[A-Za-z0-9._-]{1,36}$")
 
 
 class SecurityValidationError(Exception):
@@ -42,6 +45,20 @@ class SecurityValidationError(Exception):
         self.detail = detail
         self.status_code = status_code
         super().__init__(code)
+
+
+class EmailCanonicalizationError(ValueError):
+    """Email cannot be represented safely as the canonical account identity."""
+
+
+def canonicalize_email(value: Any) -> str:
+    """Return the one email representation shared by Auth, profiles and invitations."""
+    if not isinstance(value, str):
+        raise EmailCanonicalizationError("email must be a string")
+    email = value.strip().lower()
+    if len(email) > 320 or not _EMAIL.fullmatch(email):
+        raise EmailCanonicalizationError("invalid email")
+    return email
 
 
 def _contains_unsafe_control(value: str, *, permit_whitespace: bool = False) -> bool:
@@ -86,6 +103,14 @@ def validate_file_id(value: str) -> str:
     ):
         raise SecurityValidationError(
             "invalid_file_id", "Некорректный идентификатор файла."
+        )
+    return value
+
+
+def validate_check_id(value: str) -> str:
+    if not isinstance(value, str) or not _APPWRITE_ID.fullmatch(value):
+        raise SecurityValidationError(
+            "invalid_check_id", "Некорректный идентификатор проверки."
         )
     return value
 
@@ -216,7 +241,144 @@ class AdminListAuditEventsRequest(_AdminActionRequest):
     )
 
 
-class TextAnalyzeRequest(_RequestModel):
+class _WorkspaceActionRequest(_RequestModel):
+    """Workspace identity is always resolved from the runtime Appwrite JWT."""
+
+    @model_validator(mode="after")
+    def _reject_spoofable_identity(self) -> "_WorkspaceActionRequest":
+        if (
+            self.user_id is not None
+            or self.username is not None
+            or self.first_name is not None
+        ):
+            raise ValueError("workspace requests cannot include caller identity fields")
+        return self
+
+
+class WorkspaceCreateRequest(_WorkspaceActionRequest):
+    action: Literal["workspace_create"]
+    name: str = Field(min_length=1, max_length=120)
+
+
+class _WorkspaceTargetRequest(_WorkspaceActionRequest):
+    workspace_id: str = Field(
+        alias="workspaceId", min_length=1, max_length=36, pattern=_APPWRITE_ID.pattern
+    )
+
+
+class _WorkspaceContextRequest(_RequestModel):
+    """Optional explicit workspace context for analysis requests."""
+
+    workspace_id: str | None = Field(
+        default=None,
+        alias="workspaceId",
+        min_length=1,
+        max_length=36,
+        pattern=_APPWRITE_ID.pattern,
+    )
+
+
+class _WorkspacePageRequest(_WorkspaceActionRequest):
+    page_size: int = Field(default=25, alias="pageSize", ge=1, le=100)
+    cursor: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=_APPWRITE_ID.pattern
+    )
+
+
+class WorkspaceGetRequest(_WorkspacePageRequest):
+    action: Literal["workspace_get"]
+
+
+class WorkspaceListMembersRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_list_members"]
+
+
+class WorkspaceListInvitationsRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_list_invitations"]
+    page_size: int = Field(default=25, alias="pageSize", ge=1, le=100)
+    cursor: str | None = Field(
+        default=None, min_length=1, max_length=36, pattern=_APPWRITE_ID.pattern
+    )
+
+
+class WorkspaceListHistoryRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_list_history"]
+    page_size: int = Field(default=25, alias="pageSize", ge=1, le=100)
+    cursor_after: str | None = Field(
+        default=None,
+        alias="cursorAfter",
+        min_length=1,
+        max_length=36,
+        pattern=_APPWRITE_ID.pattern,
+    )
+
+
+class WorkspaceInviteMemberRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_invite_member"]
+    email: str = Field(min_length=3, max_length=320)
+
+
+class WorkspaceCancelInvitationRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_cancel_invitation"]
+    email: str = Field(min_length=3, max_length=320)
+
+
+class WorkspaceListMyInvitationsRequest(_WorkspacePageRequest):
+    action: Literal["workspace_list_my_invitations"]
+
+
+class WorkspaceAcceptInvitationRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_accept_invitation"]
+
+
+class WorkspaceRejectInvitationRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_reject_invitation"]
+
+
+class _PersonalHistoryRequest(_RequestModel):
+    """Personal history identity is always the authenticated Function actor."""
+
+    @model_validator(mode="after")
+    def _reject_spoofable_identity(self) -> "_PersonalHistoryRequest":
+        if (
+            self.user_id is not None
+            or self.username is not None
+            or self.first_name is not None
+        ):
+            raise ValueError("personal history requests cannot include caller identity fields")
+        return self
+
+
+class ListMyHistoryRequest(_PersonalHistoryRequest):
+    action: Literal["list_my_history"]
+    page_size: int = Field(default=25, alias="pageSize", ge=1, le=100)
+    cursor_after: str | None = Field(
+        default=None,
+        alias="cursorAfter",
+        min_length=1,
+        max_length=36,
+        pattern=_APPWRITE_ID.pattern,
+    )
+
+
+class _MyCheckRequest(_PersonalHistoryRequest):
+    check_id: str = Field(alias="checkId")
+
+    @model_validator(mode="after")
+    def _validate_check_id(self) -> "_MyCheckRequest":
+        self.check_id = validate_check_id(self.check_id)
+        return self
+
+
+class GetMyCheckRequest(_MyCheckRequest):
+    action: Literal["get_my_check"]
+
+
+class DeleteMyCheckRequest(_MyCheckRequest):
+    action: Literal["delete_my_check"]
+
+
+class TextAnalyzeRequest(_WorkspaceContextRequest):
     action: Literal["analyze"] = "analyze"
     text: str
     media_type: Literal["text"] | None = Field(default=None, alias="mediaType")
@@ -235,7 +397,7 @@ class TextAnalyzeRequest(_RequestModel):
         return self
 
 
-class FileAnalyzeRequest(_RequestModel):
+class FileAnalyzeRequest(_WorkspaceContextRequest):
     action: Literal["analyze"] = "analyze"
     file_id: str = Field(alias="fileId")
     media_type: Literal["image", "audio", "video"] | None = Field(
@@ -250,7 +412,7 @@ class FileAnalyzeRequest(_RequestModel):
         return self
 
 
-class SourceAnalyzeRequest(_RequestModel):
+class SourceAnalyzeRequest(_WorkspaceContextRequest):
     """A public URL is the sole input for source-based Complex analysis."""
 
     action: Literal["analyze"] = "analyze"
@@ -258,7 +420,7 @@ class SourceAnalyzeRequest(_RequestModel):
     source_url: str = Field(alias="sourceUrl", min_length=8, max_length=2_048)
 
 
-class ComplexAnalyzeRequest(_RequestModel):
+class ComplexAnalyzeRequest(_WorkspaceContextRequest):
     """Unified Complex input: each source is optional, one is required."""
 
     action: Literal["analyze"] = "analyze"
@@ -298,6 +460,19 @@ ValidatedRequest = (
     | AdminResetUserQuotaUsageRequest
     | AdminResetAllUserUsageRequest
     | AdminListAuditEventsRequest
+    | WorkspaceCreateRequest
+    | WorkspaceGetRequest
+    | WorkspaceListMembersRequest
+    | WorkspaceListInvitationsRequest
+    | WorkspaceListHistoryRequest
+    | WorkspaceInviteMemberRequest
+    | WorkspaceCancelInvitationRequest
+    | WorkspaceListMyInvitationsRequest
+    | WorkspaceAcceptInvitationRequest
+    | WorkspaceRejectInvitationRequest
+    | ListMyHistoryRequest
+    | GetMyCheckRequest
+    | DeleteMyCheckRequest
     | TextAnalyzeRequest
     | FileAnalyzeRequest
     | SourceAnalyzeRequest
@@ -390,6 +565,32 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         model = AdminResetAllUserUsageRequest
     elif action == "admin_list_audit_events":
         model = AdminListAuditEventsRequest
+    elif action == "workspace_create":
+        model = WorkspaceCreateRequest
+    elif action == "workspace_get":
+        model = WorkspaceGetRequest
+    elif action == "workspace_list_members":
+        model = WorkspaceListMembersRequest
+    elif action == "workspace_list_invitations":
+        model = WorkspaceListInvitationsRequest
+    elif action == "workspace_list_history":
+        model = WorkspaceListHistoryRequest
+    elif action == "workspace_invite_member":
+        model = WorkspaceInviteMemberRequest
+    elif action == "workspace_cancel_invitation":
+        model = WorkspaceCancelInvitationRequest
+    elif action == "workspace_list_my_invitations":
+        model = WorkspaceListMyInvitationsRequest
+    elif action == "workspace_accept_invitation":
+        model = WorkspaceAcceptInvitationRequest
+    elif action == "workspace_reject_invitation":
+        model = WorkspaceRejectInvitationRequest
+    elif action == "list_my_history":
+        model = ListMyHistoryRequest
+    elif action == "get_my_check":
+        model = GetMyCheckRequest
+    elif action == "delete_my_check":
+        model = DeleteMyCheckRequest
     elif action == "analyze" or "action" not in payload:
         has_text = "text" in payload
         has_file = "fileId" in payload

@@ -56,9 +56,20 @@ class AdmissionPlan:
     dimensions: tuple[AdmissionDimension, ...]
     provider_units: tuple[tuple[str, int], ...] = ()
     create_reservation: bool = True
+    workspace_id: str | None = None
 
     def units_for(self, provider: str) -> int:
         return sum(units for name, units in self.provider_units if name == provider)
+
+
+@dataclass(frozen=True)
+class ComplexAdmissionInput:
+    """One Complex input whose admission rules are known before provider I/O."""
+
+    media_type: str
+    input_size: int
+    text: str = ""
+    hybrid: bool = False
 
 
 def is_unlimited_user(authoritative_user_id: str) -> bool:
@@ -426,6 +437,8 @@ class AppwriteTablesRateLimitStore:
                             "window_start": _window(self.now, "day").key,
                             "state": "consumed",
                         }
+                        if plan.workspace_id is not None:
+                            reservation_data["workspace_id"] = plan.workspace_id
                         staged_reservation = await client.post(
                             reservations, headers=headers,
                             json={"rowId": reservation_id, "data": reservation_data, "permissions": [], "transactionId": transaction_id},
@@ -717,10 +730,10 @@ def _dimension(
 
 def _subscription_dimensions(
     policy: EffectiveQuotaPolicy | None, user_id: str, now: datetime, *, include_checks: bool,
-    include_heavy_media: bool,
+    include_heavy_media: bool, workspace_id: str | None = None,
 ) -> list[AdmissionDimension]:
     """Translate the canonical effective policy into existing atomic counters."""
-    if policy is None or is_unlimited_user(user_id):
+    if policy is None or (workspace_id is None and is_unlimited_user(user_id)):
         return []
     requested = (("checks", include_checks), ("heavy_media_checks", include_heavy_media))
     dimensions: list[AdmissionDimension] = []
@@ -732,30 +745,61 @@ def _subscription_dimensions(
         period = quota.period
         if period not in {"day", "month"}:
             raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
-        # Dimension names are stable across plan changes so usage remains
-        # authoritative if an administrator changes a subscription mid-window.
-        dimension = "subscription_checks" if key == "checks" else "subscription_heavy_media"
-        # Generation zero deliberately retains the historical subject format so
-        # deployment does not discard existing in-window usage. A reset moves
-        # only subsequent admissions to an isolated new counter generation.
-        subject = user_id if generation == 0 else f"{user_id}:g{generation}"
+        if workspace_id is not None:
+            dimension = (
+                "workspace_checks"
+                if key == "checks"
+                else "workspace_heavy_media"
+            )
+            subject = workspace_id
+            error_code = (
+                "workspace_monthly_quota_exceeded"
+                if period == "month"
+                else "workspace_daily_quota_exceeded"
+            )
+            error_detail = (
+                "Месячный лимит workspace исчерпан."
+                if period == "month"
+                else "Дневной лимит workspace исчерпан."
+            )
+        else:
+            # Dimension names are stable across plan changes so usage remains
+            # authoritative if an administrator changes a subscription mid-window.
+            dimension = "subscription_checks" if key == "checks" else "subscription_heavy_media"
+            # Generation zero deliberately retains the historical subject format so
+            # deployment does not discard existing in-window usage. A reset moves
+            # only subsequent admissions to an isolated new counter generation.
+            subject = user_id if generation == 0 else f"{user_id}:g{generation}"
+            error_code = "monthly_quota_exceeded" if period == "month" else "daily_quota_exceeded"
+            error_detail = (
+                "Месячный лимит проверок исчерпан."
+                if period == "month"
+                else "Дневной лимит проверок исчерпан."
+            )
         dimensions.append(_dimension(
             f"{dimension}_{period}", subject, _window(now, period), 1, quota.limit,
-            "monthly_quota_exceeded" if period == "month" else "daily_quota_exceeded",
-            "Месячный лимит проверок исчерпан." if period == "month" else "Дневной лимит проверок исчерпан.",
+            error_code, error_detail,
         ))
     return dimensions
 
 
 def build_subscription_admission_plan(
     store: AppwriteTablesRateLimitStore, *, user_id: str, policy: EffectiveQuotaPolicy | None,
-    include_heavy_media: bool = False,
+    include_heavy_media: bool = False, workspace_id: str | None = None,
 ) -> AdmissionPlan:
     """Reserve only policy counters for a unified Complex request once."""
     return AdmissionPlan(
         user_id,
-        tuple(_subscription_dimensions(policy, user_id, store.now, include_checks=True, include_heavy_media=include_heavy_media)),
+        tuple(_subscription_dimensions(
+            policy,
+            user_id,
+            store.now,
+            include_checks=True,
+            include_heavy_media=include_heavy_media,
+            workspace_id=workspace_id,
+        )),
         (),
+        workspace_id=workspace_id,
     )
 
 
@@ -782,6 +826,32 @@ def _provider_plan(store: AppwriteTablesRateLimitStore, provider: str, units: in
             _dimension("global_sapling_chars_daily", "global", day, units, settings.global_sapling_chars_daily, *unavailable),
             _dimension("global_sapling_chars_monthly", "global", month, units, settings.global_sapling_chars_monthly, *unavailable),
         ]
+    elif provider == "resemble":
+        items = [
+            _dimension(
+                "global_resemble_daily", "global", day, units,
+                store.limit("GLOBAL_RESEMBLE_DAILY", settings.global_resemble_daily),
+                *unavailable,
+            ),
+            _dimension(
+                "global_resemble_monthly", "global", month, units,
+                store.limit("GLOBAL_RESEMBLE_MONTHLY", settings.global_resemble_monthly),
+                *unavailable,
+            ),
+        ]
+    elif provider == "huggingface":
+        items = [
+            _dimension(
+                "global_huggingface_daily", "global", day, units,
+                store.limit("GLOBAL_HUGGINGFACE_DAILY", settings.global_huggingface_daily),
+                *unavailable,
+            ),
+            _dimension(
+                "global_huggingface_monthly", "global", month, units,
+                store.limit("GLOBAL_HUGGINGFACE_MONTHLY", settings.global_huggingface_monthly),
+                *unavailable,
+            ),
+        ]
     else:
         items = []
     return AdmissionPlan("provider-budget", tuple(items), ((provider, units),), create_reservation=False)
@@ -790,7 +860,7 @@ def _provider_plan(store: AppwriteTablesRateLimitStore, provider: str, units: in
 def build_admission_plan(
     store: AppwriteTablesRateLimitStore, *, user_id: str, client_ip: str, account_created_at: Any,
     media_type: str, input_size: int, text: str = "", hybrid: bool = False,
-    effective_policy: EffectiveQuotaPolicy | None = None,
+    effective_policy: EffectiveQuotaPolicy | None = None, workspace_id: str | None = None,
 ) -> AdmissionPlan:
     """Build the whole request admission before any provider can be contacted."""
     now = store.now
@@ -824,6 +894,7 @@ def build_admission_plan(
     dimensions.extend(_subscription_dimensions(
         effective_policy, user_id, now, include_checks=True,
         include_heavy_media=kind in {MediaType.IMAGE, MediaType.AUDIO, MediaType.VIDEO},
+        workspace_id=workspace_id,
     ))
     if not unlimited:
         dimensions.append(_dimension("ip_total_daily", store.ip_subject(client_ip), day, 1, settings.ip_total_daily,
@@ -885,13 +956,64 @@ def build_admission_plan(
 
     for provider, units in provider_units:
         dimensions.extend(_provider_plan(store, provider, units).dimensions)
-    return AdmissionPlan(user_id, tuple(dimensions), tuple(provider_units))
+    return AdmissionPlan(
+        user_id,
+        tuple(dimensions),
+        tuple(provider_units),
+        workspace_id=workspace_id,
+    )
+
+
+def build_complex_admission_plan(
+    store: AppwriteTablesRateLimitStore, *, user_id: str, client_ip: str,
+    account_created_at: Any, inputs: tuple[ComplexAdmissionInput, ...],
+    effective_policy: EffectiveQuotaPolicy | None = None, workspace_id: str | None = None,
+) -> AdmissionPlan:
+    """Merge ordinary admission rules for known Complex inputs into one request.
+
+    Provider operations deliberately remain absent: Complex admits them dynamically
+    as each actual operation is reached, including source-discovered media.
+    """
+    dimensions: dict[tuple[str, str, str], AdmissionDimension] = {}
+    for input_item in inputs:
+        candidate = build_admission_plan(
+            store,
+            user_id=user_id,
+            client_ip=client_ip,
+            account_created_at=account_created_at,
+            media_type=input_item.media_type,
+            input_size=input_item.input_size,
+            text=input_item.text,
+            hybrid=input_item.hybrid,
+            effective_policy=effective_policy,
+            workspace_id=workspace_id,
+        )
+        for dimension in candidate.dimensions:
+            # Provider prepayment is intentionally replaced by Complex's existing
+            # dynamic provider admission context in main.py.
+            if dimension.dimension.startswith("global_"):
+                continue
+            key = (dimension.dimension, dimension.subject, dimension.window.key)
+            existing = dimensions.get(key)
+            if existing is not None and existing != dimension:
+                raise RateLimitError(
+                    "rate_limit_unavailable",
+                    "Сервис временно недоступен. Попробуйте позже.",
+                    503,
+                )
+            dimensions[key] = dimension
+    return AdmissionPlan(
+        user_id,
+        tuple(dimensions.values()),
+        (),
+        workspace_id=workspace_id,
+    )
 
 
 def build_source_media_admission_plan(
     store: AppwriteTablesRateLimitStore, *, user_id: str, client_ip: str,
     account_created_at: Any, has_image: bool, has_video: bool,
-    effective_policy: EffectiveQuotaPolicy | None = None,
+    effective_policy: EffectiveQuotaPolicy | None = None, workspace_id: str | None = None,
 ) -> AdmissionPlan:
     """Reserve only source dimensions learned after safe extraction.
 
@@ -900,16 +1022,16 @@ def build_source_media_admission_plan(
     """
     now = store.now
     created_at = _parse_created_at(account_created_at)
-    if is_unlimited_user(user_id):
-        return AdmissionPlan(user_id, (), (), create_reservation=False)
-    is_new_user = now < created_at + timedelta(days=settings.new_user_period_days)
+    unlimited = is_unlimited_user(user_id)
+    is_new_user = not unlimited and now < created_at + timedelta(days=settings.new_user_period_days)
     day = _window(now, "day")
     dimensions: list[AdmissionDimension] = []
     dimensions.extend(_subscription_dimensions(
         effective_policy, user_id, now, include_checks=False,
         include_heavy_media=has_image or has_video,
+        workspace_id=workspace_id,
     ))
-    if has_image or has_video:
+    if not unlimited and (has_image or has_video):
         dimensions.append(_dimension("ip_heavy_media_daily", store.ip_subject(client_ip), day, 1,
             settings.ip_heavy_media_daily, "daily_quota_exceeded", "Достигнут дневной лимит проверок."))
     if is_new_user and has_image:
@@ -919,7 +1041,13 @@ def build_source_media_admission_plan(
         first7 = Window(created_at.strftime("%Y-%m-%dT%H"), created_at + timedelta(days=settings.new_user_period_days))
         dimensions.append(_dimension("new_user_video_first7d", user_id, first7, 1, settings.new_user_video_first_7d,
             "new_user_type_quota_exceeded", "Достигнут лимит проверок этого типа."))
-    return AdmissionPlan(user_id, tuple(dimensions), (), create_reservation=False)
+    return AdmissionPlan(
+        user_id,
+        tuple(dimensions),
+        (),
+        create_reservation=False,
+        workspace_id=workspace_id,
+    )
 
 
 async def enforce_admission(store: AppwriteTablesRateLimitStore, user_id: str, client_ip: str) -> None:

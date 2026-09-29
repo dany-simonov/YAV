@@ -88,6 +88,7 @@ async def test_admin_list_is_paginated_and_returns_lightweight_summaries(monkeyp
         if key == "queries[]"
     ]
     assert "limit(2)" in queries
+    assert 'orderDesc("$sequence")' in queries
     assert 'cursorAfter("cursor-1")' in queries
 
 
@@ -141,6 +142,12 @@ async def test_admin_detail_separates_user_usage_from_ip_and_provider_scopes(
     assert result["usage"]["active_reservations"]["count"] == 1
     assert result["usage"]["ip_limits"]["attributable_to_target_user"] is False
     assert result["usage"]["provider_budgets"]["attributable_to_target_user"] is False
+    assert result["usage"]["provider_budgets"]["quotas"]["resemble_daily"][
+        "dimension"
+    ] == "global_resemble_daily"
+    assert result["usage"]["provider_budgets"]["quotas"]["huggingface_daily"][
+        "dimension"
+    ] == "global_huggingface_daily"
 
 
 @pytest.mark.asyncio
@@ -457,6 +464,7 @@ async def test_audit_list_is_paginated_and_target_filtered(monkeypatch):
         if key == "queries[]"
     ]
     assert 'equal("target_user_id",["target-1"])' in queries
+    assert 'orderDesc("$sequence")' in queries
 
 
 @pytest.mark.asyncio

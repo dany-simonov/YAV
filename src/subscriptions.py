@@ -216,6 +216,38 @@ def effective_policy_from_profile(profile: Mapping[str, Any]) -> EffectiveQuotaP
     )
 
 
+def effective_policy_from_workspace(
+    workspace: Mapping[str, Any],
+) -> EffectiveQuotaPolicy:
+    """Resolve server-managed shared policy from an already trusted workspace row."""
+    if not isinstance(workspace, Mapping):
+        raise SubscriptionPersistenceError("workspace has invalid quota policy")
+    subscription = workspace.get("quota_plan")
+    if subscription in (None, ""):
+        subscription = "free"
+    raw_overrides = workspace.get("quota_overrides")
+    if raw_overrides in (None, ""):
+        overrides: dict[str, int] = {}
+    elif isinstance(raw_overrides, str) and len(raw_overrides.encode("utf-8")) <= 1024:
+        try:
+            overrides = normalize_quota_overrides(json.loads(raw_overrides))
+        except (
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            SubscriptionValidationError,
+        ) as exc:
+            raise SubscriptionPersistenceError(
+                "workspace has invalid quota overrides"
+            ) from exc
+    else:
+        raise SubscriptionPersistenceError("workspace has invalid quota overrides")
+    try:
+        return effective_quota_policy(subscription, overrides)
+    except SubscriptionValidationError as exc:
+        raise SubscriptionPersistenceError("workspace has invalid quota plan") from exc
+
+
 def configured_system_admin_ids() -> frozenset[str]:
     """Return only valid server-configured Appwrite account IDs."""
     configured = os.getenv("SYSTEM_ADMIN_USER_IDS", settings.system_admin_user_ids)

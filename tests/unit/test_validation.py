@@ -1,6 +1,11 @@
 import pytest
 
-from src.validation import SecurityValidationError, parse_json_object, safe_external_url, validate_request_payload
+from src.validation import (
+    SecurityValidationError,
+    parse_json_object,
+    safe_external_url,
+    validate_request_payload,
+)
 
 
 @pytest.mark.parametrize("payload", [None, [], {"text": None}, {"text": []}, {"text": {}}, {"text": True}])
@@ -88,3 +93,83 @@ def test_unified_complex_contract_rejects_empty_or_duplicate_files():
         validate_request_payload({"mode": "complex"})
     with pytest.raises(SecurityValidationError):
         validate_request_payload({"mode": "complex", "fileIds": ["same", "same"]})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "Текст для персонального анализа."},
+        {"fileId": "file-id", "mediaType": "image"},
+        {"mode": "complex_source", "sourceUrl": "https://example.com/post"},
+        {"mode": "complex", "text": "Текст для комплексного анализа. " * 8},
+    ],
+)
+def test_analysis_requests_without_workspace_remain_personal(payload):
+    assert validate_request_payload(payload).workspace_id is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "Текст для workspace анализа.", "workspaceId": "workspace-1"},
+        {"fileId": "file-id", "mediaType": "image", "workspaceId": "workspace-1"},
+        {
+            "mode": "complex_source",
+            "sourceUrl": "https://example.com/post",
+            "workspaceId": "workspace-1",
+        },
+        {
+            "mode": "complex",
+            "text": "Текст для workspace комплексного анализа. " * 8,
+            "workspaceId": "workspace-1",
+        },
+    ],
+)
+def test_analysis_requests_parse_explicit_workspace_id(payload):
+    request = validate_request_payload(payload)
+
+    assert request.workspace_id == "workspace-1"
+    assert request.model_dump(by_alias=True)["workspaceId"] == "workspace-1"
+
+
+def test_analysis_workspace_id_uses_existing_controlled_validation_contract():
+    with pytest.raises(SecurityValidationError) as raised:
+        validate_request_payload(
+            {"text": "Текст для проверки workspace контракта.", "workspaceId": "bad/id"}
+        )
+
+    assert raised.value.code == "invalid_request"
+
+
+def test_personal_history_actions_use_actor_only_and_cursor_contract():
+    request = validate_request_payload(
+        {
+            "action": "list_my_history",
+            "pageSize": 2,
+            "cursorAfter": "check-1",
+        }
+    )
+
+    assert request.page_size == 2
+    assert request.cursor_after == "check-1"
+    with pytest.raises(SecurityValidationError) as raised:
+        validate_request_payload(
+            {"action": "list_my_history", "userId": "another-user"}
+        )
+    assert raised.value.code == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "list_my_history", "pageSize": 0},
+        {"action": "list_my_history", "cursorAfter": "bad/id"},
+        {"action": "get_my_check", "checkId": "bad/id"},
+        {"action": "delete_my_check", "checkId": ""},
+    ],
+)
+def test_personal_history_actions_reject_invalid_pagination_and_check_ids(payload):
+    with pytest.raises(SecurityValidationError) as raised:
+        validate_request_payload(payload)
+
+    assert raised.value.code in {"invalid_request", "invalid_check_id"}

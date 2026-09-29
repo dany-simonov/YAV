@@ -1,15 +1,17 @@
 """Unit tests for the Appwrite Function security boundary."""
 
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-import time
 
+import httpx
 import pytest
 
 from api.schemas import AnalysisResult, CredibilityAssessment
 from core.enums import MediaType, ModelUsed, Verdict
 from core.exceptions import ExternalAPIError, ProviderInfrastructureError
-from src.appwrite_store import ChecksPersistenceError
+from src.appwrite_store import CheckHistoryError, ChecksPersistenceError
 from src.execution_deadline import ExecutionDeadline
 from src.main import (
     EmailNotVerifiedError,
@@ -20,8 +22,12 @@ from src.main import (
     _metadata_media_type,
     main,
 )
-from src.validation import SecurityValidationError, validate_request_payload
+from src.provider_protection import admit_provider_operation
+from src.rate_limit import RateLimitError
 from src.source_ingestion import SourceDocument
+from src.subscriptions import effective_quota_policy
+from src.validation import SecurityValidationError, validate_request_payload
+from src.workspaces import WorkspaceAccess, WorkspaceError
 
 
 def _context(payload, headers=None):
@@ -187,6 +193,231 @@ def test_main_handles_url_only_unified_complex_through_source_ingest_and_persist
     assert any(log.startswith("complex_stage=source_ingested text_present=yes") for log in logs)
 
 
+@pytest.mark.asyncio
+async def test_personal_history_dispatches_authenticated_actor_only():
+    store = type(
+        "Store",
+        (),
+        {
+            "list_my_history": AsyncMock(
+                return_value={"checks": [], "next_cursor": None, "page_size": 2}
+            )
+        },
+    )()
+    with (
+        patch(
+            "src.main.get_authenticated_account",
+            new=AsyncMock(return_value={"$id": "user-a", "emailVerification": True}),
+        ),
+        patch("src.main.ensure_user_profile", new=AsyncMock(return_value={})),
+        patch("src.main.AppwriteCheckHistoryStore", return_value=store),
+    ):
+        result = await _execute_request(
+            {"action": "list_my_history", "pageSize": 2, "cursorAfter": "check-1"},
+            "runtime-key",
+            "user-a",
+            "runtime-jwt",
+        )
+
+    assert result == {"checks": [], "next_cursor": None, "page_size": 2}
+    store.list_my_history.assert_awaited_once_with(
+        "user-a", page_size=2, cursor_after="check-1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_personal_history_store_failure_keeps_controlled_error_contract():
+    store = type(
+        "Store",
+        (),
+        {
+            "get_my_check": AsyncMock(
+                side_effect=CheckHistoryError("check_not_found", "Проверка не найдена.", 404)
+            )
+        },
+    )()
+    with (
+        patch(
+            "src.main.get_authenticated_account",
+            new=AsyncMock(return_value={"$id": "user-a", "emailVerification": True}),
+        ),
+        patch("src.main.ensure_user_profile", new=AsyncMock(return_value={})),
+        patch("src.main.AppwriteCheckHistoryStore", return_value=store),
+        pytest.raises(SecurityValidationError) as raised,
+    ):
+        await _execute_request(
+            {"action": "get_my_check", "checkId": "missing-check"},
+            "runtime-key",
+            "user-a",
+            "runtime-jwt",
+        )
+
+    assert (raised.value.code, raised.value.status_code) == ("check_not_found", 404)
+
+
+@pytest.mark.asyncio
+async def test_complex_full_admission_is_committed_before_text_analysis():
+    request = validate_request_payload({"mode": "complex", "text": "complex text " * 20})
+    quota_store = MagicMock()
+    quota_store.now = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
+    quota_store.ip_subject.return_value = "ip-subject"
+    quota_store.admit = AsyncMock()
+    analysis_result = AnalysisResult(
+        verdict=Verdict.REAL,
+        confidence=0.9,
+        model_used=ModelUsed.GEMINI_TEXT,
+        explanation="Текст проанализирован.",
+        media_type=MediaType.TEXT,
+        authenticity_index=95,
+        analysis_mode="complex",
+    )
+
+    async def text_analysis(*_args, **_kwargs):
+        quota_store.admit.assert_awaited_once()
+        plan = quota_store.admit.await_args.args[0]
+        names = [item.dimension for item in plan.dimensions]
+        assert names.count("subscription_checks_day") == 1
+        assert {"ip_total_daily", "new_user_total_daily", "new_user_total_first7d", "new_user_hybrid_daily"} <= set(names)
+        assert plan.provider_units == ()
+        assert not any(name.startswith("global_") for name in names)
+        return analysis_result
+
+    with patch("src.main._analyze_complex_text", new=text_analysis):
+        result = await _analyze(
+            request,
+            "runtime-jwt",
+            quota_store=quota_store,
+            user_id="runtime-user",
+            account_created_at="2026-08-09T11:00:00+00:00",
+            client_ip="192.0.2.1",
+            effective_policy=effective_quota_policy("free"),
+        )
+
+    assert result["analysis_mode"] == "complex"
+
+
+@pytest.mark.asyncio
+async def test_complex_request_dynamically_admits_provider_operations_and_cleans_context():
+    quota_store = MagicMock()
+    quota_store.admit_provider_units = AsyncMock()
+
+    async def complex_operation(*_args, **_kwargs):
+        await admit_provider_operation("gemini")
+        await admit_provider_operation("gemini")
+        await admit_provider_operation("aiornot", 7)
+        await admit_provider_operation("resemble")
+        await admit_provider_operation("huggingface")
+        return {"model_used": "gemini_text_verification"}
+
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(
+            return_value={
+                "$id": "runtime-user",
+                "emailVerification": True,
+                "$createdAt": "2026-08-09T12:00:00+00:00",
+            }
+        ),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(return_value={"$id": "runtime-user", "plan": "free"}),
+    ), patch("src.main.AppwriteTablesRateLimitStore", return_value=quota_store), patch(
+        "src.main._analyze", new=complex_operation
+    ), patch("src.main.persist_check_result", new=AsyncMock(return_value="check-1")):
+        result = await _execute_request(
+            {"mode": "complex", "text": "x" * 200},
+            "runtime-key",
+            "runtime-user",
+            "runtime-jwt",
+        )
+
+    assert result["check_id"] == "check-1"
+    assert [call.args for call in quota_store.admit_provider_units.await_args_list] == [
+        ("gemini", 1),
+        ("gemini", 1),
+        ("aiornot", 7),
+        ("resemble", 1),
+        ("huggingface", 1),
+    ]
+    await admit_provider_operation("gemini")
+    assert quota_store.admit_provider_units.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_complex_provider_limit_is_typed_and_context_is_cleaned_after_exception():
+    quota_store = MagicMock()
+    quota_store.admit_provider_units = AsyncMock(
+        side_effect=RateLimitError(
+            "provider_temporarily_unavailable", "safe", 503
+        )
+    )
+
+    async def complex_operation(*_args, **_kwargs):
+        await admit_provider_operation("gemini")
+        raise AssertionError("provider operation must not run after quota denial")
+
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(
+            return_value={
+                "$id": "runtime-user",
+                "emailVerification": True,
+                "$createdAt": "2026-08-09T12:00:00+00:00",
+            }
+        ),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(return_value={"$id": "runtime-user", "plan": "free"}),
+    ), patch("src.main.AppwriteTablesRateLimitStore", return_value=quota_store), patch(
+        "src.main._analyze", new=complex_operation
+    ), pytest.raises(ProviderInfrastructureError) as raised:
+        await _execute_request(
+            {"mode": "complex", "text": "x" * 200},
+            "runtime-key",
+            "runtime-user",
+            "runtime-jwt",
+        )
+
+    assert (raised.value.service, raised.value.kind) == ("gemini", "capacity")
+    quota_store.admit_provider_units.assert_awaited_once_with("gemini", 1)
+    await admit_provider_operation("gemini")
+    quota_store.admit_provider_units.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_complex_context_is_cleaned_when_analysis_raises_before_provider_call():
+    quota_store = MagicMock()
+    quota_store.admit_provider_units = AsyncMock()
+
+    async def complex_operation(*_args, **_kwargs):
+        raise RuntimeError("analysis failed")
+
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(
+            return_value={
+                "$id": "runtime-user",
+                "emailVerification": True,
+                "$createdAt": "2026-08-09T12:00:00+00:00",
+            }
+        ),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(return_value={"$id": "runtime-user", "plan": "free"}),
+    ), patch("src.main.AppwriteTablesRateLimitStore", return_value=quota_store), patch(
+        "src.main._analyze", new=complex_operation
+    ), pytest.raises(RuntimeError, match="analysis failed"):
+        await _execute_request(
+            {"mode": "complex", "text": "x" * 200},
+            "runtime-key",
+            "runtime-user",
+            "runtime-jwt",
+        )
+
+    await admit_provider_operation("gemini")
+    quota_store.admit_provider_units.assert_not_awaited()
+
+
 def test_main_returns_distinct_safe_error_for_url_only_source_without_content():
     class EmptyIngestor:
         async def ingest(self, url: str, *, diagnostic_log=None) -> SourceDocument:
@@ -279,13 +510,56 @@ def test_main_internal_error_logs_safe_checks_operation_metadata():
         "src.main._run_coro_sync", side_effect=error
     ):
         payload, status = main(context)
-    assert (payload, status) == ({"detail": "Внутренняя ошибка сервиса.", "code": "internal_error"}, 500)
+    assert (payload, status) == (
+        {
+            "detail": "Сохранение результата временно недоступно. Попробуйте позже.",
+            "code": "checks_persistence_unavailable",
+        },
+        503,
+    )
     logged = context.log.call_args.args[0]
     assert "operation=checks.create" in logged
     assert "status_code=400" in logged
     assert "appwrite_type=row_invalid_structure" in logged
     for sensitive_value in ("runtime-user", "runtime-key", "runtime-jwt", "private input", "private details"):
         assert sensitive_value not in logged
+
+
+@pytest.mark.parametrize("workspace_id", [None, "workspace-1"])
+def test_main_maps_personal_and_workspace_check_persistence_errors_to_safe_503(
+    workspace_id,
+):
+    payload = {"text": "x" * 50}
+    if workspace_id is not None:
+        payload["workspaceId"] = workspace_id
+    context = _context(
+        payload,
+        {
+            "X-Appwrite-Key": "runtime-key",
+            "X-Appwrite-User-Id": "runtime-user",
+            "X-Appwrite-User-Jwt": "runtime-jwt",
+        },
+    )
+    error = ChecksPersistenceError(
+        "profile.last_check_at.update",
+        exc=httpx.ReadTimeout("private endpoint should not be public"),
+        data={"details": "private details"},
+        user_id="runtime-user",
+        api_key="runtime-key",
+    )
+    with patch("src.main._execute_request", new=MagicMock(return_value=object())), patch(
+        "src.main._run_coro_sync", side_effect=error
+    ):
+        response, status = main(context)
+
+    assert (response, status) == (
+        {
+            "detail": "Сохранение результата временно недоступно. Попробуйте позже.",
+            "code": "checks_persistence_unavailable",
+        },
+        503,
+    )
+    assert "private endpoint" not in context.log.call_args.args[0]
 
 
 def test_main_maps_external_api_error_to_existing_safe_provider_response_and_log():
@@ -636,6 +910,116 @@ async def test_execute_request_uses_runtime_identity_not_legacy_user_id():
     assert response["check_id"] == "check-1"
     assert persist_mock.await_args.args[1] == "runtime-user"
     assert persist_mock.await_args.args[3] == "dynamic-key"
+
+
+@pytest.mark.asyncio
+async def test_execute_request_keeps_personal_quota_path_without_workspace_id():
+    result = {
+        "verdict": "REAL",
+        "confidence": 0.8,
+        "model_used": "sapling",
+        "media_type": "text",
+    }
+    rate_store = MagicMock()
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(return_value={"$id": "runtime-user"}),
+    ), patch("src.main.AppwriteWorkspaceStore") as workspace_store, patch(
+        "src.main.AppwriteTablesRateLimitStore", return_value=rate_store
+    ), patch("src.main._analyze", new=AsyncMock(return_value=result)) as analyze, patch(
+        "src.main.persist_check_result", new=AsyncMock(return_value="check-1")
+    ):
+        await _execute_request(
+            {"text": "Текст для персонального анализа."},
+            "dynamic-key",
+            "runtime-user",
+            "runtime-jwt",
+        )
+
+    workspace_store.assert_not_called()
+    assert analyze.await_args.args[3] is rate_store
+    assert analyze.await_args.kwargs["workspace_access"] is None
+
+
+@pytest.mark.asyncio
+async def test_execute_request_resolves_and_passes_explicit_workspace_context():
+    result = {
+        "verdict": "REAL",
+        "confidence": 0.8,
+        "model_used": "sapling",
+        "media_type": "text",
+    }
+    access = WorkspaceAccess(
+        workspace_id="workspace-1",
+        actor_user_id="runtime-user",
+        role="member",
+        workspace={"$id": "workspace-1", "quota_plan": "pro"},
+    )
+    workspace_store = MagicMock()
+    workspace_store.resolve_workspace_access = AsyncMock(return_value=access)
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(
+            return_value={"$id": "runtime-user", "subscription": "enterprise"}
+        ),
+    ), patch("src.main.AppwriteWorkspaceStore", return_value=workspace_store), patch(
+        "src.main.AppwriteTablesRateLimitStore"
+    ), patch("src.main._analyze", new=AsyncMock(return_value=result)) as analyze, patch(
+        "src.main.persist_check_result", new=AsyncMock(return_value="check-1")
+    ) as persist:
+        await _execute_request(
+            {"text": "Текст для workspace анализа.", "workspaceId": "workspace-1"},
+            "dynamic-key",
+            "runtime-user",
+            "runtime-jwt",
+        )
+
+    workspace_store.resolve_workspace_access.assert_awaited_once_with(
+        "runtime-user", "workspace-1"
+    )
+    assert analyze.await_args.kwargs["workspace_access"] is access
+    assert analyze.await_args.kwargs["effective_policy"].subscription == "pro"
+    assert persist.await_args.kwargs["workspace_id"] == "workspace-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        WorkspaceError("workspace_access_denied", "Нет доступа к workspace.", 403),
+        WorkspaceError("workspace_not_found", "Workspace не найден.", 404),
+    ],
+)
+async def test_execute_request_maps_workspace_access_errors_before_quota(error):
+    workspace_store = MagicMock()
+    workspace_store.resolve_workspace_access = AsyncMock(side_effect=error)
+    with patch(
+        "src.main.get_authenticated_account",
+        new=AsyncMock(return_value={"$id": "runtime-user", "emailVerification": True}),
+    ), patch(
+        "src.main.ensure_user_profile",
+        new=AsyncMock(return_value={"$id": "runtime-user"}),
+    ), patch("src.main.AppwriteWorkspaceStore", return_value=workspace_store), patch(
+        "src.main.AppwriteTablesRateLimitStore"
+    ) as rate_store, patch("src.main._analyze", new=AsyncMock()) as analyze:
+        with pytest.raises(SecurityValidationError) as raised:
+            await _execute_request(
+                {"text": "Текст для workspace анализа.", "workspaceId": "workspace-1"},
+                "dynamic-key",
+                "runtime-user",
+                "runtime-jwt",
+            )
+
+    assert raised.value.code == error.code
+    assert raised.value.status_code == error.status_code
+    rate_store.assert_not_called()
+    analyze.assert_not_awaited()
 
 
 def _exploding_diagnostic_callback(_message: str) -> None:

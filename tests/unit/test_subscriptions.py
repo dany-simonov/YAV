@@ -10,9 +10,11 @@ from src.subscriptions import (
     AppwriteSubscriptionStore,
     EffectiveQuotaPolicy,
     QuotaLimit,
+    SubscriptionPersistenceError,
     SubscriptionValidationError,
     configured_system_admin_ids,
     effective_policy_from_profile,
+    effective_policy_from_workspace,
     effective_quota_policy,
     is_system_admin,
     normalize_quota_overrides,
@@ -93,6 +95,41 @@ def test_invalid_quota_override_is_rejected(overrides):
 
 def test_legacy_premium_profile_maps_to_canonical_pro_policy():
     assert effective_policy_from_profile({"plan": "premium"}).subscription == "pro"
+
+
+def test_legacy_workspace_without_quota_fields_uses_free_policy():
+    policy = effective_policy_from_workspace({"$id": "workspace-1"})
+
+    assert policy.subscription == "free"
+    assert policy.overrides == {}
+
+
+def test_workspace_policy_is_independent_from_owner_profile_fields():
+    policy = effective_policy_from_workspace(
+        {
+            "$id": "workspace-1",
+            "owner_user_id": "owner-1",
+            "quota_plan": "pro",
+            "quota_overrides": '{"checks":17}',
+            "subscription": "free",
+        }
+    )
+
+    assert policy.subscription == "pro"
+    assert policy.quota("checks").limit == 17
+
+
+@pytest.mark.parametrize(
+    "workspace",
+    [
+        {"quota_plan": "invalid"},
+        {"quota_overrides": '{"unknown":17}'},
+        {"quota_overrides": "not-json"},
+    ],
+)
+def test_invalid_workspace_policy_fails_controlled(workspace):
+    with pytest.raises(SubscriptionPersistenceError):
+        effective_policy_from_workspace(workspace)
 
 
 @pytest.mark.parametrize(

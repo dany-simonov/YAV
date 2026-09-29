@@ -1,37 +1,52 @@
-import { AppwriteException, Query, type Models } from 'appwrite';
+import { AppwriteException } from 'appwrite';
 
-import { APPWRITE_CONFIG, tablesDB } from './appwrite';
+import { APPWRITE_CONFIG, functions } from './appwrite';
 import type { AIOriginDetails, Check, CredibilityAssessment, MediaType, SourceAnalysisDetails, SourceMediaResult, Verdict } from '../types';
 import { displayModelName } from './resultPresentation';
 
 const MAX_ITEMS = 200;
 const PAGE_SIZE = 100;
-const HISTORY_FIELDS = [
-  '$id',
-  '$createdAt',
-  'user_id',
-  'media_type',
-  'verdict',
-  'authenticity_index',
-  'provider',
-  'model',
-  'explanation',
-  'source_label',
-  'processing_ms',
-  'details',
-];
+const MAX_CLEAR_BATCHES = 1_000;
 
-interface CheckRow extends Models.Row {
+export interface HistoryCheckSummary {
+  check_id: string;
   user_id: string;
   media_type: string;
+  status: string;
   verdict: string;
-  authenticity_index: number;
-  provider?: string | null;
-  model?: string | null;
-  explanation?: string | null;
-  source_label?: string | null;
-  processing_ms?: number | null;
-  details?: string | null;
+  provider: string;
+  model: string;
+  ai_probability: number | null;
+  decision_confidence: number | null;
+  authenticity_index: number | null;
+  processing_ms: number | null;
+  source_label: string;
+  created_at: string;
+  explanation: string;
+}
+
+export interface HistoryCheckDetail extends HistoryCheckSummary {
+  details: string | null;
+}
+
+interface HistoryPageResponse {
+  checks: HistoryCheckSummary[];
+  next_cursor: string | null;
+  page_size: number;
+}
+
+interface FunctionErrorPayload {
+  code?: string;
+  detail?: string;
+}
+
+class HistoryFunctionError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(code || 'history_function_failed');
+  }
 }
 
 export interface HistoryStats {
@@ -47,16 +62,16 @@ const asMediaType = (value: string): MediaType =>
 const asVerdict = (value: string): Verdict =>
   ['REAL', 'FAKE', 'UNCERTAIN'].includes(value) ? (value as Verdict) : 'UNCERTAIN';
 
-const clampIndex = (value: number): number => {
-  if (!Number.isFinite(value)) return 0;
+const clampIndex = (value: number | null): number => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, Math.round(value)));
 };
 
-export function mapHistoryRow(row: CheckRow): Check {
-  const details = parseDetails(row.details);
+export function mapHistoryRow(row: HistoryCheckSummary | HistoryCheckDetail): Check {
+  const details = 'details' in row ? parseDetails(row.details) : {};
   const isComplex = details.analysis_mode === 'complex';
   return {
-    id: row.$id,
+    id: row.check_id,
     media_type: asMediaType(row.media_type),
     verdict: asVerdict(row.verdict),
     // Complex confidence is not a score and must never be reconstructed from
@@ -67,7 +82,7 @@ export function mapHistoryRow(row: CheckRow): Check {
     model_used: displayModelName(row.model || row.provider || 'Unknown model'),
     explanation: row.explanation || row.source_label || 'Проверка',
     processing_ms: Number(row.processing_ms || 0),
-    created_at: row.$createdAt,
+    created_at: row.created_at,
     short_report: details.short_report,
     credibility: details.credibility,
     ai_status: details.ai_status,
@@ -145,21 +160,129 @@ function isCredibilityAssessment(value: unknown): value is CredibilityAssessment
     ));
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asNullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function parseHistorySummary(value: unknown): HistoryCheckSummary | null {
+  const row = asRecord(value);
+  if (!row) return null;
+  const stringFields = [
+    'check_id', 'user_id', 'media_type', 'status', 'verdict', 'provider', 'model',
+    'source_label', 'created_at', 'explanation',
+  ] as const;
+  if (stringFields.some((field) => typeof row[field] !== 'string')) return null;
+  return {
+    check_id: row.check_id as string,
+    user_id: row.user_id as string,
+    media_type: row.media_type as string,
+    status: row.status as string,
+    verdict: row.verdict as string,
+    provider: row.provider as string,
+    model: row.model as string,
+    ai_probability: asNullableNumber(row.ai_probability),
+    decision_confidence: asNullableNumber(row.decision_confidence),
+    authenticity_index: asNullableNumber(row.authenticity_index),
+    processing_ms: asNullableNumber(row.processing_ms),
+    source_label: row.source_label as string,
+    created_at: row.created_at as string,
+    explanation: row.explanation as string,
+  };
+}
+
+function parseHistoryDetail(value: unknown): HistoryCheckDetail | null {
+  const row = asRecord(value);
+  const summary = parseHistorySummary(value);
+  if (!row || !summary || (row.details !== null && typeof row.details !== 'string')) {
+    return null;
+  }
+  return { ...summary, details: row.details as string | null };
+}
+
+function responseError(value: unknown): FunctionErrorPayload {
+  const body = asRecord(value);
+  return {
+    code: typeof body?.code === 'string' ? body.code : undefined,
+    detail: typeof body?.detail === 'string' ? body.detail : undefined,
+  };
+}
+
+async function invokeHistoryFunction(payload: Record<string, unknown>): Promise<unknown> {
+  let execution;
+  try {
+    execution = await functions.createExecution({
+      functionId: APPWRITE_CONFIG.functions.analyze,
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    logHistoryDiagnostic(error);
+    throw error;
+  }
+
+  let body: unknown;
+  try {
+    body = execution.responseBody ? JSON.parse(execution.responseBody) : null;
+  } catch {
+    throw new HistoryFunctionError(execution.responseStatusCode || 502);
+  }
+  const error = responseError(body);
+  if (execution.responseStatusCode >= 400 || error.code || error.detail) {
+    throw new HistoryFunctionError(execution.responseStatusCode, error.code);
+  }
+  return body;
+}
+
+function parseHistoryPage(value: unknown): HistoryPageResponse | null {
+  const response = asRecord(value);
+  if (!response || !Array.isArray(response.checks)
+    || (response.next_cursor !== null && typeof response.next_cursor !== 'string')
+    || !Number.isInteger(response.page_size)) {
+    return null;
+  }
+  const checks = response.checks.map(parseHistorySummary);
+  return checks.every((check): check is HistoryCheckSummary => check !== null)
+    ? { checks, next_cursor: response.next_cursor as string | null, page_size: response.page_size as number }
+    : null;
+}
+
+async function loadHistoryPage(cursorAfter?: string): Promise<HistoryPageResponse> {
+  const response = parseHistoryPage(await invokeHistoryFunction({
+    action: 'list_my_history',
+    pageSize: PAGE_SIZE,
+    ...(cursorAfter ? { cursorAfter } : {}),
+  }));
+  if (!response) throw new HistoryFunctionError(502);
+  return response;
+}
+
 function historyError(error: unknown): Error {
-  logHistoryDiagnostic(error);
-  if (error instanceof AppwriteException) {
-    if (error.code === 401 || error.code === 403) {
+  if (error instanceof HistoryFunctionError) {
+    if (error.code === 'check_not_found') return new Error('Проверка не найдена');
+    if (error.code === 'history_unavailable') return new Error('История проверок временно недоступна');
+    if (error.code === 'email_not_verified') return new Error('Подтвердите email для доступа к истории проверок');
+    if (error.code === 'authentication_required' || error.status === 401 || error.status === 403) {
       return new Error('Нет доступа к истории проверок');
     }
-    if (error.code === 404) {
-      return new Error('Таблица истории проверок не найдена');
-    }
+  }
+  if (error instanceof AppwriteException && (error.code === 401 || error.code === 403)) {
+    return new Error('Нет доступа к истории проверок');
   }
   return new Error('Не удалось загрузить историю проверок');
 }
 
 function logHistoryDiagnostic(error: unknown): void {
-  if (!import.meta.env.DEV || !(error instanceof AppwriteException)) return;
+  if (!import.meta.env.DEV) return;
+  if (error instanceof HistoryFunctionError) {
+    console.warn('check_history_function_error', { status: error.status, code: error.code || '' });
+    return;
+  }
+  if (!(error instanceof AppwriteException)) return;
   const safe = (value: unknown, limit: number): string => {
     if (typeof value !== 'string') return '';
     return value
@@ -177,96 +300,80 @@ function logHistoryDiagnostic(error: unknown): void {
   });
 }
 
-export async function loadChecksHistory(userId: string): Promise<Check[]> {
-  if (!userId) return [];
-
+export async function loadChecksHistory(): Promise<Check[]> {
   try {
-    const rows: CheckRow[] = [];
-    let offset = 0;
+    const rows: HistoryCheckSummary[] = [];
+    const seenCursors = new Set<string>();
+    let cursorAfter: string | undefined;
 
     while (rows.length < MAX_ITEMS) {
-      const limit = Math.min(PAGE_SIZE, MAX_ITEMS - rows.length);
-      const response = await tablesDB.listRows<CheckRow>({
-        databaseId: APPWRITE_CONFIG.databaseId,
-        tableId: APPWRITE_CONFIG.tables.checks,
-        queries: [
-          Query.equal('user_id', [userId]),
-          Query.orderDesc('$createdAt'),
-          Query.limit(limit),
-          Query.offset(offset),
-          Query.select(HISTORY_FIELDS),
-        ],
-        total: false,
-        ttl: 0,
-      });
-      rows.push(...response.rows.filter((row) => row.user_id === userId));
-      offset += response.rows.length;
-      if (response.rows.length < limit) break;
+      const response = await loadHistoryPage(cursorAfter);
+      rows.push(...response.checks.slice(0, MAX_ITEMS - rows.length));
+      if (!response.next_cursor || response.checks.length === 0 || rows.length >= MAX_ITEMS) break;
+      if (seenCursors.has(response.next_cursor)) throw new HistoryFunctionError(502);
+      seenCursors.add(response.next_cursor);
+      cursorAfter = response.next_cursor;
     }
-
-    return rows.slice(0, MAX_ITEMS).map(mapHistoryRow);
+    return rows.map(mapHistoryRow);
   } catch (error) {
     throw historyError(error);
   }
 }
 
-export async function loadCheckFromHistory(userId: string, checkId: string): Promise<Check> {
-  if (!userId || !checkId) throw new Error('Проверка не найдена');
-
+export async function loadCheckFromHistory(checkId: string): Promise<Check> {
+  if (!checkId) throw new Error('Проверка не найдена');
   try {
-    const row = await tablesDB.getRow<CheckRow>({
-      databaseId: APPWRITE_CONFIG.databaseId,
-      tableId: APPWRITE_CONFIG.tables.checks,
-      rowId: checkId,
-    });
-    if (row.user_id !== userId) throw new Error('Нет доступа к этой проверке');
-
-    return {
-      ...mapHistoryRow(row),
-      explanation: row.explanation || row.source_label || 'Пояснение отсутствует',
-    };
+    const detail = parseHistoryDetail(await invokeHistoryFunction({
+      action: 'get_my_check',
+      checkId,
+    }));
+    if (!detail) throw new HistoryFunctionError(502);
+    return mapHistoryRow(detail);
   } catch (error) {
-    if (error instanceof Error && error.message === 'Нет доступа к этой проверке') throw error;
     throw historyError(error);
   }
 }
 
-export async function deleteCheckFromHistory(userId: string, checkId: string): Promise<void> {
-  if (!userId || !checkId) return;
+async function deleteHistoryCheck(checkId: string): Promise<void> {
+  const response = asRecord(await invokeHistoryFunction({
+    action: 'delete_my_check',
+    checkId,
+  }));
+  if (!response || response.check_id !== checkId || response.deleted !== true) {
+    throw new HistoryFunctionError(502);
+  }
+}
+
+export async function deleteCheckFromHistory(checkId: string): Promise<void> {
+  if (!checkId) return;
   try {
-    const row = await tablesDB.getRow<CheckRow>({
-      databaseId: APPWRITE_CONFIG.databaseId,
-      tableId: APPWRITE_CONFIG.tables.checks,
-      rowId: checkId,
-    });
-    if (row.user_id !== userId) {
-      throw new Error('Нельзя удалить чужую проверку');
+    await deleteHistoryCheck(checkId);
+  } catch (error) {
+    throw historyError(error);
+  }
+}
+
+export async function clearChecksHistory(): Promise<void> {
+  try {
+    for (let batch = 0; batch < MAX_CLEAR_BATCHES; batch += 1) {
+      // Always restart from the first page after deletion. A cursor for a row
+      // just deleted is intentionally never sent back to Appwrite.
+      const response = await loadHistoryPage();
+      if (response.checks.length === 0) return;
+      for (const check of response.checks) {
+        await deleteHistoryCheck(check.check_id);
+      }
     }
-    await tablesDB.deleteRow({
-      databaseId: APPWRITE_CONFIG.databaseId,
-      tableId: APPWRITE_CONFIG.tables.checks,
-      rowId: checkId,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Нельзя удалить чужую проверку') throw error;
-    throw historyError(error);
-  }
-}
-
-export async function clearChecksHistory(userId: string): Promise<void> {
-  if (!userId) return;
-  try {
-    const checks = await loadChecksHistory(userId);
-    await Promise.all(checks.map((check) => deleteCheckFromHistory(userId, check.id)));
+    throw new HistoryFunctionError(502);
   } catch (error) {
     throw historyError(error);
   }
 }
 
 const isSameLocalDay = (a: Date, b: Date): boolean =>
-  a.getFullYear() === b.getFullYear() &&
-  a.getMonth() === b.getMonth() &&
-  a.getDate() === b.getDate();
+  a.getFullYear() === b.getFullYear()
+  && a.getMonth() === b.getMonth()
+  && a.getDate() === b.getDate();
 
 const getWeekStart = (dateValue: Date): Date => {
   const date = new Date(dateValue);
@@ -287,6 +394,6 @@ export function calculateHistoryStats(checks: Check[]): HistoryStats {
   return { checksToday, totalChecks: checks.length, averageIndex, checksThisWeek };
 }
 
-export async function getHistoryStats(userId: string): Promise<HistoryStats> {
-  return calculateHistoryStats(await loadChecksHistory(userId));
+export async function getHistoryStats(): Promise<HistoryStats> {
+  return calculateHistoryStats(await loadChecksHistory());
 }

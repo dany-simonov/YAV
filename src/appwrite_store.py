@@ -8,7 +8,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import quote
 
 import httpx
@@ -26,6 +26,8 @@ from src.validation import (
     MAX_MODEL,
     MAX_PROVIDER,
     MAX_SOURCE_LABEL,
+    EmailCanonicalizationError,
+    canonicalize_email,
 )
 
 DEFAULT_ENDPOINT = "https://fra.cloud.appwrite.io/v1"
@@ -96,6 +98,16 @@ class ChecksPersistenceError(RuntimeError):
         super().__init__(operation)
 
 
+class CheckHistoryError(RuntimeError):
+    """Client-safe failure for Function-only personal check history."""
+
+    def __init__(self, code: str, detail: str, status_code: int) -> None:
+        self.code = code
+        self.detail = detail
+        self.status_code = status_code
+        super().__init__(code)
+
+
 def _resource_config() -> tuple[str, str, str, str, str]:
     endpoint = os.getenv("APPWRITE_FUNCTION_API_ENDPOINT", DEFAULT_ENDPOINT).rstrip("/")
     project_id = os.getenv("APPWRITE_FUNCTION_PROJECT_ID", DEFAULT_PROJECT_ID)
@@ -103,6 +115,52 @@ def _resource_config() -> tuple[str, str, str, str, str]:
     users_table_id = os.getenv("APPWRITE_USERS_TABLE_ID", DEFAULT_USERS_TABLE_ID)
     checks_table_id = os.getenv("APPWRITE_CHECKS_TABLE_ID", DEFAULT_CHECKS_TABLE_ID)
     return endpoint, project_id, database_id, users_table_id, checks_table_id
+
+
+def _query(function: str, *arguments: Any) -> str:
+    encoded = ",".join(
+        json.dumps(argument, ensure_ascii=False, separators=(",", ":"))
+        for argument in arguments
+    )
+    return f"{function}({encoded})"
+
+
+def check_history_response(
+    row: Mapping[str, Any],
+    *,
+    include_workspace_id: bool = False,
+    include_explanation: bool = False,
+    include_details: bool = False,
+) -> dict[str, Any]:
+    """Return an explicit history DTO without Appwrite metadata or ACLs."""
+    response = {
+        "check_id": str(row.get("$id") or ""),
+        "user_id": str(row.get("user_id") or ""),
+        "media_type": str(row.get("media_type") or ""),
+        "status": str(row.get("status") or ""),
+        "verdict": str(row.get("verdict") or ""),
+        "provider": str(row.get("provider") or ""),
+        "model": str(row.get("model") or ""),
+        "ai_probability": row.get("ai_probability"),
+        "decision_confidence": row.get("decision_confidence"),
+        "authenticity_index": row.get("authenticity_index"),
+        "processing_ms": row.get("processing_ms"),
+        "source_label": str(row.get("source_label") or ""),
+        "created_at": str(row.get("$createdAt") or ""),
+    }
+    if include_workspace_id:
+        response["workspace_id"] = str(row.get("workspace_id") or "")
+    if include_explanation:
+        explanation = row.get("explanation")
+        response["explanation"] = explanation if isinstance(explanation, str) else ""
+    if include_details:
+        # Details are the existing bounded JSON string consumed by the history
+        # detail UI. Keep malformed legacy strings intact: the client parser
+        # already treats them as an empty optional report instead of failing the
+        # entire history request.
+        details = row.get("details")
+        response["details"] = details if isinstance(details, str) else None
+    return response
 
 
 def _value(value: Any) -> Any:
@@ -461,12 +519,19 @@ def _map_hybrid_v2_to_check_row(
 
 
 def map_analysis_to_check_row(
-    result: dict[str, Any], user_id: str, source_label: str = ""
+    result: dict[str, Any],
+    user_id: str,
+    source_label: str = "",
+    *,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """Map an analysis response to the trusted checks table schema."""
     semantics_version = result.get("semantics_version")
     if semantics_version is not None and "ai_verdict" in result:
-        return _map_hybrid_v2_to_check_row(result, user_id, source_label)
+        row = _map_hybrid_v2_to_check_row(result, user_id, source_label)
+        if workspace_id is not None:
+            row["workspace_id"] = workspace_id
+        return row
     canonical = AnalysisResult.model_validate(result) if semantics_version is not None else None
     if canonical is not None:
         evidence = canonical.provider_evidence
@@ -494,7 +559,7 @@ def map_analysis_to_check_row(
     except (TypeError, ValueError):
         processing_ms = 0
 
-    return {
+    row = {
         "user_id": user_id,
         "media_type": media_type[:16],
         "status": "completed",
@@ -510,6 +575,9 @@ def map_analysis_to_check_row(
         "processing_ms": max(0, processing_ms),
         "details": details,
     }
+    if workspace_id is not None:
+        row["workspace_id"] = workspace_id
+    return row
 
 
 def _user_permissions(user_id: str, *, allow_delete: bool) -> list[str]:
@@ -545,14 +613,20 @@ async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str
     headers = {"X-Appwrite-Project": project_id, "X-Appwrite-Key": api_key}
     email_verified = account.get("emailVerification") is True
     raw_email = account.get("email")
-    email = raw_email[:320] if isinstance(raw_email, str) else ""
+    try:
+        email = canonicalize_email(raw_email)
+    except EmailCanonicalizationError:
+        # Preserve a legacy profile when a malformed runtime account shape
+        # cannot safely supply an email; valid Auth emails are always synced
+        # in canonical form on the next authenticated request.
+        email = ""
 
     async def _sync_existing(client: httpx.AsyncClient, row: dict[str, Any]) -> dict[str, Any]:
         sync_data: dict[str, Any] = {"email_verified": email_verified}
         # The runtime account normally supplies email. Preserve a legacy
         # profile email if a malformed/older runtime shape omits it instead
         # of replacing it with an empty value.
-        if isinstance(raw_email, str) and row.get("email") != email:
+        if email and row.get("email") != email:
             sync_data["email"] = email
         if row.get("email_verified") is email_verified and len(sync_data) == 1:
             return row
@@ -602,9 +676,14 @@ async def ensure_user_profile(account: dict[str, Any], api_key: str) -> dict[str
 
 
 async def persist_check_result(
-    result: dict[str, Any], user_id: str, source_label: str, api_key: str
+    result: dict[str, Any],
+    user_id: str,
+    source_label: str,
+    api_key: str,
+    *,
+    workspace_id: str | None = None,
 ) -> str:
-    """Create an owner-readable/deletable trusted check row and update profile stats."""
+    """Persist a personal or Function-only workspace check and update actor stats."""
     endpoint, project_id, database_id, users_table_id, checks_table_id = _resource_config()
     check_id = uuid.uuid4().hex
     headers = {"X-Appwrite-Project": project_id, "X-Appwrite-Key": api_key}
@@ -614,7 +693,9 @@ async def persist_check_result(
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        check_data = map_analysis_to_check_row(result, user_id, source_label)
+        check_data = map_analysis_to_check_row(
+            result, user_id, source_label, workspace_id=workspace_id
+        )
     except Exception as exc:
         raise ChecksPersistenceError("checks.payload.map", exc=exc, user_id=user_id, api_key=api_key) from exc
 
@@ -631,12 +712,26 @@ async def persist_check_result(
                 json={
                     "rowId": check_id,
                     "data": check_data,
-                    "permissions": _user_permissions(user_id, allow_delete=True),
+                    "permissions": [],
                 },
             ))
             if created.status_code not in (200, 201):
                 raise ChecksPersistenceError(
                     "checks.create", response=created, data=check_data, user_id=user_id, api_key=api_key,
+                )
+            try:
+                created_row = created.json()
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ChecksPersistenceError(
+                    "checks.create.response", exc=exc, data=check_data,
+                    user_id=user_id, api_key=api_key,
+                ) from exc
+            if not isinstance(created_row, Mapping) or not isinstance(
+                created_row.get("$id"), str
+            ):
+                raise ChecksPersistenceError(
+                    "checks.create.response", response=created, data=check_data,
+                    user_id=user_id, api_key=api_key,
                 )
 
             incremented = await _persist_request(client.patch(
@@ -666,3 +761,117 @@ async def persist_check_result(
         ) from exc
 
     return check_id
+
+
+class AppwriteCheckHistoryStore:
+    """Function-key-only personal history over the server-only checks table."""
+
+    def __init__(self, api_key: str) -> None:
+        if not isinstance(api_key, str) or not api_key:
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            )
+        endpoint, project_id, database_id, _, checks_table_id = _resource_config()
+        self._checks_url = (
+            f"{endpoint}/tablesdb/{database_id}/tables/{checks_table_id}/rows"
+        )
+        self._headers = {"X-Appwrite-Project": project_id, "X-Appwrite-Key": api_key}
+
+    @staticmethod
+    def _next_cursor(rows: list[Any], page_size: int) -> str | None:
+        if len(rows) != page_size or not rows:
+            return None
+        cursor = rows[-1].get("$id") if isinstance(rows[-1], Mapping) else None
+        return cursor if isinstance(cursor, str) and cursor else None
+
+    async def list_my_history(
+        self, actor_user_id: str, *, page_size: int = 25, cursor_after: str | None = None
+    ) -> dict[str, Any]:
+        queries = [
+            _query("equal", "user_id", [actor_user_id]),
+            _query("isNull", "workspace_id"),
+            _query("limit", page_size),
+            _query("orderDesc", "$sequence"),
+        ]
+        if cursor_after:
+            queries.append(_query("cursorAfter", cursor_after))
+        body = await self._list(queries)
+        rows = body.get("rows")
+        if not isinstance(rows, list):
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            )
+        return {
+            "checks": [
+                check_history_response(row, include_explanation=True)
+                for row in rows
+                if isinstance(row, Mapping)
+            ],
+            "next_cursor": self._next_cursor(rows, page_size),
+            "page_size": page_size,
+        }
+
+    async def get_my_check(self, actor_user_id: str, check_id: str) -> dict[str, Any]:
+        row = await self._get_personal_row(actor_user_id, check_id)
+        return check_history_response(
+            row, include_explanation=True, include_details=True
+        )
+
+    async def delete_my_check(self, actor_user_id: str, check_id: str) -> None:
+        await self._get_personal_row(actor_user_id, check_id)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.delete(
+                    f"{self._checks_url}/{quote(check_id, safe='')}", headers=self._headers
+                )
+        except httpx.HTTPError as exc:
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            ) from exc
+        if response.status_code == 404:
+            raise CheckHistoryError("check_not_found", "Проверка не найдена.", 404)
+        if response.status_code != 204:
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            )
+
+    async def _get_personal_row(
+        self, actor_user_id: str, check_id: str
+    ) -> Mapping[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    f"{self._checks_url}/{quote(check_id, safe='')}", headers=self._headers
+                )
+        except httpx.HTTPError as exc:
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            ) from exc
+        if response.status_code == 404:
+            raise CheckHistoryError("check_not_found", "Проверка не найдена.", 404)
+        if response.status_code != 200 or not isinstance(response.json(), Mapping):
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            )
+        row = response.json()
+        if row.get("user_id") != actor_user_id or row.get("workspace_id") is not None:
+            raise CheckHistoryError("check_not_found", "Проверка не найдена.", 404)
+        return row
+
+    async def _list(self, queries: list[str]) -> Mapping[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    self._checks_url,
+                    headers=self._headers,
+                    params=[("queries[]", query) for query in queries],
+                )
+        except httpx.HTTPError as exc:
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            ) from exc
+        if response.status_code != 200 or not isinstance(response.json(), Mapping):
+            raise CheckHistoryError(
+                "history_unavailable", "История проверок временно недоступна.", 503
+            )
+        return response.json()

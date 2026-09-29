@@ -147,7 +147,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             raise SubscriptionValidationError("invalid page size")
         if cursor is not None:
             cursor = validate_user_id(cursor)
-        queries = [_query("limit", page_size), _query("orderDesc", "$createdAt")]
+        queries = [_query("limit", page_size), _query("orderDesc", "$sequence")]
         if cursor:
             queries.append(_query("cursorAfter", cursor))
         if search:
@@ -434,7 +434,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             cursor = validate_user_id(cursor)
         if target_user_id is not None:
             target_user_id = validate_user_id(target_user_id)
-        queries = [_query("limit", page_size), _query("orderDesc", "$createdAt")]
+        queries = [_query("limit", page_size), _query("orderDesc", "$sequence")]
         if cursor:
             queries.append(_query("cursorAfter", cursor))
         if target_user_id:
@@ -575,6 +575,30 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                 "global_sapling_chars_monthly",
                 "month",
                 settings.global_sapling_chars_monthly,
+            ),
+            (
+                "resemble_daily",
+                "global_resemble_daily",
+                "day",
+                settings.global_resemble_daily,
+            ),
+            (
+                "resemble_monthly",
+                "global_resemble_monthly",
+                "month",
+                settings.global_resemble_monthly,
+            ),
+            (
+                "huggingface_daily",
+                "global_huggingface_daily",
+                "day",
+                settings.global_huggingface_daily,
+            ),
+            (
+                "huggingface_monthly",
+                "global_huggingface_monthly",
+                "month",
+                settings.global_huggingface_monthly,
             ),
         )
         quotas: dict[str, Any] = {}

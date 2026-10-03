@@ -1,0 +1,32 @@
+import { X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import type { AdminUserDetails, ProviderKey } from '../../lib/admin';
+
+const providers: Record<ProviderKey, string> = { gemini: 'Gemini', sightengine: 'Sightengine', aiornot: 'AI or Not', sapling: 'Sapling', resemble: 'Resemble' };
+const number = new Intl.NumberFormat('ru-RU');
+function date(value: string) { return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium' }).format(new Date(value)); }
+function color(used: number, limit: number) { const remaining = Math.max(0, limit - used) / limit; return remaining > .5 ? 'bg-mv-real text-mv-real' : remaining >= .2 ? 'bg-mv-uncertain text-mv-uncertain' : 'bg-mv-fake text-mv-fake'; }
+
+interface Props { open: boolean; user: AdminUserDetails | null; loading: boolean; error: string | null; saving: boolean; status: string | null; onClose: () => void; onRetry: () => void; onProviderLimit: (key: ProviderKey, value: number) => void; }
+
+export function UserDetailsModal(props: Props) {
+  const dialog = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!props.open) return;
+    const overflow = document.body.style.overflow; document.body.style.overflow = 'hidden';
+    requestAnimationFrame(() => dialog.current?.querySelector<HTMLButtonElement>('[data-close]')?.focus());
+    const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); props.onClose(); } };
+    document.addEventListener('keydown', keydown);
+    return () => { document.body.style.overflow = overflow; document.removeEventListener('keydown', keydown); };
+  }, [props.open, props.onClose]);
+  if (!props.open) return null;
+  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/25 backdrop-blur-[2px] sm:items-center sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) props.onClose(); }}><div ref={dialog} role="dialog" aria-modal="true" aria-labelledby="user-details-title" className="admin-modal-in flex max-h-[96vh] w-full max-w-[1040px] flex-col overflow-hidden rounded-t-[22px] border border-black/[.09] bg-[#f7f7f6] shadow-[var(--shadow-card)] sm:max-h-[90vh] sm:rounded-[22px]"><header className="sticky top-0 z-10 flex items-start justify-between border-b border-black/[.09] bg-white px-5 py-4 sm:px-6"><div className="min-w-0"><p className="eyebrow">ЛИМИТЫ ПОЛЬЗОВАТЕЛЯ</p><h2 id="user-details-title" className="mt-1 truncate text-xl font-semibold">{props.user?.user.display_name || (props.loading ? 'Загрузка…' : 'Пользователь')}</h2><p className="mt-0.5 truncate text-sm text-mv-text-secondary">{props.user?.user.email || 'Загрузка данных'}</p></div><button data-close type="button" onClick={props.onClose} aria-label="Закрыть" className="ml-4 grid h-10 w-10 place-items-center rounded-[10px] border border-black/[.09] bg-white"><X className="h-5 w-5" /></button></header><div className="overflow-y-auto px-5 py-5 sm:px-6">{props.loading ? <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">{Array.from({ length: 5 }, (_, index) => <div key={index} className="h-48 animate-pulse rounded-2xl bg-black/[.06]" />)}</div> : props.error ? <div className="rounded-2xl border border-red-500/25 bg-white p-5"><p className="font-semibold">Не удалось загрузить пользователя</p><p className="mt-1 text-sm text-mv-text-secondary">{props.error}</p><button type="button" className="btn-black mt-4 min-h-10 px-4" onClick={props.onRetry}>Повторить</button></div> : props.user ? <><div><h3 className="text-lg font-semibold">Выдать лимиты нейросетям</h3><p className="mt-1 text-sm text-mv-text-secondary">Каждый лимит действует до начала следующего месяца. Пустое поле означает, что лимит не выдан.</p></div><div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{(Object.keys(providers) as ProviderKey[]).map((provider) => <ProviderCard key={provider} provider={provider} user={props.user!} saving={props.saving} onSave={props.onProviderLimit} />)}</div></> : null}{props.status && <p role="status" className="mt-5 rounded-xl border border-black/[.09] bg-white px-4 py-3 text-sm">{props.status}</p>}</div></div></div>;
+}
+
+function ProviderCard({ provider, user, saving, onSave }: { provider: ProviderKey; user: AdminUserDetails; saving: boolean; onSave: (provider: ProviderKey, value: number) => void }) {
+  const quota = user.usage.provider_quotas[provider]; const original = quota?.limit;
+  const [value, setValue] = useState(original ? String(original) : '');
+  useEffect(() => setValue(original ? String(original) : ''), [original, provider, user.user_id]);
+  const parsed = Number(value); const valid = Number.isInteger(parsed) && parsed >= 1; const changed = valid && parsed !== original;
+  return <article className="flex min-h-52 flex-col rounded-2xl border border-black/[.09] bg-white p-4 shadow-sm"><div className="flex items-start justify-between gap-3"><h4 className="font-semibold">{providers[provider]}</h4>{quota && <span className={`text-xs font-semibold ${color(quota.used, quota.limit).split(' ')[1]}`}>{number.format(quota.remaining)} осталось</span>}</div>{quota ? <><p className="mt-3 text-2xl font-semibold tabular-nums">{number.format(quota.used)} <span className="text-sm font-normal text-mv-text-muted">/ {number.format(quota.limit)}</span></p><div className="mt-3 h-2 overflow-hidden rounded-full bg-black/[.08]"><div className={`h-full rounded-full ${color(quota.used, quota.limit).split(' ')[0]}`} style={{ width: `${Math.min(100, quota.used / quota.limit * 100)}%` }} /></div><p className="mt-2 text-xs text-mv-text-secondary">Сброс {date(quota.reset_at)}</p></> : <p className="mt-3 text-sm text-mv-text-muted">Лимит не выдан</p>}<div className="mt-auto flex gap-2 pt-4"><input value={value} inputMode="numeric" placeholder="Лимит" aria-label={`Лимит ${providers[provider]}`} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && changed) onSave(provider, parsed); }} className={`h-10 min-w-0 flex-1 appearance-none rounded-[10px] border bg-white px-3 text-sm tabular-nums ${!value || valid ? 'border-black/[.09]' : 'border-red-500'}`} /><button type="button" disabled={saving || !changed} onClick={() => onSave(provider, parsed)} className="h-10 rounded-[10px] bg-black px-3 text-xs font-semibold text-white shadow-[var(--shadow-control)] hover:bg-mv-accent-hover disabled:cursor-not-allowed disabled:opacity-40">Выдать</button></div>{value && !valid && <p className="mt-1 text-xs text-red-600">От 1</p>}</article>;
+}

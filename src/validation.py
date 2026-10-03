@@ -195,6 +195,11 @@ class AdminSetQuotaOverridesRequest(_AdminRequest):
     overrides: dict[str, int]
 
 
+class AdminSetProviderQuotaOverridesRequest(_AdminRequest):
+    action: Literal["admin_set_provider_quota_overrides"]
+    overrides: dict[str, int]
+
+
 class AdminRemoveQuotaOverrideRequest(_AdminRequest):
     action: Literal["admin_remove_quota_override"]
     quota_key: str = Field(alias="quotaKey", min_length=1, max_length=32)
@@ -239,6 +244,12 @@ class AdminListAuditEventsRequest(_AdminActionRequest):
     target_user_id: str | None = Field(
         default=None, alias="targetUserId", min_length=1, max_length=36
     )
+
+
+class AdminProviderUsageHistoryRequest(_AdminActionRequest):
+    action: Literal["admin_provider_usage_history"]
+    provider: Literal["gemini", "sightengine", "aiornot", "sapling", "resemble"]
+    days: int = Field(default=30, ge=7, le=90)
 
 
 class _WorkspaceActionRequest(_RequestModel):
@@ -316,6 +327,11 @@ class WorkspaceListHistoryRequest(_WorkspaceTargetRequest):
 class WorkspaceInviteMemberRequest(_WorkspaceTargetRequest):
     action: Literal["workspace_invite_member"]
     email: str = Field(min_length=3, max_length=320)
+
+
+class WorkspaceSetProviderQuotaOverridesRequest(_WorkspaceTargetRequest):
+    action: Literal["workspace_set_provider_quota_overrides"]
+    overrides: dict[str, int]
 
 
 class WorkspaceCancelInvitationRequest(_WorkspaceTargetRequest):
@@ -454,18 +470,21 @@ ValidatedRequest = (
     | AdminGetUserPolicyRequest
     | AdminSetSubscriptionRequest
     | AdminSetQuotaOverridesRequest
+    | AdminSetProviderQuotaOverridesRequest
     | AdminRemoveQuotaOverrideRequest
     | AdminResetQuotaOverridesRequest
     | AdminListUsersRequest
     | AdminResetUserQuotaUsageRequest
     | AdminResetAllUserUsageRequest
     | AdminListAuditEventsRequest
+    | AdminProviderUsageHistoryRequest
     | WorkspaceCreateRequest
     | WorkspaceGetRequest
     | WorkspaceListMembersRequest
     | WorkspaceListInvitationsRequest
     | WorkspaceListHistoryRequest
     | WorkspaceInviteMemberRequest
+    | WorkspaceSetProviderQuotaOverridesRequest
     | WorkspaceCancelInvitationRequest
     | WorkspaceListMyInvitationsRequest
     | WorkspaceAcceptInvitationRequest
@@ -553,6 +572,8 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         model = AdminSetSubscriptionRequest
     elif action == "admin_set_quota_overrides":
         model = AdminSetQuotaOverridesRequest
+    elif action == "admin_set_provider_quota_overrides":
+        model = AdminSetProviderQuotaOverridesRequest
     elif action == "admin_remove_quota_override":
         model = AdminRemoveQuotaOverrideRequest
     elif action == "admin_reset_quota_overrides":
@@ -565,6 +586,8 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         model = AdminResetAllUserUsageRequest
     elif action == "admin_list_audit_events":
         model = AdminListAuditEventsRequest
+    elif action == "admin_provider_usage_history":
+        model = AdminProviderUsageHistoryRequest
     elif action == "workspace_create":
         model = WorkspaceCreateRequest
     elif action == "workspace_get":
@@ -577,6 +600,8 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         model = WorkspaceListHistoryRequest
     elif action == "workspace_invite_member":
         model = WorkspaceInviteMemberRequest
+    elif action == "workspace_set_provider_quota_overrides":
+        model = WorkspaceSetProviderQuotaOverridesRequest
     elif action == "workspace_cancel_invitation":
         model = WorkspaceCancelInvitationRequest
     elif action == "workspace_list_my_invitations":

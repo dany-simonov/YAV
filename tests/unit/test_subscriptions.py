@@ -196,15 +196,16 @@ def test_effective_policy_extends_existing_atomic_admission_plan(monkeypatch):
 
 
 def test_system_admin_comes_only_from_runtime_account_and_server_allowlist(monkeypatch):
-    monkeypatch.setenv("SYSTEM_ADMIN_USER_IDS", "admin-1")
+    monkeypatch.setenv("ADMIN_PANEL_ENABLED", "true")
+    monkeypatch.setenv("SYSTEM_ADMIN_EMAILS", "admin@yav.test")
 
     assert is_system_admin(
-        {"$id": "admin-1", "email": "not-authoritative@example.test"}, "admin-1"
+        {"$id": "admin-1", "email": "admin@yav.test"}, "admin-1"
     )
     assert not is_system_admin(
         {"$id": "user-1", "isAdmin": True, "role": "admin"}, "user-1"
     )
-    assert not is_system_admin({"$id": "admin-1"}, "user-1")
+    assert not is_system_admin({"$id": "admin-1", "email": "admin@yav.test"}, "user-1")
 
 
 def test_admin_allowlist_is_fail_closed_for_empty_or_malformed_config(monkeypatch):
@@ -276,7 +277,8 @@ async def test_normal_user_is_denied_even_when_targeting_an_admin(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_admin_action_uses_server_side_store_after_authorization(monkeypatch):
-    monkeypatch.setenv("SYSTEM_ADMIN_USER_IDS", "admin-1")
+    monkeypatch.setenv("ADMIN_PANEL_ENABLED", "true")
+    monkeypatch.setenv("SYSTEM_ADMIN_EMAILS", "admin@yav.test")
     policy = EffectiveQuotaPolicy(
         "pro",
         {
@@ -292,6 +294,7 @@ async def test_admin_action_uses_server_side_store_after_authorization(monkeypat
             new=AsyncMock(
                 return_value={
                     "$id": "admin-1",
+                    "email": "admin@yav.test",
                     "emailVerification": True,
                 }
             ),

@@ -46,6 +46,7 @@ export function NewCheckPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as TabType) || 'media';
+  const workspaceId = searchParams.get('workspaceId');
   
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const [files, setFiles] = useState<UploadFile[]>([]);
@@ -212,7 +213,7 @@ export function NewCheckPage() {
         }
         execution = await functions.createExecution(
           APPWRITE_CONFIG.functions.analyze,
-          JSON.stringify(buildUnifiedComplexPayload({ sourceUrl: complexArticleUrl, text: complexText, fileIds: uploadedIds }, user)),
+          JSON.stringify({ ...buildUnifiedComplexPayload({ sourceUrl: complexArticleUrl, text: complexText, fileIds: uploadedIds }, user), ...(workspaceId ? { workspaceId } : {}) }),
           false,
         );
         let responseBody = execution.responseBody || '';
@@ -269,6 +270,7 @@ export function NewCheckPage() {
           firstName: user.name.split(' ')[0] || '',
           mediaType,
           sourceLabel: fileToUpload.name,
+          ...(workspaceId ? { workspaceId } : {}),
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else if (activeTab === 'text') {
@@ -280,6 +282,7 @@ export function NewCheckPage() {
           firstName: user.name.split(' ')[0] || '',
           mediaType,
           sourceLabel: text.slice(0, 120).replace(/\s+/g, ' ').trim(),
+          ...(workspaceId ? { workspaceId } : {}),
         };
         execution = await functions.createExecution(APPWRITE_CONFIG.functions.analyze, JSON.stringify(payload));
       } else {

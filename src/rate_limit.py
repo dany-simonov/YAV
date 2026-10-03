@@ -11,7 +11,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 
@@ -471,9 +471,24 @@ class AppwriteTablesRateLimitStore:
             raise self._quota_unavailable("quota.admission.transport", exc=exc) from exc
         raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
 
-    async def admit_provider_units(self, provider: str, units: int) -> None:
-        """Spend an unplanned provider operation without charging user/IP quota."""
-        plan = _provider_plan(self, provider, units)
+    async def admit_provider_units(
+        self,
+        provider: str,
+        units: int,
+        *,
+        user_id: str | None = None,
+        provider_overrides: Mapping[str, int] | None = None,
+        workspace_id: str | None = None,
+    ) -> None:
+        """Spend an unplanned provider operation, including an optional user limit."""
+        plan = _provider_plan(
+            self,
+            provider,
+            units,
+            user_id=user_id,
+            provider_overrides=provider_overrides,
+            workspace_id=workspace_id,
+        )
         if plan.dimensions:
             await self.admit(plan)
 
@@ -803,7 +818,15 @@ def build_subscription_admission_plan(
     )
 
 
-def _provider_plan(store: AppwriteTablesRateLimitStore, provider: str, units: int) -> AdmissionPlan:
+def _provider_plan(
+    store: AppwriteTablesRateLimitStore,
+    provider: str,
+    units: int,
+    *,
+    user_id: str | None = None,
+    provider_overrides: Mapping[str, int] | None = None,
+    workspace_id: str | None = None,
+) -> AdmissionPlan:
     if not isinstance(units, int) or isinstance(units, bool) or units <= 0:
         raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
     now = store.now
@@ -854,6 +877,22 @@ def _provider_plan(store: AppwriteTablesRateLimitStore, provider: str, units: in
         ]
     else:
         items = []
+    individual_limit = (provider_overrides or {}).get(provider)
+    if individual_limit is not None and (workspace_id or user_id):
+        if isinstance(individual_limit, bool) or not isinstance(individual_limit, int) or individual_limit < 1:
+            raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
+        month = _window(now, "month")
+        is_workspace_limit = workspace_id is not None
+        items.append(_dimension(
+            f"{'workspace' if is_workspace_limit else 'user'}_provider_{provider}_monthly",
+            workspace_id if is_workspace_limit else user_id,
+            month,
+            units,
+            individual_limit,
+            "provider_workspace_quota_exceeded" if is_workspace_limit else "provider_user_quota_exceeded",
+            "Общий месячный лимит команды для этой нейросети исчерпан."
+            if is_workspace_limit else "Индивидуальный месячный лимит этой нейросети исчерпан.",
+        ))
     return AdmissionPlan("provider-budget", tuple(items), ((provider, units),), create_reservation=False)
 
 
@@ -955,7 +994,14 @@ def build_admission_plan(
         provider_units.append(("gemini", 3))
 
     for provider, units in provider_units:
-        dimensions.extend(_provider_plan(store, provider, units).dimensions)
+        dimensions.extend(_provider_plan(
+            store,
+            provider,
+            units,
+            user_id=user_id,
+            provider_overrides=effective_policy.provider_overrides if effective_policy else None,
+            workspace_id=workspace_id,
+        ).dimensions)
     return AdmissionPlan(
         user_id,
         tuple(dimensions),
@@ -991,7 +1037,7 @@ def build_complex_admission_plan(
         for dimension in candidate.dimensions:
             # Provider prepayment is intentionally replaced by Complex's existing
             # dynamic provider admission context in main.py.
-            if dimension.dimension.startswith("global_"):
+            if dimension.dimension.startswith(("global_", "user_provider_", "workspace_provider_")):
                 continue
             key = (dimension.dimension, dimension.subject, dimension.window.key)
             existing = dimensions.get(key)

@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { HashRouter, Routes, Route } from 'react-router-dom';
-import { Header, Footer, DashboardLayout, ProtectedRoute, PublicOnlyRoute, VerifiedRoute } from './components';
+import { Header, Footer, DashboardLayout, ProtectedRoute, PublicOnlyRoute, VerifiedRoute, AdminRoute } from './components';
 import { 
   Home, 
   About, 
@@ -20,7 +20,11 @@ import {
   Research,
   ArcticResearch,
   ResearchCasePage,
-  EmailVerificationPendingPage
+  EmailVerificationPendingPage,
+  AdminLoginPage,
+  AdminPage,
+  WorkspacesPage,
+  WorkspaceDetailsPage,
 } from './pages';
 import { useAuthStore } from './store';
 import { VerifyEmailCallbackPage } from './pages/auth/VerifyEmailCallbackPage';
@@ -113,6 +117,13 @@ function AppContent() {
       <Route path="/verify-email/pending" element={<EmailVerificationPendingPage />} />
       <Route path="/verify-email/callback" element={<VerifyEmailCallbackPage />} />
 
+      {/* Administration has its own sign-in screen; server actions enforce the role. */}
+      <Route path="/admin/login" element={<AdminLoginPage />} />
+      <Route
+        path="/admin"
+        element={<AdminRoute><AdminPage /></AdminRoute>}
+      />
+
       {/* Protected Dashboard Routes */}
       <Route
         path="/dashboard"
@@ -128,6 +139,8 @@ function AppContent() {
         <Route path="history" element={<VerifiedRoute><HistoryPage /></VerifiedRoute>} />
         <Route path="history/:checkId" element={<VerifiedRoute><HistoryDetailPage /></VerifiedRoute>} />
         <Route path="api" element={<ApiSettingsPage />} />
+        <Route path="workspaces" element={<VerifiedRoute><WorkspacesPage /></VerifiedRoute>} />
+        <Route path="workspaces/:workspaceId" element={<VerifiedRoute><WorkspaceDetailsPage /></VerifiedRoute>} />
       </Route>
 
       {/* 404 */}

@@ -25,3 +25,8 @@ export { BigTextCheckPage } from './dashboard/BigTextCheckPage';
 export { HistoryPage } from './dashboard/HistoryPage';
 export { HistoryDetailPage } from './dashboard/HistoryDetailPage';
 export { ApiSettingsPage } from './dashboard/ApiSettingsPage';
+export { WorkspacesPage } from './dashboard/WorkspacesPage';
+export { WorkspaceDetailsPage } from './dashboard/WorkspaceDetailsPage';
+
+// Administration
+export { AdminLoginPage, AdminPage } from './admin';

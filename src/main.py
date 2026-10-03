@@ -102,9 +102,11 @@ from src.validation import (  # noqa: E402
     AdminRemoveQuotaOverrideRequest,
     AdminResetQuotaOverridesRequest,
     AdminSetQuotaOverridesRequest,
+    AdminSetProviderQuotaOverridesRequest,
     AdminSetSubscriptionRequest,
     AdminListUsersRequest,
     AdminListAuditEventsRequest,
+    AdminProviderUsageHistoryRequest,
     AdminResetUserQuotaUsageRequest,
     AdminResetAllUserUsageRequest,
     GetMySubscriptionRequest,
@@ -113,6 +115,7 @@ from src.validation import (  # noqa: E402
     WorkspaceCreateRequest,
     WorkspaceGetRequest,
     WorkspaceInviteMemberRequest,
+    WorkspaceSetProviderQuotaOverridesRequest,
     WorkspaceListInvitationsRequest,
     WorkspaceListHistoryRequest,
     WorkspaceListMembersRequest,
@@ -1108,7 +1111,13 @@ async def _analyze(
 
             async def _admit_unplanned_provider(provider: str, units: int) -> None:
                 await _within_deadline(
-                    quota_store.admit_provider_units(provider, units)
+                    quota_store.admit_provider_units(
+                        provider,
+                        units,
+                        user_id=user_id,
+                        provider_overrides=(effective_policy.provider_overrides if effective_policy else None),
+                        workspace_id=(workspace_access.workspace_id if workspace_access else None),
+                    )
                 )
 
             budget_token = begin_provider_budget(_admit_unplanned_provider, prepaid)
@@ -1631,6 +1640,7 @@ async def _execute_request(
                 WorkspaceListInvitationsRequest,
                 WorkspaceListHistoryRequest,
                 WorkspaceInviteMemberRequest,
+                WorkspaceSetProviderQuotaOverridesRequest,
                 WorkspaceCancelInvitationRequest,
                 WorkspaceListMyInvitationsRequest,
                 WorkspaceAcceptInvitationRequest,
@@ -1679,6 +1689,12 @@ async def _execute_request(
                             user_id, request.workspace_id, request.email
                         )
                     )
+                if isinstance(request, WorkspaceSetProviderQuotaOverridesRequest):
+                    return await _within_deadline(
+                        workspace_store.set_provider_quota_overrides(
+                            user_id, request.workspace_id, request.overrides
+                        )
+                    )
                 if isinstance(request, WorkspaceCancelInvitationRequest):
                     return await _within_deadline(
                         workspace_store.cancel_invitation(
@@ -1717,12 +1733,14 @@ async def _execute_request(
                 AdminGetUserPolicyRequest,
                 AdminSetSubscriptionRequest,
                 AdminSetQuotaOverridesRequest,
+                AdminSetProviderQuotaOverridesRequest,
                 AdminRemoveQuotaOverrideRequest,
                 AdminResetQuotaOverridesRequest,
                 AdminListUsersRequest,
                 AdminResetUserQuotaUsageRequest,
                 AdminResetAllUserUsageRequest,
                 AdminListAuditEventsRequest,
+                AdminProviderUsageHistoryRequest,
             ),
         ):
             # The target is client input, but authority comes exclusively from
@@ -1746,6 +1764,10 @@ async def _execute_request(
                             target_user_id=request.target_user_id,
                         )
                     )
+                if isinstance(request, AdminProviderUsageHistoryRequest):
+                    return await _within_deadline(
+                        admin_store.provider_usage_history(request.provider, request.days)
+                    )
                 if isinstance(request, AdminGetUserPolicyRequest):
                     return await _within_deadline(
                         admin_store.get_user_details(request.target_user_id)
@@ -1759,6 +1781,12 @@ async def _execute_request(
                 elif isinstance(request, AdminSetQuotaOverridesRequest):
                     policy = await _within_deadline(
                         admin_store.change_quota_overrides(
+                            user_id, request.target_user_id, request.overrides
+                        )
+                    )
+                elif isinstance(request, AdminSetProviderQuotaOverridesRequest):
+                    policy = await _within_deadline(
+                        admin_store.change_provider_quota_overrides(
                             user_id, request.target_user_id, request.overrides
                         )
                     )
@@ -1849,7 +1877,15 @@ async def _execute_request(
             effective_policy = effective_policy_from_profile(profile)
         if isinstance(request, ComplexAnalyzeRequest):
             async def _admit_complex_provider(provider: str, units: int) -> None:
-                await _within_deadline(rate_store.admit_provider_units(provider, units))
+                await _within_deadline(
+                    rate_store.admit_provider_units(
+                        provider,
+                        units,
+                        user_id=user_id,
+                        provider_overrides=effective_policy.provider_overrides,
+                        workspace_id=(workspace_access.workspace_id if workspace_access else None),
+                    )
+                )
 
             budget_token = begin_provider_budget(_admit_complex_provider, {})
             try:

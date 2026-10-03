@@ -5,6 +5,7 @@ const items=[
   { to: '/dashboard/check', label: 'Новая проверка', end: true },
   { to: '/dashboard/history', label: 'История', end: false },
   { to: '/dashboard/api', label: 'Тарифные планы', end: false},
+  { to: '/dashboard/workspaces', label: 'Команды', end: false},
 ];
 
 export function Sidebar(){return <aside className="lg:sticky lg:top-[112px] h-fit bg-white border border-black/[.075] rounded-[16px] p-2.5 shadow-[0_2px_3px_rgba(0,0,0,.04),0_18px_40px_rgba(0,0,0,.07)] overflow-x-auto">

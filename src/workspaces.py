@@ -14,7 +14,11 @@ from typing import Any, Mapping
 import httpx
 
 from src.appwrite_store import check_history_response
-from src.subscriptions import SubscriptionValidationError, validate_user_id
+from src.subscriptions import (
+    SubscriptionValidationError,
+    normalize_provider_quota_overrides,
+    validate_user_id,
+)
 from src.validation import EmailCanonicalizationError, canonicalize_email
 
 _MAX_MEMBERS = 10
@@ -416,6 +420,23 @@ class AppwriteWorkspaceStore:
             )
         await self._patch(self._invitations_url, invitation_id, {"status": "cancelled"})
         return {"workspace_id": workspace_id, "email": email, "status": "cancelled"}
+
+    async def set_provider_quota_overrides(
+        self, owner_user_id: str, workspace_id: str, overrides: Any
+    ) -> dict[str, Any]:
+        """Set one monthly per-provider limit, shared by all team members."""
+        workspace_id = _workspace_id(workspace_id)
+        await self._require_owner(owner_user_id, workspace_id)
+        try:
+            normalized = normalize_provider_quota_overrides(overrides)
+        except SubscriptionValidationError as exc:
+            raise WorkspaceError("invalid_workspace_quota", "Некорректные лимиты нейросетей.") from exc
+        await self._patch(
+            self._workspaces_url,
+            workspace_id,
+            {"provider_quota_overrides": json.dumps(normalized, separators=(",", ":"), sort_keys=True)},
+        )
+        return {"workspace_id": workspace_id, "provider_quota_overrides": normalized}
 
     async def reject_invitation(
         self, user_id: str, user_email: str, workspace_id: str
@@ -876,6 +897,14 @@ class AppwriteWorkspaceStore:
 
     @staticmethod
     def _workspace_response(row: Mapping[str, Any], role: Any) -> dict[str, Any]:
+        raw_provider_overrides = row.get("provider_quota_overrides")
+        try:
+            provider_overrides = normalize_provider_quota_overrides(
+                json.loads(raw_provider_overrides)
+                if isinstance(raw_provider_overrides, str) and raw_provider_overrides else {}
+            )
+        except (TypeError, ValueError, json.JSONDecodeError, SubscriptionValidationError):
+            provider_overrides = {}
         return {
             "workspace_id": str(row.get("$id") or ""),
             "name": str(row.get("name") or ""),
@@ -884,6 +913,7 @@ class AppwriteWorkspaceStore:
             if isinstance(row.get("member_count"), int)
             else 0,
             "role": role if role in {"owner", "member"} else "member",
+            "provider_quota_overrides": provider_overrides,
         }
 
     @staticmethod

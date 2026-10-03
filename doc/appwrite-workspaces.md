@@ -22,6 +22,7 @@ explicit `$createdAt` presentation order. No custom ordering field exists.
 | `plan` | string/enum, 16 | legacy `free`/`premium` fallback | legacy/bootstrap | `subscriptions.py` |
 | `subscription` | enum/string, 16 | optional pre-backfill; absent means legacy `plan` | Function admin only | `subscriptions.py` |
 | `quota_overrides` | string, 1024 | optional; absent means `{}` | Function admin only | `subscriptions.py` |
+| `provider_quota_overrides` | string, 1024 | optional JSON map: `gemini`, `sightengine`, `aiornot`, `sapling`, `resemble` → positive monthly limit | Function admin only | `subscriptions.py`, `rate_limit.py`, `admin.py` |
 | `quota_usage_generations` | string, 1024 | optional migration marker; absence retains legacy subjects | Function admin only | `subscriptions.py` |
 | `status` | string/enum, 16 | new profiles | Function bootstrap | `ensure_user_profile` |
 | `email_verified` | boolean | new profiles | Function mirrors Auth | `ensure_user_profile` |
@@ -92,6 +93,7 @@ and workspace IDs, `global`, the 48-character HMAC IP subject, and
 |  | `member_count` | integer | yes, default `0` | Function increment | `workspaces.py` |
 |  | `quota_plan` | enum/string, 16 | optional; missing means `free` | server-managed only | `subscriptions.py` |
 |  | `quota_overrides` | string, 1024 | optional; missing means `{}` | server-managed only | `subscriptions.py` |
+|  | `provider_quota_overrides` | string, 1024 | optional JSON: provider → общий месячный лимит команды | Function owner only | `workspaces.py`, `rate_limit.py` |
 | `workspace_memberships` | `workspace_id`, `user_id` | string, 36 | yes | Function transaction | `workspaces.py` |
 |  | `role` | enum/string, 16 | yes: `owner`, `member` | Function | `workspaces.py` |
 |  | `status` | enum/string, 16 | yes: `active` | Function | `workspaces.py` |

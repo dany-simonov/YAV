@@ -46,9 +46,16 @@ class Settings(BaseSettings):
     enterprise_heavy_media_monthly_limit: int = 250
     custom_monthly_limit: int = 100
     custom_heavy_media_monthly_limit: int = 25
-    # Comma-separated Appwrite account IDs. This is a global server-side role,
-    # never a client payload field or a mutable user-profile attribute.
+    # Legacy account-ID allowlist kept only for deployment compatibility. It
+    # no longer grants access; administrative access is granted by the email
+    # allowlist below after the explicit feature switch is enabled.
     system_admin_user_ids: str = ""
+    # Comma-separated email addresses returned by the authenticated Appwrite
+    # /account response. Kept only on the Function, never in the browser.
+    system_admin_emails: str = ""
+    # Administrative routes are fail-closed on every deployment. Set this to
+    # true only after the administrator allowlist has been reviewed.
+    admin_panel_enabled: bool = False
 
     # Production MVP abuse protection.  These are deliberately server-side
     # defaults: changing them needs no schema migration.

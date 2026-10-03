@@ -22,7 +22,9 @@ from core.config import settings
 
 SUBSCRIPTIONS = frozenset({"free", "pro", "enterprise", "custom"})
 QUOTA_KEYS = frozenset({"checks", "heavy_media_checks"})
+PROVIDER_QUOTA_KEYS = frozenset({"gemini", "sightengine", "aiornot", "sapling", "resemble"})
 _USER_ID = re.compile(r"^[A-Za-z0-9._-]{1,36}$")
+_ADMIN_EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
 _MAX_QUOTA_LIMIT = 1_000_000
 
 
@@ -49,6 +51,7 @@ class EffectiveQuotaPolicy:
     limits: Mapping[str, QuotaLimit]
     overrides: Mapping[str, int]
     generations: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+    provider_overrides: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
 
     def quota(self, key: str) -> QuotaLimit:
         try:
@@ -122,6 +125,22 @@ def normalize_quota_overrides(value: Any) -> dict[str, int]:
     return normalized
 
 
+def normalize_provider_quota_overrides(value: Any) -> dict[str, int]:
+    """Validate optional per-user monthly provider-operation limits."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or len(value) > len(PROVIDER_QUOTA_KEYS):
+        raise SubscriptionValidationError("invalid provider quota overrides")
+    normalized: dict[str, int] = {}
+    for key, limit in value.items():
+        if key not in PROVIDER_QUOTA_KEYS or isinstance(limit, bool) or not isinstance(limit, int):
+            raise SubscriptionValidationError("invalid provider quota override")
+        if not 1 <= limit <= _MAX_QUOTA_LIMIT:
+            raise SubscriptionValidationError("invalid provider quota override")
+        normalized[str(key)] = limit
+    return normalized
+
+
 def subscription_from_profile(profile: Mapping[str, Any]) -> str:
     """Read a canonical subscription, accepting only the historical plan safely."""
     subscription = profile.get("subscription")
@@ -164,6 +183,18 @@ def overrides_from_profile(profile: Mapping[str, Any]) -> dict[str, int]:
         ) from exc
 
 
+def provider_overrides_from_profile(profile: Mapping[str, Any]) -> dict[str, int]:
+    raw = profile.get("provider_quota_overrides")
+    if raw in (None, ""):
+        return {}
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 1024:
+        raise SubscriptionPersistenceError("profile has invalid provider quota overrides")
+    try:
+        return normalize_provider_quota_overrides(json.loads(raw))
+    except (TypeError, ValueError, json.JSONDecodeError, SubscriptionValidationError) as exc:
+        raise SubscriptionPersistenceError("profile has invalid provider quota overrides") from exc
+
+
 def normalize_quota_generations(value: Any) -> dict[str, int]:
     if value is None:
         return {}
@@ -187,11 +218,13 @@ def effective_quota_policy(
     subscription: Any,
     overrides: Any = None,
     generations: Any = None,
+    provider_overrides: Any = None,
 ) -> EffectiveQuotaPolicy:
     """Return defaults overridden by a bounded per-user server-side mapping."""
     tier = normalize_subscription(subscription)
     normalized_overrides = normalize_quota_overrides(overrides)
     normalized_generations = normalize_quota_generations(generations)
+    normalized_provider_overrides = normalize_provider_quota_overrides(provider_overrides)
     limits: dict[str, QuotaLimit] = {}
     for key, period, setting_name in _POLICY_SPECS[tier]:
         configured = getattr(settings, setting_name)
@@ -207,12 +240,15 @@ def effective_quota_policy(
         limits=MappingProxyType(limits),
         overrides=MappingProxyType(normalized_overrides),
         generations=MappingProxyType(normalized_generations),
+        provider_overrides=MappingProxyType(normalized_provider_overrides),
     )
 
 
 def effective_policy_from_profile(profile: Mapping[str, Any]) -> EffectiveQuotaPolicy:
     return effective_quota_policy(
-        subscription_from_profile(profile), overrides_from_profile(profile)
+        subscription_from_profile(profile),
+        overrides_from_profile(profile),
+        provider_overrides=provider_overrides_from_profile(profile),
     )
 
 
@@ -242,8 +278,27 @@ def effective_policy_from_workspace(
             ) from exc
     else:
         raise SubscriptionPersistenceError("workspace has invalid quota overrides")
+    raw_provider_overrides = workspace.get("provider_quota_overrides")
+    if raw_provider_overrides in (None, ""):
+        provider_overrides: dict[str, int] = {}
+    elif isinstance(raw_provider_overrides, str) and len(raw_provider_overrides.encode("utf-8")) <= 1024:
+        try:
+            provider_overrides = normalize_provider_quota_overrides(json.loads(raw_provider_overrides))
+        except (
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            SubscriptionValidationError,
+        ) as exc:
+            raise SubscriptionPersistenceError(
+                "workspace has invalid provider quota overrides"
+            ) from exc
+    else:
+        raise SubscriptionPersistenceError("workspace has invalid provider quota overrides")
     try:
-        return effective_quota_policy(subscription, overrides)
+        return effective_quota_policy(
+            subscription, overrides, provider_overrides=provider_overrides
+        )
     except SubscriptionValidationError as exc:
         raise SubscriptionPersistenceError("workspace has invalid quota plan") from exc
 
@@ -261,19 +316,44 @@ def configured_system_admin_ids() -> frozenset[str]:
     return frozenset(values)
 
 
+def configured_system_admin_emails() -> frozenset[str]:
+    """Return a normalized, fail-closed Function-only email allowlist."""
+    configured = os.getenv("SYSTEM_ADMIN_EMAILS", settings.system_admin_emails)
+    if not isinstance(configured, str) or not configured.strip():
+        return frozenset()
+    values = [part.strip().lower() for part in configured.split(",")]
+    if any(not _ADMIN_EMAIL.fullmatch(value) for value in values):
+        return frozenset()
+    return frozenset(values)
+
+
+def admin_panel_enabled() -> bool:
+    """Return the explicit server-side switch for administrative access.
+
+    The allowlist alone is deliberately insufficient. This makes a newly
+    deployed admin UI inaccessible until an operator explicitly enables it in
+    the Appwrite Function variables.
+    """
+    configured = os.getenv("ADMIN_PANEL_ENABLED", str(settings.admin_panel_enabled))
+    return configured.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_system_admin(account: Mapping[str, Any], runtime_user_id: str) -> bool:
-    """Verify the authenticated Appwrite identity against the server allowlist."""
+    """Verify the authenticated Appwrite identity against the email allowlist."""
+    if not admin_panel_enabled():
+        return False
     if not isinstance(account, Mapping):
         return False
     try:
         user_id = validate_user_id(runtime_user_id)
     except SubscriptionValidationError:
         return False
-    # Never inspect request role/email/isAdmin fields.  The account is the
-    # result of /account with the runtime JWT and must match its runtime ID.
+    # The account is the server-fetched /account result for the runtime JWT;
+    # never trust request-provided role, email or isAdmin fields.
+    email = str(account.get("email") or "").strip().lower()
     return (
         str(account.get("$id") or "") == user_id
-        and user_id in configured_system_admin_ids()
+        and email in configured_system_admin_emails()
     )
 
 
@@ -372,6 +452,7 @@ class AppwriteSubscriptionStore:
             subscription_from_profile(profile),
             overrides_from_profile(profile),
             await self.get_quota_generations(user_id),
+            provider_overrides_from_profile(profile),
         )
 
     @staticmethod
@@ -440,6 +521,17 @@ class AppwriteSubscriptionStore:
                     normalized, separators=(",", ":"), sort_keys=True
                 )
             },
+        )
+        return await self.get_effective_policy(user_id)
+
+    async def update_provider_quota_overrides(
+        self, user_id: str, overrides: Any
+    ) -> EffectiveQuotaPolicy:
+        user_id = validate_user_id(user_id)
+        normalized = normalize_provider_quota_overrides(overrides)
+        await self._patch(
+            user_id,
+            {"provider_quota_overrides": json.dumps(normalized, separators=(",", ":"), sort_keys=True)},
         )
         return await self.get_effective_policy(user_id)
 

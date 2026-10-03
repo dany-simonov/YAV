@@ -496,7 +496,8 @@ async def test_normal_user_cannot_list_users_or_audit(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_admin_list_action_uses_target_only_as_filter_not_identity(monkeypatch):
-    monkeypatch.setenv("SYSTEM_ADMIN_USER_IDS", "admin-1")
+    monkeypatch.setenv("ADMIN_PANEL_ENABLED", "true")
+    monkeypatch.setenv("SYSTEM_ADMIN_EMAILS", "admin@yav.test")
     store = type(
         "Store",
         (),
@@ -512,6 +513,7 @@ async def test_admin_list_action_uses_target_only_as_filter_not_identity(monkeyp
             new=AsyncMock(
                 return_value={
                     "$id": "admin-1",
+                    "email": "admin@yav.test",
                     "emailVerification": True,
                 }
             ),

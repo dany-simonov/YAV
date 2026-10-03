@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 from urllib.parse import quote
 
@@ -23,6 +23,7 @@ from src.subscriptions import (
     SubscriptionValidationError,
     effective_quota_policy,
     overrides_from_profile,
+    provider_overrides_from_profile,
     subscription_from_profile,
     validate_user_id,
 )
@@ -89,6 +90,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
 
     def __init__(self, api_key: str) -> None:
         super().__init__(api_key)
+        self.checks_table = os.getenv("APPWRITE_CHECKS_TABLE_ID", "checks")
         self.rate_limits_table = os.getenv(
             "APPWRITE_RATE_LIMITS_TABLE_ID", "rate_limits"
         )
@@ -100,6 +102,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             not self.rate_limits_table
             or not self.reservations_table
             or not self.audit_table
+            or not self.checks_table
         ):
             raise AdminPersistenceError("missing Appwrite administration configuration")
 
@@ -117,6 +120,10 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
     @property
     def _audit_url(self) -> str:
         return self._table_rows_url(self.audit_table)
+
+    @property
+    def _checks_url(self) -> str:
+        return self._table_rows_url(self.checks_table)
 
     async def get_profile(self, user_id: str) -> dict[str, Any]:
         try:
@@ -215,6 +222,22 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             target_user_id,
             {"overrides": dict(old.overrides)},
             {"overrides": dict(updated.overrides)},
+        )
+        return updated
+
+    async def change_provider_quota_overrides(
+        self, actor_user_id: str, target_user_id: str, overrides: Any
+    ) -> EffectiveQuotaPolicy:
+        target_user_id = validate_user_id(target_user_id)
+        profile = await self.get_profile(target_user_id)
+        old = provider_overrides_from_profile(profile)
+        updated = await self.update_provider_quota_overrides(target_user_id, overrides)
+        await self._audit_or_raise(
+            actor_user_id,
+            "provider_quota_overrides_set",
+            target_user_id,
+            {"provider_overrides": old},
+            {"provider_overrides": dict(updated.provider_overrides)},
         )
         return updated
 
@@ -488,6 +511,11 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             }
         return {
             "user_quotas": quotas,
+            "provider_quotas": await self._provider_quota_usage(user_id, policy),
+            # A completed check has one persisted provider/model. This is
+            # actual historical usage, unlike provider budgets which count
+            # internal API units and belong to the whole project.
+            "model_checks_month": await self._monthly_model_usage(user_id),
             "active_reservations": await self._active_reservations(user_id),
             # IP counters are keyed with an HMAC of the request IP, and a
             # profile has no authoritative relation to an IP address.
@@ -501,6 +529,94 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                 "attributable_to_target_user": False,
                 "quotas": await self._provider_budget_usage(),
             },
+        }
+
+    async def _provider_quota_usage(
+        self, user_id: str, policy: EffectiveQuotaPolicy
+    ) -> dict[str, Any]:
+        """Read optional individual provider limits without assigning global use."""
+        window = _window(datetime.now(timezone.utc), "month")
+        quotas: dict[str, Any] = {}
+        for provider, limit in policy.provider_overrides.items():
+            dimension = f"user_provider_{provider}_monthly"
+            counter = await self._get_optional_row(
+                self._rate_limits_url,
+                self._counter_row_id(dimension, user_id, window.key),
+            )
+            used = self._counter_used(counter)
+            quotas[provider] = {
+                "limit": limit,
+                "used": used,
+                "remaining": max(0, limit - used),
+                "window": counter.get("window_start", window.key) if counter else window.key,
+                "reset_at": counter.get("window_end", window.end.isoformat()) if counter else window.end.isoformat(),
+            }
+        return quotas
+
+    async def _monthly_model_usage(self, user_id: str) -> dict[str, Any]:
+        """Aggregate completed checks by the model recorded in history.
+
+        This intentionally reports usage only. There is no per-model quota in
+        the subscription policy yet, so attaching a made-up denominator here
+        would incorrectly suggest that an individual model is enforced.
+        """
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        next_month = (
+            month_start.replace(year=month_start.year + 1, month=1)
+            if month_start.month == 12
+            else month_start.replace(month=month_start.month + 1)
+        )
+        queries = [
+            _query("equal", "user_id", [user_id]),
+            _query("equal", "status", ["completed"]),
+            _query("greaterThanEqual", "$createdAt", month_start.isoformat()),
+            _query("limit", 100),
+            _query("orderDesc", "$sequence"),
+        ]
+        counts: dict[tuple[str, str], int] = {}
+        cursor: str | None = None
+        total = 0
+        # A hard ceiling prevents one profile with pathological history from
+        # making an administrative request unbounded. The response marks it.
+        truncated = False
+        for _ in range(10):
+            page_queries = [*queries]
+            if cursor:
+                page_queries.append(_query("cursorAfter", cursor))
+            response = await self._list_rows(self._checks_url, page_queries)
+            rows = response.get("rows")
+            if not isinstance(rows, list):
+                raise AdminPersistenceError("model usage list decode failed")
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                provider = self._safe_string(row.get("provider"), 64) or "unknown"
+                model = self._safe_string(row.get("model"), 128) or "unknown"
+                counts[(provider, model)] = counts.get((provider, model), 0) + 1
+                total += 1
+            if len(rows) < 100:
+                break
+            last = rows[-1]
+            next_cursor = last.get("$id") if isinstance(last, Mapping) else None
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise AdminPersistenceError("model usage cursor decode failed")
+            cursor = next_cursor
+        else:
+            truncated = True
+        models = [
+            {"provider": provider, "model": model, "used": used}
+            for (provider, model), used in counts.items()
+        ]
+        models.sort(key=lambda item: (-item["used"], item["provider"], item["model"]))
+        return {
+            "scope": "completed_checks",
+            "period": "month",
+            "window": month_start.strftime("%Y-%m"),
+            "reset_at": next_month.isoformat(),
+            "total": total,
+            "truncated": truncated,
+            "models": models,
         }
 
     async def _active_reservations(self, user_id: str) -> dict[str, Any]:
@@ -624,6 +740,53 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                 else window.end.isoformat(),
             }
         return quotas
+
+    async def provider_usage_history(self, provider: str, days: int) -> dict[str, Any]:
+        """Return persisted global daily counters for one provider.
+
+        The project records provider-specific units, not a universal token
+        value: for example, AIOrNot stores words and Sapling stores chars.
+        """
+        definitions: Mapping[str, tuple[str, int, str]] = {
+            "gemini": ("global_gemini_daily", settings.global_gemini_operations_daily, "операции"),
+            "sightengine": ("global_sightengine_daily", settings.global_sightengine_daily, "операции"),
+            "aiornot": ("global_aiornot_words_daily", settings.global_aiornot_words_daily, "слова"),
+            "sapling": ("global_sapling_chars_daily", settings.global_sapling_chars_daily, "символы"),
+            "resemble": ("global_resemble_daily", settings.global_resemble_daily, "операции"),
+        }
+        if provider not in definitions or isinstance(days, bool) or not 7 <= days <= 90:
+            raise SubscriptionValidationError("invalid provider history request")
+        dimension, limit, unit = definitions[provider]
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise AdminPersistenceError("provider budget configuration is invalid")
+        now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        start = now - timedelta(days=days - 1)
+        response = await self._list_rows(
+            self._rate_limits_url,
+            [
+                _query("equal", "dimension", [dimension]),
+                _query("greaterThanEqual", "window_start", start.strftime("%Y-%m-%d")),
+                _query("limit", 100),
+                _query("orderAsc", "window_start"),
+            ],
+        )
+        rows = response.get("rows")
+        if not isinstance(rows, list):
+            raise AdminPersistenceError("provider history list decode failed")
+        counts: dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            day = row.get("window_start")
+            count = row.get("count")
+            if isinstance(day, str) and len(day) == 10 and isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                counts[day] = count
+        points = []
+        for offset in range(days):
+            day = start + timedelta(days=offset)
+            key = day.strftime("%Y-%m-%d")
+            points.append({"date": key, "used": counts.get(key, 0)})
+        return {"provider": provider, "unit": unit, "daily_limit": limit, "points": points}
 
     async def _increment_generation(
         self, user_id: str, quota_key: str
@@ -960,6 +1123,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
     def _user_summary(self, profile: Mapping[str, Any]) -> dict[str, Any]:
         user_id = validate_user_id(profile.get("$id"))
         overrides = overrides_from_profile(profile)
+        provider_overrides = provider_overrides_from_profile(profile)
         return {
             "user_id": user_id,
             "email": self._safe_string(profile.get("email"), 320),
@@ -967,6 +1131,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             "email_verified": profile.get("email_verified") is True,
             "subscription": subscription_from_profile(profile),
             "has_quota_overrides": bool(overrides),
+            "has_provider_quota_overrides": bool(provider_overrides),
             "created_at": self._safe_string(profile.get("$createdAt"), 64),
             "updated_at": self._safe_string(profile.get("$updatedAt"), 64),
         }

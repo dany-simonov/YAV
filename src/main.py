@@ -17,6 +17,7 @@ import shutil
 import sys
 import time
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -329,6 +330,21 @@ def _media_diagnostic_logger(context: Any):
     def _log(message: str) -> None:
         try:
             log(message)
+        except Exception:
+            pass
+
+    return _log
+
+
+def _media_diagnostic_error_logger(context: Any):
+    """Return the runtime error logger without letting observability affect flow."""
+    error = getattr(context, "error", None)
+    if not callable(error):
+        return None
+
+    def _log(message: str) -> None:
+        try:
+            error(message)
         except Exception:
             pass
 
@@ -1508,6 +1524,7 @@ async def _execute_request(
     diagnostic_log: Any = None,
     client_ip: str = "",
     *,
+    diagnostic_error_log: Any = None,
     execution_deadline: ExecutionDeadline | None = None,
     request_started_at: float | None = None,
     diagnostic_authorization: str = "",
@@ -1519,6 +1536,14 @@ async def _execute_request(
         )
     request = (
         validate_request_payload(payload) if isinstance(payload, dict) else payload
+    )
+    admin_list_correlation_id = (
+        uuid.uuid4().hex if isinstance(request, AdminListUsersRequest) else ""
+    )
+    safe_admin_actor_id = (
+        user_id
+        if isinstance(user_id, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,36}", user_id)
+        else "invalid"
     )
     is_diagnostic = request.action in {"gemini_smoke_test", "gemini_list_models"}
     if is_diagnostic:
@@ -1568,6 +1593,14 @@ async def _execute_request(
                 get_authenticated_account(user_id, user_jwt)
             )
         except RuntimeError:
+            if admin_list_correlation_id:
+                _safe_diagnostic_log(
+                    diagnostic_error_log,
+                    "admin action=admin_list_users "
+                    f"correlation_id={admin_list_correlation_id} "
+                    f"actor_user_id={safe_admin_actor_id} "
+                    "category=auth_resolution_failed exception_class=RuntimeError",
+                )
             if is_diagnostic:
                 _safe_diagnostic_log(
                     diagnostic_log,
@@ -1601,6 +1634,27 @@ async def _execute_request(
             if request.action == "gemini_list_models":
                 return await run_gemini_list_models(diagnostic_log)
             return await run_gemini_smoke_test(diagnostic_log)
+
+        if admin_list_correlation_id:
+            database_id = os.getenv("APPWRITE_DATABASE_ID", "yav")
+            users_table_id = os.getenv("APPWRITE_USERS_TABLE_ID", "users")
+            safe_database_id = (
+                database_id
+                if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", database_id)
+                else "invalid"
+            )
+            safe_users_table_id = (
+                users_table_id
+                if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", users_table_id)
+                else "invalid"
+            )
+            _safe_diagnostic_log(
+                diagnostic_log,
+                "admin action=admin_list_users "
+                f"database_id={safe_database_id} users_table_id={safe_users_table_id} "
+                f"actor_user_id={safe_admin_actor_id} "
+                f"correlation_id={admin_list_correlation_id}",
+            )
 
         profile = await _within_deadline(ensure_user_profile(account, api_key))
 
@@ -1752,7 +1806,12 @@ async def _execute_request(
             # The target is client input, but authority comes exclusively from
             # the JWT-resolved account and the configured server allowlist.
             require_system_admin(account, user_id)
-            admin_store = AppwriteAdminStore(api_key)
+            admin_store = AppwriteAdminStore(
+                api_key,
+                diagnostic_log=diagnostic_log,
+                diagnostic_error_log=diagnostic_error_log,
+                correlation_id=admin_list_correlation_id,
+            )
             try:
                 if isinstance(request, AdminListUsersRequest):
                     return await _within_deadline(
@@ -2059,6 +2118,7 @@ def main(context: Any):
                 _extract_request_header(context.req, "x-appwrite-client-ip"),
                 execution_deadline=execution_deadline,
                 request_started_at=request_start,
+                diagnostic_error_log=_media_diagnostic_error_logger(context),
                 diagnostic_authorization=_extract_request_header(
                     context.req, "x-yav-diagnostic-authorization"
                 ),

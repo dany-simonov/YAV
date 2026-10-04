@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -33,6 +34,11 @@ logger = logging.getLogger(__name__)
 _MAX_PAGE_SIZE = 100
 _MAX_AUDIT_VALUE_BYTES = 1024
 _MAX_IDEMPOTENCY_KEY_LENGTH = 64
+_SAFE_APPWRITE_TOKEN = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+_SAFE_APPWRITE_MESSAGE = re.compile(
+    r"(?i)(?:authorization|x-appwrite-key|cookie|token|jwt|password|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?\S+"
+)
+_EMAIL_IN_MESSAGE = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\b")
 
 
 class AdminPersistenceError(RuntimeError):
@@ -89,8 +95,23 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
     it does not create a parallel quota implementation.
     """
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        diagnostic_log: Any = None,
+        diagnostic_error_log: Any = None,
+        correlation_id: str = "",
+    ) -> None:
         super().__init__(api_key)
+        self._diagnostic_log = diagnostic_log
+        self._diagnostic_error_log = diagnostic_error_log
+        self._correlation_id = (
+            correlation_id
+            if isinstance(correlation_id, str)
+            and re.fullmatch(r"[a-f0-9]{32}", correlation_id)
+            else uuid.uuid4().hex
+        )
         self.checks_table = os.getenv("APPWRITE_CHECKS_TABLE_ID", "checks")
         self.rate_limits_table = os.getenv(
             "APPWRITE_RATE_LIMITS_TABLE_ID", "rate_limits"
@@ -156,20 +177,45 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         if cursor is not None:
             cursor = validate_user_id(cursor)
         queries = [_query("limit", page_size), _query("orderDesc", "$sequence")]
+        query_types = ["limit", "orderDesc"]
         if cursor:
             queries.append(_query("cursorAfter", cursor))
+            query_types.append("cursorAfter")
         if search:
             if not isinstance(search, str) or len(search) > 320:
                 raise SubscriptionValidationError("invalid user search")
             if "@" in search:
                 queries.append(_query("equal", "email", [search.strip().lower()]))
+                query_types.append("equal:email")
             else:
                 queries.append(_query("equal", "$id", [validate_user_id(search)]))
-        response = await self._list_rows(self._rows_url, queries)
+                query_types.append("equal:$id")
+        response = await self._list_rows(
+            self._rows_url,
+            queries,
+            operation="admin_list_users.rows_list",
+            resource="users.rows",
+            query_types=tuple(query_types),
+        )
         rows = response.get("rows")
         if not isinstance(rows, list):
+            self._observe_error(
+                operation="admin_list_users.decode",
+                category="malformed_response",
+                exception_class="AdminPersistenceError",
+            )
             raise AdminPersistenceError("user list decode failed")
-        summaries = [self._user_summary(row) for row in rows if isinstance(row, dict)]
+        try:
+            summaries = [self._user_summary(row) for row in rows if isinstance(row, dict)]
+        except (SubscriptionPersistenceError, SubscriptionValidationError, ValueError) as exc:
+            self._observe_error(
+                operation="admin_list_users.row_decode",
+                category="malformed_response",
+                exception_class=type(exc).__name__,
+            )
+            # Preserve the pre-existing client error mapping; this branch adds
+            # observability only and must not alter the action contract.
+            raise
         next_cursor = summaries[-1]["user_id"] if len(summaries) == page_size else None
         return {"users": summaries, "next_cursor": next_cursor, "page_size": page_size}
 
@@ -1123,7 +1169,93 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         if response.status_code not in (200, 201):
             raise AdminPersistenceError("admin audit create failed")
 
-    async def _list_rows(self, url: str, queries: list[str]) -> dict[str, Any]:
+    def _observe(self, message: str, *, error: bool = False) -> None:
+        callback = self._diagnostic_error_log if error else self._diagnostic_log
+        if not callable(callback):
+            return
+        try:
+            callback(message)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _safe_appwrite_value(value: Any) -> str:
+        if not isinstance(value, str) or not _SAFE_APPWRITE_TOKEN.fullmatch(value):
+            return "unknown"
+        return value
+
+    @staticmethod
+    def _safe_appwrite_message(value: Any) -> str:
+        if not isinstance(value, str):
+            return "omitted"
+        message = value.replace("\r", " ").replace("\n", " ")
+        message = _SAFE_APPWRITE_MESSAGE.sub("<redacted>", message)
+        message = _EMAIL_IN_MESSAGE.sub("<redacted-email>", message)
+        return message[:160] if message else "omitted"
+
+    @staticmethod
+    def _appwrite_error_metadata(response: Any) -> tuple[str, str, str]:
+        try:
+            body = response.json()
+        except (TypeError, ValueError, AttributeError):
+            body = None
+        if not isinstance(body, Mapping):
+            return "unknown", "unknown", "omitted"
+        error_type = AppwriteAdminStore._safe_appwrite_value(body.get("type"))
+        code = body.get("code")
+        error_code = str(code) if isinstance(code, int) and not isinstance(code, bool) else "unknown"
+        return error_type, error_code, AppwriteAdminStore._safe_appwrite_message(body.get("message"))
+
+    @staticmethod
+    def _appwrite_category(status_code: int | None, error_type: str) -> str:
+        if status_code in (401, 403):
+            return "permission_or_scope_denied"
+        categories = {
+            "database_not_found": "database_not_found",
+            "table_not_found": "table_not_found",
+            "attribute_not_found": "missing_column",
+            "column_not_found": "missing_column",
+            "index_not_found": "missing_index",
+            "general_query_invalid": "invalid_query",
+            "query_invalid": "invalid_query",
+        }
+        return categories.get(error_type, "unknown")
+
+    def _observe_error(
+        self,
+        *,
+        operation: str,
+        category: str,
+        exception_class: str,
+        status_code: int | None = None,
+        appwrite_type: str = "unknown",
+        appwrite_code: str = "unknown",
+        appwrite_message: str = "omitted",
+    ) -> None:
+        self._observe(
+            "admin_appwrite_error "
+            f"correlation_id={self._correlation_id} operation={operation} "
+            f"category={category} status_code={status_code if status_code is not None else 'none'} "
+            f"appwrite_type={appwrite_type} appwrite_code={appwrite_code} "
+            f"appwrite_message={appwrite_message} exception_class={exception_class}",
+            error=True,
+        )
+
+    async def _list_rows(
+        self,
+        url: str,
+        queries: list[str],
+        *,
+        operation: str = "admin.rows_list",
+        resource: str = "table.rows",
+        query_types: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        if operation == "admin_list_users.rows_list":
+            self._observe(
+                "admin_appwrite_request "
+                f"correlation_id={self._correlation_id} operation={operation} "
+                f"method=GET resource={resource} query_types={','.join(query_types) or 'none'}"
+            )
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
@@ -1131,15 +1263,49 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                     headers=self._headers,
                     params=[("queries[]", query) for query in queries],
                 )
-        except httpx.HTTPError as exc:
+        except httpx.TimeoutException as exc:
+            self._observe_error(
+                operation=operation,
+                category="timeout",
+                exception_class=type(exc).__name__,
+            )
+            raise AdminPersistenceError("Appwrite list failed") from exc
+        except httpx.TransportError as exc:
+            self._observe_error(
+                operation=operation,
+                category="transport_error",
+                exception_class=type(exc).__name__,
+            )
             raise AdminPersistenceError("Appwrite list failed") from exc
         if response.status_code != 200:
+            error_type, error_code, error_message = self._appwrite_error_metadata(response)
+            self._observe_error(
+                operation=operation,
+                category=self._appwrite_category(response.status_code, error_type),
+                exception_class="AdminPersistenceError",
+                status_code=response.status_code,
+                appwrite_type=error_type,
+                appwrite_code=error_code,
+                appwrite_message=error_message,
+            )
             raise AdminPersistenceError("Appwrite list failed")
         try:
             body = response.json()
         except (TypeError, ValueError) as exc:
+            self._observe_error(
+                operation=operation,
+                category="malformed_response",
+                exception_class=type(exc).__name__,
+                status_code=response.status_code,
+            )
             raise AdminPersistenceError("Appwrite list decode failed") from exc
         if not isinstance(body, dict):
+            self._observe_error(
+                operation=operation,
+                category="malformed_response",
+                exception_class="AdminPersistenceError",
+                status_code=response.status_code,
+            )
             raise AdminPersistenceError("Appwrite list decode failed")
         return body
 

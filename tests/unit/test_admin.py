@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.admin import AppwriteAdminStore, _operation_id
+from src.admin import AdminPersistenceError, AppwriteAdminStore, _operation_id
 from src.main import _execute_request
 from src.validation import SecurityValidationError
 
@@ -91,6 +91,45 @@ async def test_admin_list_is_paginated_and_returns_lightweight_summaries(monkeyp
     assert "limit(2)" in queries
     assert 'orderDesc("$sequence")' in queries
     assert 'cursorAfter("cursor-1")' in queries
+
+
+@pytest.mark.asyncio
+async def test_admin_list_observability_is_safe_and_classifies_appwrite_failure(monkeypatch):
+    store = _store(monkeypatch)
+    log, error = MagicMock(), MagicMock()
+    store._diagnostic_log = log
+    store._diagnostic_error_log = error
+    store._correlation_id = "a" * 32
+    client = _client(
+        get=[
+            _response(
+                404,
+                {
+                    "type": "table_not_found",
+                    "code": 404,
+                    "message": "Table users for admin@example.test; Authorization: Bearer super-secret",
+                },
+            )
+        ]
+    )
+
+    with patch("src.admin.httpx.AsyncClient", return_value=client), pytest.raises(
+        AdminPersistenceError
+    ):
+        await store.list_users(page_size=1, search="admin@example.test")
+
+    request_log = log.call_args.args[0]
+    error_log = error.call_args.args[0]
+    assert "operation=admin_list_users.rows_list" in request_log
+    assert "method=GET resource=users.rows" in request_log
+    assert "query_types=limit,orderDesc,equal:email" in request_log
+    assert "admin@example.test" not in request_log
+    assert "category=table_not_found" in error_log
+    assert "status_code=404" in error_log
+    assert "appwrite_type=table_not_found" in error_log
+    assert "<redacted-email>" in error_log
+    for secret in ("super-secret", "Bearer", "admin@example.test", "runtime-key"):
+        assert secret not in error_log
 
 
 @pytest.mark.asyncio
@@ -495,6 +534,47 @@ async def test_normal_user_cannot_list_users_or_audit(monkeypatch):
             with pytest.raises(SecurityValidationError) as raised:
                 await _execute_request(action, "runtime-key", "user-1", "runtime-jwt")
         assert raised.value.code == "admin_access_denied"
+
+
+@pytest.mark.asyncio
+async def test_admin_list_start_log_is_bounded_and_passes_safe_callbacks(monkeypatch):
+    monkeypatch.setenv("ADMIN_PANEL_ENABLED", "true")
+    monkeypatch.setenv("SYSTEM_ADMIN_EMAILS", "admin@yav.test")
+    monkeypatch.setenv("APPWRITE_DATABASE_ID", "yav")
+    monkeypatch.setenv("APPWRITE_USERS_TABLE_ID", "users")
+    log, error = MagicMock(), MagicMock()
+    store = type(
+        "Store",
+        (),
+        {"list_users": AsyncMock(return_value={"users": [], "next_cursor": None, "page_size": 1})},
+    )()
+    with (
+        patch(
+            "src.main.get_authenticated_account",
+            new=AsyncMock(return_value={"$id": "admin-1", "email": "admin@yav.test", "emailVerification": True}),
+        ),
+        patch("src.main.ensure_user_profile", new=AsyncMock(return_value={"plan": "free"})),
+        patch("src.main.AppwriteAdminStore", return_value=store) as store_class,
+    ):
+        result = await _execute_request(
+            {"action": "admin_list_users", "pageSize": 1},
+            "runtime-key",
+            "admin-1",
+            "runtime-jwt",
+            diagnostic_log=log,
+            diagnostic_error_log=error,
+        )
+
+    assert result["users"] == []
+    start_log = log.call_args.args[0]
+    assert "admin action=admin_list_users" in start_log
+    assert "database_id=yav users_table_id=users actor_user_id=admin-1" in start_log
+    assert "correlation_id=" in start_log
+    for sensitive_value in ("admin@yav.test", "runtime-key", "runtime-jwt"):
+        assert sensitive_value not in start_log
+    error.assert_not_called()
+    assert callable(store_class.call_args.kwargs["diagnostic_log"])
+    assert callable(store_class.call_args.kwargs["diagnostic_error_log"])
 
 
 @pytest.mark.asyncio

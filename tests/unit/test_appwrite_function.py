@@ -35,6 +35,7 @@ def _context(payload, headers=None):
         req=SimpleNamespace(body_json=payload, headers=headers or {}),
         res=SimpleNamespace(json=lambda response, status=200: (response, status)),
         log=MagicMock(),
+        error=MagicMock(),
     )
 
 

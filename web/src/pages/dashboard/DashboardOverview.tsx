@@ -6,7 +6,7 @@
 
 import { Link } from 'react-router-dom';
 import { useEffect, useState } from 'react';
-import { Plus, ArrowRight, ArrowUp, Shield, Clock, CheckCircle, FileText, Image, AudioWaveform, Video, Hand } from 'lucide-react';
+import { Plus, ArrowRight, ArrowUp, Shield, Clock, CheckCircle, FileText, Hand } from 'lucide-react';
 import { Card, CardHeader, Button } from '../../components/ui';
 import { getHistoryStats } from '../../lib/checkHistory';
 import { COMPLEX_ANALYSIS_ROUTE } from '../../lib/complexAnalysis';
@@ -215,72 +215,40 @@ export function DashboardOverview() {
         </div>
       </Card>
 
-      {/* Model Accuracy Table */}
+      {/* Model benchmarks */}
       <Card>
         <CardHeader
-          title="Точность моделей"
-          description="Актуальные показатели наших ИИ-детекторов"
+          title="Бенчмарки моделей"
+          description="Ориентировочная точность используемых систем детекции"
         />
-        
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b border-mv-border">
-                <th className="text-left py-3 px-4 text-sm font-medium text-mv-text-secondary">Тип контента</th>
-                <th className="text-left py-3 px-4 text-sm font-medium text-mv-text-secondary">Модель</th>
+                <th className="text-left py-3 px-4 text-sm font-medium text-mv-text-secondary">Система детекции</th>
                 <th className="text-right py-3 px-4 text-sm font-medium text-mv-text-secondary">Точность</th>
               </tr>
             </thead>
             <tbody>
               <tr className="border-b border-mv-border">
-                <td className="py-3 px-4">
-                  <span className="flex items-center gap-2">
-                    <Image className="w-5 h-5 text-mv-text-secondary" />
-                    <span className="text-mv-text">Фото</span>
-                  </span>
-                </td>
-                <td className="py-3 px-4 text-mv-text-secondary">Sightengine GenAI</td>
-                <td className="py-3 px-4 text-right">
-                  <span className="text-mv-real font-semibold">98.3%</span>
-                </td>
+                <td className="py-3 px-4 font-medium text-mv-text">AI or Not</td>
+                <td className="py-3 px-4 text-right text-mv-real font-semibold">98,9%</td>
               </tr>
               <tr className="border-b border-mv-border">
-                <td className="py-3 px-4">
-                  <span className="flex items-center gap-2">
-                    <AudioWaveform className="w-5 h-5 text-mv-text-secondary" />
-                    <span className="text-mv-text">Аудио</span>
-                  </span>
-                </td>
-                <td className="py-3 px-4 text-mv-text-secondary">Resemble Detect</td>
-                <td className="py-3 px-4 text-right">
-                  <span className="text-mv-real font-semibold">99.5%</span>
-                </td>
+                <td className="py-3 px-4 font-medium text-mv-text">Sightengine GenAI</td>
+                <td className="py-3 px-4 text-right text-mv-real font-semibold">98,3%</td>
               </tr>
               <tr className="border-b border-mv-border">
-                <td className="py-3 px-4">
-                  <span className="flex items-center gap-2">
-                    <Video className="w-5 h-5 text-mv-text-secondary" />
-                    <span className="text-mv-text">Видео</span>
-                  </span>
-                </td>
-                <td className="py-3 px-4 text-mv-text-secondary">Gemini 2.5 Pro</td>
-                <td className="py-3 px-4 text-right">
-                  <span className="text-mv-uncertain font-semibold">84.8%</span>
-                </td>
+                <td className="py-3 px-4 font-medium text-mv-text">Resemble DETECT-World</td>
+                <td className="py-3 px-4 text-right text-mv-real font-semibold">99,5%</td>
+              </tr>
+              <tr className="border-b border-mv-border">
+                <td className="py-3 px-4 font-medium text-mv-text">Gemini 3.1 Flash-Lite</td>
+                <td className="py-3 px-4 text-right text-mv-real font-semibold">92,5%</td>
               </tr>
               <tr>
-                <td className="py-3 px-4">
-                  <span className="flex items-center gap-2">
-                    <FileText className="w-5 h-5 text-mv-text-secondary" />
-                    <span className="text-mv-text">Текст</span>
-                  </span>
-                </td>
-                <td className="py-3 px-4 text-mv-text-secondary">
-                  Gemini Text Verification / AIOrNot
-                </td>
-                <td className="py-3 px-4 text-right">
-                  <span className="text-mv-text-secondary font-semibold">—</span>
-                </td>
+                <td className="py-3 px-4 font-medium text-mv-text">Hugging Face</td>
+                <td className="py-3 px-4 text-right text-mv-real font-semibold">94,4%</td>
               </tr>
             </tbody>
           </table>

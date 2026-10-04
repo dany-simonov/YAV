@@ -327,21 +327,8 @@ def configured_system_admin_emails() -> frozenset[str]:
     return frozenset(values)
 
 
-def admin_panel_enabled() -> bool:
-    """Return the explicit server-side switch for administrative access.
-
-    The allowlist alone is deliberately insufficient. This makes a newly
-    deployed admin UI inaccessible until an operator explicitly enables it in
-    the Appwrite Function variables.
-    """
-    configured = os.getenv("ADMIN_PANEL_ENABLED", str(settings.admin_panel_enabled))
-    return configured.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def is_system_admin(account: Mapping[str, Any], runtime_user_id: str) -> bool:
-    """Verify the authenticated Appwrite identity against the email allowlist."""
-    if not admin_panel_enabled():
-        return False
+    """Verify the authenticated Appwrite identity against a server allowlist."""
     if not isinstance(account, Mapping):
         return False
     try:
@@ -349,11 +336,18 @@ def is_system_admin(account: Mapping[str, Any], runtime_user_id: str) -> bool:
     except SubscriptionValidationError:
         return False
     # The account is the server-fetched /account result for the runtime JWT;
-    # never trust request-provided role, email or isAdmin fields.
+    # never trust request-provided role, email or isAdmin fields. An explicit
+    # email list takes priority; deployments without it keep the existing
+    # Appwrite-account-ID allowlist working.
     email = str(account.get("email") or "").strip().lower()
+    allowed_emails = configured_system_admin_emails()
     return (
         str(account.get("$id") or "") == user_id
-        and email in configured_system_admin_emails()
+        and (
+            email in allowed_emails
+            if allowed_emails
+            else user_id in configured_system_admin_ids()
+        )
     )
 
 

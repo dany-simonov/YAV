@@ -1540,6 +1540,11 @@ async def _execute_request(
     admin_list_correlation_id = (
         uuid.uuid4().hex if isinstance(request, AdminListUsersRequest) else ""
     )
+    workspace_correlation_id = (
+        uuid.uuid4().hex
+        if isinstance(request.action, str) and request.action.startswith("workspace_")
+        else ""
+    )
     safe_admin_actor_id = (
         user_id
         if isinstance(user_id, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,36}", user_id)
@@ -1705,7 +1710,30 @@ async def _execute_request(
                 WorkspaceRejectInvitationRequest,
             ),
         ):
-            workspace_store = AppwriteWorkspaceStore(api_key)
+            def _safe_workspace_config_id(value: str) -> str:
+                return (
+                    value
+                    if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value)
+                    else "invalid"
+                )
+
+            _safe_diagnostic_log(
+                diagnostic_log,
+                "workspace "
+                f"action={request.action} "
+                f"database_id={_safe_workspace_config_id(os.getenv('APPWRITE_DATABASE_ID', 'yav'))} "
+                f"workspaces_table_id={_safe_workspace_config_id(os.getenv('APPWRITE_WORKSPACES_TABLE_ID', 'workspaces'))} "
+                f"memberships_table_id={_safe_workspace_config_id(os.getenv('APPWRITE_WORKSPACE_MEMBERSHIPS_TABLE_ID', 'workspace_memberships'))} "
+                f"invitations_table_id={_safe_workspace_config_id(os.getenv('APPWRITE_WORKSPACE_INVITATIONS_TABLE_ID', 'workspace_invitations'))} "
+                f"correlation_id={workspace_correlation_id}",
+            )
+            workspace_store = AppwriteWorkspaceStore(
+                api_key,
+                diagnostic_log=diagnostic_log,
+                diagnostic_error_log=diagnostic_error_log,
+                action=request.action,
+                correlation_id=workspace_correlation_id,
+            )
             try:
                 if isinstance(request, WorkspaceCreateRequest):
                     return await _within_deadline(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,11 @@ from src.validation import EmailCanonicalizationError, canonicalize_email
 _MAX_MEMBERS = 10
 _INVITATION_TTL_DAYS = 7
 _MAX_PAGE_SIZE = 100
+_SAFE_LOG_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_SENSITIVE_LOG_VALUE = re.compile(
+    r"(?i)(?:authorization|x-appwrite-key|cookie|token|jwt|password|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?\S+"
+)
+_EMAIL_IN_MESSAGE = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\b")
 
 
 class WorkspaceError(RuntimeError):
@@ -64,12 +70,19 @@ def _canonical_email(value: Any) -> str:
         ) from exc
 
 
-def _query(function: str, *arguments: Any) -> str:
-    encoded = ",".join(
-        json.dumps(argument, ensure_ascii=False, separators=(",", ":"))
-        for argument in arguments
-    )
-    return f"{function}({encoded})"
+def _tablesdb_query(
+    method: str,
+    *,
+    attribute: str | None = None,
+    values: list[Any] | None = None,
+) -> str:
+    """Serialize a TablesDB query exactly as the current Appwrite SDK does."""
+    query: dict[str, Any] = {"method": method}
+    if attribute is not None:
+        query["attribute"] = attribute
+    if values is not None:
+        query["values"] = values
+    return json.dumps(query, ensure_ascii=False, separators=(",", ":"))
 
 
 def _row_id(namespace: str, *parts: str) -> str:
@@ -80,7 +93,19 @@ def _row_id(namespace: str, *parts: str) -> str:
 class AppwriteWorkspaceStore:
     """Function-key-only workspace operations with transaction-based acceptance."""
 
-    def __init__(self, api_key: str) -> None:
+    TRANSACTION_TTL_SECONDS = 60
+    _MIN_TRANSACTION_TTL_SECONDS = 60
+    _MAX_TRANSACTION_TTL_SECONDS = 3600
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        diagnostic_log: Any = None,
+        diagnostic_error_log: Any = None,
+        action: str = "workspace_unknown",
+        correlation_id: str = "",
+    ) -> None:
         if not isinstance(api_key, str) or not api_key:
             raise WorkspaceError(
                 "workspace_unavailable", "Workspace временно недоступен.", 503
@@ -98,6 +123,20 @@ class AppwriteWorkspaceStore:
         self.checks_table = os.getenv("APPWRITE_CHECKS_TABLE_ID", "checks")
         self.users_table = os.getenv("APPWRITE_USERS_TABLE_ID", "users")
         self.api_key = api_key
+        self._diagnostic_log = diagnostic_log
+        self._diagnostic_error_log = diagnostic_error_log
+        self._action = (
+            action
+            if isinstance(action, str) and re.fullmatch(r"workspace_[a-z_]{1,96}", action)
+            else "workspace_unknown"
+        )
+        self._correlation_id = (
+            correlation_id
+            if isinstance(correlation_id, str)
+            and re.fullmatch(r"[a-f0-9]{32}", correlation_id)
+            else uuid.uuid4().hex
+        )
+        self.transaction_ttl_seconds = self._validated_transaction_ttl()
         if not all(
             (
                 self.endpoint,
@@ -125,23 +164,197 @@ class AppwriteWorkspaceStore:
             "workspace_unavailable", "Workspace временно недоступен.", 503
         )
 
-    async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
+    @classmethod
+    def _validated_transaction_ttl(cls) -> int:
+        ttl = cls.TRANSACTION_TTL_SECONDS
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or not (
+                cls._MIN_TRANSACTION_TTL_SECONDS
+                <= ttl
+                <= cls._MAX_TRANSACTION_TTL_SECONDS
+            )
+        ):
+            raise cls._unavailable()
+        return ttl
+
+    def _observe(self, message: str, *, error: bool = False) -> None:
+        sink = self._diagnostic_error_log if error else self._diagnostic_log
+        if not callable(sink):
+            return
+        try:
+            sink(message)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _safe_token(value: Any, default: str = "unknown") -> str:
+        return value if isinstance(value, str) and _SAFE_LOG_TOKEN.fullmatch(value) else default
+
+    def _resource(self, url: str) -> str:
+        for table, base_url in (
+            ("workspaces", self._workspaces_url),
+            ("workspace_memberships", self._memberships_url),
+            ("workspace_invitations", self._invitations_url),
+            ("checks", self._checks_url),
+            ("users", self._users_url),
+        ):
+            if url.startswith(base_url):
+                return f"{table}.rows"
+        if url.startswith(f"{self.endpoint}/tablesdb/transactions"):
+            return "tablesdb.transactions"
+        return "unknown"
+
+    @staticmethod
+    def _query_type(query: str) -> str:
+        try:
+            body = json.loads(query)
+        except (TypeError, ValueError):
+            return "invalid"
+        return (
+            body["method"]
+            if isinstance(body, Mapping)
+            and isinstance(body.get("method"), str)
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", body["method"])
+            else "invalid"
+        )
+
+    @staticmethod
+    def _sanitize_message(value: Any, sensitive_values: tuple[str, ...] = ()) -> str:
+        if not isinstance(value, str):
+            return "omitted"
+        sanitized = value.replace("\r", " ").replace("\n", " ")
+        for sensitive_value in sensitive_values:
+            if sensitive_value:
+                sanitized = sanitized.replace(sensitive_value, "<redacted>")
+        sanitized = _SENSITIVE_LOG_VALUE.sub("<redacted-sensitive>", sanitized)
+        sanitized = _EMAIL_IN_MESSAGE.sub("<redacted-email>", sanitized)
+        return sanitized[:300]
+
+    def _appwrite_error_metadata(self, response: Any) -> tuple[str, str, str]:
+        error_type, error_code, message = "unknown", "unknown", "omitted"
+        try:
+            body = response.json()
+        except (AttributeError, TypeError, ValueError):
+            return error_type, error_code, message
+        if not isinstance(body, Mapping):
+            return error_type, error_code, message
+        error_type = self._safe_token(body.get("type"))
+        code = body.get("code")
+        error_code = str(code) if isinstance(code, (int, str)) else "unknown"
+        message = self._sanitize_message(body.get("message"), (self.api_key,))
+        return error_type, error_code, message
+
+    @staticmethod
+    def _category(status_code: int | None, error_type: str) -> str:
+        if status_code in {401, 403}:
+            return "permission_or_scope_denied"
+        return {
+            "table_not_found": "table_not_found",
+            "attribute_not_found": "missing_column",
+            "column_not_found": "missing_column",
+            "index_not_found": "missing_index",
+            "general_query_invalid": "invalid_query",
+            "query_invalid": "invalid_query",
+        }.get(error_type, "unknown")
+
+    def _observe_error(
+        self,
+        *,
+        operation: str,
+        category: str,
+        exception_class: str,
+        status_code: int | None = None,
+        appwrite_type: str = "unknown",
+        appwrite_code: str = "unknown",
+        appwrite_message: str = "omitted",
+    ) -> None:
+        self._observe(
+            "workspace_appwrite_error "
+            f"correlation_id={self._correlation_id} action={self._action} "
+            f"operation={operation} category={category} "
+            f"upstream_status={status_code if status_code is not None else 'none'} "
+            f"appwrite_type={appwrite_type} appwrite_code={appwrite_code} "
+            f"appwrite_message={appwrite_message} exception_class={exception_class}",
+            error=True,
+        )
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        operation: str,
+        query_types: tuple[str, ...] = (),
+        **kwargs: Any,
+    ) -> Any:
         """Execute one TablesDB request without exposing transport details."""
+        safe_method = method.upper() if method.lower() in {"get", "post", "patch"} else "unknown"
+        self._observe(
+            "workspace_appwrite_request "
+            f"correlation_id={self._correlation_id} action={self._action} "
+            f"operation={operation} method={safe_method} resource={self._resource(url)} "
+            f"query_types={','.join(query_types) or 'none'}"
+        )
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                return await getattr(client, method)(url, **kwargs)
-        except httpx.HTTPError as exc:
+                response = await getattr(client, method)(url, **kwargs)
+        except httpx.TimeoutException as exc:
+            self._observe_error(
+                operation=operation,
+                category="timeout",
+                exception_class=type(exc).__name__,
+            )
             raise self._unavailable() from exc
+        except httpx.TransportError as exc:
+            self._observe_error(
+                operation=operation,
+                category="transport_error",
+                exception_class=type(exc).__name__,
+            )
+            raise self._unavailable() from exc
+        except httpx.HTTPError as exc:
+            self._observe_error(
+                operation=operation,
+                category="transport_error",
+                exception_class=type(exc).__name__,
+            )
+            raise self._unavailable() from exc
+        status_code = getattr(response, "status_code", None)
+        if isinstance(status_code, int) and status_code >= 400:
+            error_type, error_code, error_message = self._appwrite_error_metadata(response)
+            self._observe_error(
+                operation=operation,
+                category=self._category(status_code, error_type),
+                exception_class="HTTPResponse",
+                status_code=status_code,
+                appwrite_type=error_type,
+                appwrite_code=error_code,
+                appwrite_message=error_message,
+            )
+        return response
 
-    @classmethod
-    def _json_object(cls, response: Any) -> Mapping[str, Any]:
+    def _json_object(self, response: Any, *, operation: str) -> Mapping[str, Any]:
         """Decode a required Appwrite object response as infrastructure data."""
         try:
             body = response.json()
         except (AttributeError, TypeError, ValueError) as exc:
-            raise cls._unavailable() from exc
+            self._observe_error(
+                operation=operation,
+                category="malformed_response",
+                exception_class=type(exc).__name__,
+                status_code=getattr(response, "status_code", None),
+            )
+            raise self._unavailable() from exc
         if not isinstance(body, Mapping):
-            raise cls._unavailable()
+            self._observe_error(
+                operation=operation,
+                category="malformed_response",
+                exception_class="WorkspaceError",
+                status_code=getattr(response, "status_code", None),
+            )
+            raise self._unavailable()
         return body
 
     def _rows_url(self, table: str) -> str:
@@ -221,13 +434,13 @@ class AppwriteWorkspaceStore:
         user_id = validate_user_id(user_id)
         page_size, cursor = self._page(page_size, cursor)
         queries = [
-            _query("equal", "user_id", [user_id]),
-            _query("equal", "status", ["active"]),
-            _query("limit", page_size),
-            _query("orderDesc", "$sequence"),
+            _tablesdb_query("equal", attribute="user_id", values=[user_id]),
+            _tablesdb_query("equal", attribute="status", values=["active"]),
+            _tablesdb_query("limit", values=[page_size]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
         ]
         if cursor:
-            queries.append(_query("cursorAfter", cursor))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor]))
         memberships = await self._list(
             self._memberships_url,
             queries,
@@ -262,10 +475,10 @@ class AppwriteWorkspaceStore:
         body = await self._list(
             self._memberships_url,
             [
-                _query("equal", "workspace_id", [workspace_id]),
-                _query("equal", "status", ["active"]),
-                _query("limit", _MAX_MEMBERS + 1),
-                _query("orderAsc", "$createdAt"),
+                _tablesdb_query("equal", attribute="workspace_id", values=[workspace_id]),
+                _tablesdb_query("equal", attribute="status", values=["active"]),
+                _tablesdb_query("limit", values=[_MAX_MEMBERS + 1]),
+                _tablesdb_query("orderAsc", attribute="$createdAt"),
             ],
         )
         rows = body.get("rows")
@@ -290,12 +503,12 @@ class AppwriteWorkspaceStore:
         await self._require_owner(owner_user_id, workspace_id)
         page_size, cursor = self._page(page_size, cursor)
         queries = [
-            _query("equal", "workspace_id", [workspace_id]),
-            _query("limit", page_size),
-            _query("orderDesc", "$sequence"),
+            _tablesdb_query("equal", attribute="workspace_id", values=[workspace_id]),
+            _tablesdb_query("limit", values=[page_size]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
         ]
         if cursor:
-            queries.append(_query("cursorAfter", cursor))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor]))
         body = await self._list(
             self._invitations_url,
             queries,
@@ -319,15 +532,24 @@ class AppwriteWorkspaceStore:
         access = await self.resolve_workspace_access(actor_user_id, workspace_id)
         page_size, cursor_after = self._page(page_size, cursor_after)
         queries = [
-            _query("equal", "workspace_id", [access.workspace_id]),
+            _tablesdb_query(
+                "equal", attribute="workspace_id", values=[access.workspace_id]
+            ),
         ]
         if access.role == "member":
-            queries.append(_query("equal", "user_id", [access.actor_user_id]))
+            queries.append(
+                _tablesdb_query(
+                    "equal", attribute="user_id", values=[access.actor_user_id]
+                )
+            )
         queries.extend(
-            [_query("limit", page_size), _query("orderDesc", "$sequence")]
+            [
+                _tablesdb_query("limit", values=[page_size]),
+                _tablesdb_query("orderDesc", attribute="$sequence"),
+            ]
         )
         if cursor_after:
-            queries.append(_query("cursorAfter", cursor_after))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor_after]))
         body = await self._list(self._checks_url, queries)
         rows = body.get("rows")
         if not isinstance(rows, list):
@@ -350,13 +572,13 @@ class AppwriteWorkspaceStore:
         email = _canonical_email(user_email)
         page_size, cursor = self._page(page_size, cursor)
         queries = [
-            _query("equal", "email", [email]),
-            _query("equal", "status", ["pending"]),
-            _query("limit", page_size),
-            _query("orderDesc", "$sequence"),
+            _tablesdb_query("equal", attribute="email", values=[email]),
+            _tablesdb_query("equal", attribute="status", values=["pending"]),
+            _tablesdb_query("limit", values=[page_size]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
         ]
         if cursor:
-            queries.append(_query("cursorAfter", cursor))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor]))
         body = await self._list(
             self._invitations_url,
             queries,
@@ -642,9 +864,9 @@ class AppwriteWorkspaceStore:
         body = await self._list(
             self._memberships_url,
             [
-                _query("equal", "workspace_id", [workspace_id]),
-                _query("equal", "status", ["active"]),
-                _query("limit", _MAX_MEMBERS + 1),
+                _tablesdb_query("equal", attribute="workspace_id", values=[workspace_id]),
+                _tablesdb_query("equal", attribute="status", values=["active"]),
+                _tablesdb_query("limit", values=[_MAX_MEMBERS + 1]),
             ],
         )
         rows = body.get("rows")
@@ -742,12 +964,13 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "post",
             f"{self.endpoint}/tablesdb/transactions",
+            operation="workspace.transaction.create",
             headers=self._headers,
-            json={"ttl": 30},
+            json={"ttl": self.transaction_ttl_seconds},
         )
         if response.status_code not in (200, 201):
             raise self._unavailable()
-        body = self._json_object(response)
+        body = self._json_object(response, operation="workspace.transaction.create")
         transaction_id = body.get("$id") if isinstance(body, dict) else None
         if not isinstance(transaction_id, str) or not transaction_id:
             raise self._unavailable()
@@ -757,6 +980,7 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "patch",
             f"{self.endpoint}/tablesdb/transactions/{transaction_id}",
+            operation="workspace.transaction.commit",
             headers=self._headers,
             json={"commit": True},
         )
@@ -771,6 +995,7 @@ class AppwriteWorkspaceStore:
             await self._request(
                 "patch",
                 f"{self.endpoint}/tablesdb/transactions/{transaction_id}",
+                operation="workspace.transaction.rollback",
                 headers=self._headers,
                 json={"rollback": True},
             )
@@ -783,6 +1008,7 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "patch",
             f"{self._workspaces_url}/{workspace_id}/member_count/increment",
+            operation="workspace.member_count.increment",
             headers=self._headers,
             json={"value": 1, "max": _MAX_MEMBERS, "transactionId": transaction_id},
         )
@@ -791,7 +1017,9 @@ class AppwriteWorkspaceStore:
         if response.status_code == 409:
             return "capacity"
         if response.status_code == 400:
-            error_type = self._json_object(response).get("type")
+            error_type = self._json_object(
+                response, operation="workspace.member_count.increment"
+            ).get("type")
             if error_type in {
                 "row_max_exceeded",
                 "attribute_limit_exceeded",
@@ -806,6 +1034,8 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "get",
             f"{url}/{row_id}",
+            operation="workspace.rows.get",
+            query_types=("transactionId",),
             headers=self._headers,
             params={"transactionId": transaction_id},
         )
@@ -813,7 +1043,7 @@ class AppwriteWorkspaceStore:
             return None
         if response.status_code != 200:
             raise self._unavailable()
-        return self._json_object(response)
+        return self._json_object(response, operation="workspace.rows.get")
 
     async def _stage_create(
         self, url: str, row_id: str, data: Mapping[str, Any], transaction_id: str
@@ -821,6 +1051,7 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "post",
             url,
+            operation="workspace.rows.stage_create",
             headers=self._headers,
             json={
                 "rowId": row_id,
@@ -838,6 +1069,7 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "patch",
             f"{url}/{row_id}",
+            operation="workspace.rows.stage_patch",
             headers=self._headers,
             json={"data": dict(data), "transactionId": transaction_id},
         )
@@ -848,6 +1080,7 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "post",
             url,
+            operation="workspace.rows.create",
             headers=self._headers,
             json={"rowId": row_id, "data": dict(data), "permissions": []},
         )
@@ -862,6 +1095,7 @@ class AppwriteWorkspaceStore:
         response = await self._request(
             "patch",
             f"{url}/{row_id}",
+            operation="workspace.rows.patch",
             headers=self._headers,
             json={"data": dict(data)},
         )
@@ -869,23 +1103,33 @@ class AppwriteWorkspaceStore:
             raise self._unavailable()
 
     async def _get_optional(self, url: str, row_id: str) -> Mapping[str, Any] | None:
-        response = await self._request("get", f"{url}/{row_id}", headers=self._headers)
+        response = await self._request(
+            "get",
+            f"{url}/{row_id}",
+            operation="workspace.rows.get",
+            headers=self._headers,
+        )
         if response.status_code == 404:
             return None
         if response.status_code != 200:
             raise self._unavailable()
-        return self._json_object(response)
+        return self._json_object(response, operation="workspace.rows.get")
 
     async def _list(self, url: str, queries: list[str]) -> Mapping[str, Any]:
         response = await self._request(
             "get",
             url,
+            operation="workspace.rows.list",
+            query_types=tuple(self._query_type(query) for query in queries),
             headers=self._headers,
-            params=[("queries[]", query) for query in queries],
+            params=[
+                (f"queries[{index}]", query)
+                for index, query in enumerate(queries)
+            ],
         )
         if response.status_code != 200:
             raise self._unavailable()
-        return self._json_object(response)
+        return self._json_object(response, operation="workspace.rows.list")
 
     @staticmethod
     def _is_expired(value: Any) -> bool:

@@ -117,12 +117,15 @@ def _resource_config() -> tuple[str, str, str, str, str]:
     return endpoint, project_id, database_id, users_table_id, checks_table_id
 
 
-def _query(function: str, *arguments: Any) -> str:
-    encoded = ",".join(
-        json.dumps(argument, ensure_ascii=False, separators=(",", ":"))
-        for argument in arguments
-    )
-    return f"{function}({encoded})"
+def _tablesdb_query(
+    method: str, *, attribute: str | None = None, values: list[Any] | None = None
+) -> str:
+    query: dict[str, Any] = {"method": method}
+    if attribute is not None:
+        query["attribute"] = attribute
+    if values is not None:
+        query["values"] = values
+    return json.dumps(query, ensure_ascii=False, separators=(",", ":"))
 
 
 def check_history_response(
@@ -788,13 +791,13 @@ class AppwriteCheckHistoryStore:
         self, actor_user_id: str, *, page_size: int = 25, cursor_after: str | None = None
     ) -> dict[str, Any]:
         queries = [
-            _query("equal", "user_id", [actor_user_id]),
-            _query("isNull", "workspace_id"),
-            _query("limit", page_size),
-            _query("orderDesc", "$sequence"),
+            _tablesdb_query("equal", attribute="user_id", values=[actor_user_id]),
+            _tablesdb_query("isNull", attribute="workspace_id"),
+            _tablesdb_query("limit", values=[page_size]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
         ]
         if cursor_after:
-            queries.append(_query("cursorAfter", cursor_after))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor_after]))
         body = await self._list(queries)
         rows = body.get("rows")
         if not isinstance(rows, list):
@@ -864,7 +867,7 @@ class AppwriteCheckHistoryStore:
                 response = await client.get(
                     self._checks_url,
                     headers=self._headers,
-                    params=[("queries[]", query) for query in queries],
+                    params=[(f"queries[{index}]", query) for index, query in enumerate(queries)],
                 )
         except httpx.HTTPError as exc:
             raise CheckHistoryError(

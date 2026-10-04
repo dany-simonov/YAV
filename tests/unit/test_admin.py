@@ -140,6 +140,22 @@ async def test_admin_list_uses_current_tablesdb_query_wire_format(
 
 
 @pytest.mark.asyncio
+async def test_admin_active_reservations_uses_indexed_tablesdb_queries(monkeypatch):
+    store = _store(monkeypatch)
+    client = _client(get=[_response(200, {"rows": []})])
+
+    with patch("src.admin.httpx.AsyncClient", return_value=client):
+        await store._active_reservations("user-1")
+
+    assert client.get.await_args.kwargs["params"] == [
+        ("queries[0]", '{"method":"equal","attribute":"user_id","values":["user-1"]}'),
+        ("queries[1]", '{"method":"equal","attribute":"state","values":["reserved"]}'),
+        ("queries[2]", '{"method":"limit","values":[50]}'),
+        ("queries[3]", '{"method":"orderDesc","attribute":"$createdAt"}'),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_admin_list_observability_is_safe_and_classifies_appwrite_failure(monkeypatch):
     store = _store(monkeypatch)
     log, error = MagicMock(), MagicMock()
@@ -542,17 +558,18 @@ async def test_audit_list_is_paginated_and_target_filtered(monkeypatch):
     )
 
     with patch("src.admin.httpx.AsyncClient", return_value=client):
-        result = await store.list_audit_events(page_size=1, target_user_id="target-1")
+        result = await store.list_audit_events(
+            page_size=1, cursor="cursor-1", target_user_id="target-1"
+        )
 
     assert result["events"][0]["action"] == "subscription_changed"
     assert result["next_cursor"] == "event-1"
-    queries = [
-        value
-        for key, value in client.get.await_args.kwargs["params"]
-        if key == "queries[]"
+    assert client.get.await_args.kwargs["params"] == [
+        ("queries[0]", '{"method":"limit","values":[1]}'),
+        ("queries[1]", '{"method":"orderDesc","attribute":"$sequence"}'),
+        ("queries[2]", '{"method":"cursorAfter","values":["cursor-1"]}'),
+        ("queries[3]", '{"method":"equal","attribute":"target_user_id","values":["target-1"]}'),
     ]
-    assert 'equal("target_user_id",["target-1"])' in queries
-    assert 'orderDesc("$sequence")' in queries
 
 
 @pytest.mark.asyncio

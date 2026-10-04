@@ -1,5 +1,6 @@
 """Workspace server-side authorization and transaction coverage."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -36,6 +37,10 @@ def _http_client(**operations):
     return client
 
 
+def _query_objects(queries):
+    return [json.loads(query) for query in queries]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "operation", ["get", "create", "patch", "list", "transaction_create", "commit"]
@@ -65,6 +70,55 @@ async def test_workspace_http_timeouts_use_one_unavailable_contract(monkeypatch,
         "workspace_unavailable",
         503,
     )
+
+
+@pytest.mark.parametrize("ttl", [59, 3601])
+def test_workspace_rejects_out_of_range_transaction_ttl_before_http(monkeypatch, ttl):
+    monkeypatch.setattr(AppwriteWorkspaceStore, "TRANSACTION_TTL_SECONDS", ttl)
+    client = _http_client()
+
+    with patch("src.workspaces.httpx.AsyncClient", return_value=client), pytest.raises(
+        WorkspaceError
+    ) as raised:
+        _store(monkeypatch)
+
+    assert (raised.value.code, raised.value.status_code) == (
+        "workspace_unavailable",
+        503,
+    )
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ttl", [60, 3600])
+async def test_workspace_transaction_ttl_uses_valid_appwrite_value(monkeypatch, ttl):
+    monkeypatch.setattr(AppwriteWorkspaceStore, "TRANSACTION_TTL_SECONDS", ttl)
+    created = MagicMock(status_code=201)
+    created.json.return_value = {"$id": "transaction-1"}
+    client = _http_client(post=created)
+    store = _store(monkeypatch)
+
+    with patch("src.workspaces.httpx.AsyncClient", return_value=client):
+        assert await store._create_transaction() == "transaction-1"
+
+    assert client.post.await_args.kwargs["json"] == {"ttl": ttl}
+
+
+@pytest.mark.asyncio
+async def test_workspace_create_uses_valid_transaction_ttl(monkeypatch):
+    created = MagicMock(status_code=201)
+    created.json.return_value = {"$id": "transaction-1"}
+    staged = MagicMock(status_code=201)
+    committed = MagicMock(status_code=200)
+    client = _http_client(patch=committed)
+    client.post = AsyncMock(side_effect=[created, staged, staged])
+    store = _store(monkeypatch)
+
+    with patch("src.workspaces.httpx.AsyncClient", return_value=client):
+        result = await store.create_workspace("owner-1", "Команда")
+
+    assert result["role"] == "owner"
+    assert client.post.await_args_list[0].kwargs["json"] == {"ttl": 60}
 
 
 @pytest.mark.asyncio
@@ -101,6 +155,93 @@ async def test_workspace_malformed_success_json_is_controlled(monkeypatch):
         "workspace_unavailable",
         503,
     )
+
+
+@pytest.mark.asyncio
+async def test_workspace_observability_is_safe_and_classifies_list_failure(monkeypatch):
+    log, error = MagicMock(), MagicMock()
+    store = _store(monkeypatch)
+    store._diagnostic_log = log
+    store._diagnostic_error_log = error
+    store._action = "workspace_get"
+    store._correlation_id = "a" * 32
+    response = MagicMock(status_code=400)
+    response.json.return_value = {
+        "type": "general_query_invalid",
+        "code": 400,
+        "message": "Invalid query for member@example.test; Authorization: Bearer super-secret",
+    }
+    client = _http_client(get=response)
+
+    with patch("src.workspaces.httpx.AsyncClient", return_value=client), pytest.raises(
+        WorkspaceError
+    ):
+        await store._list(
+            store._memberships_url,
+            ['{"method":"equal","attribute":"email","values":["member@example.test"]}'],
+        )
+
+    request_log = log.call_args.args[0]
+    error_log = error.call_args.args[0]
+    assert "action=workspace_get" in request_log
+    assert "operation=workspace.rows.list" in request_log
+    assert "method=GET resource=workspace_memberships.rows" in request_log
+    assert "query_types=equal" in request_log
+    assert "member@example.test" not in request_log
+    assert "correlation_id=" + "a" * 32 in request_log
+    assert client.get.await_args.kwargs["params"] == [
+        ("queries[0]", '{"method":"equal","attribute":"email","values":["member@example.test"]}')
+    ]
+    assert "category=invalid_query" in error_log
+    assert "upstream_status=400" in error_log
+    assert "appwrite_type=general_query_invalid appwrite_code=400" in error_log
+    assert "<redacted-email>" in error_log
+    for sensitive_value in ("member@example.test", "super-secret", "runtime-key", "Bearer"):
+        assert sensitive_value not in error_log
+
+
+@pytest.mark.asyncio
+async def test_workspace_action_start_log_and_callbacks_are_safe(monkeypatch):
+    monkeypatch.setenv("APPWRITE_DATABASE_ID", "yav")
+    monkeypatch.setenv("APPWRITE_WORKSPACES_TABLE_ID", "workspaces")
+    monkeypatch.setenv("APPWRITE_WORKSPACE_MEMBERSHIPS_TABLE_ID", "workspace_memberships")
+    monkeypatch.setenv("APPWRITE_WORKSPACE_INVITATIONS_TABLE_ID", "workspace_invitations")
+    log, error = MagicMock(), MagicMock()
+    store = type(
+        "Store",
+        (),
+        {"get_my_workspaces": AsyncMock(return_value={"workspaces": [], "next_cursor": None, "page_size": 1})},
+    )()
+
+    with (
+        patch(
+            "src.main.get_authenticated_account",
+            new=AsyncMock(return_value={"$id": "member-1", "email": "member@example.test", "emailVerification": True}),
+        ),
+        patch("src.main.ensure_user_profile", new=AsyncMock(return_value={})),
+        patch("src.main.AppwriteWorkspaceStore", return_value=store) as store_class,
+    ):
+        result = await _execute_request(
+            {"action": "workspace_get", "pageSize": 1},
+            "runtime-key",
+            "member-1",
+            "runtime-jwt",
+            diagnostic_log=log,
+            diagnostic_error_log=error,
+        )
+
+    assert result["workspaces"] == []
+    start_log = log.call_args.args[0]
+    assert "workspace action=workspace_get" in start_log
+    assert "database_id=yav workspaces_table_id=workspaces" in start_log
+    assert "memberships_table_id=workspace_memberships" in start_log
+    assert "invitations_table_id=workspace_invitations" in start_log
+    assert "correlation_id=" in start_log
+    for sensitive_value in ("member@example.test", "runtime-key", "runtime-jwt"):
+        assert sensitive_value not in start_log
+    error.assert_not_called()
+    assert callable(store_class.call_args.kwargs["diagnostic_log"])
+    assert callable(store_class.call_args.kwargs["diagnostic_error_log"])
 
 
 @pytest.mark.asyncio
@@ -465,10 +606,10 @@ async def test_owner_history_queries_only_requested_workspace_and_returns_all_ac
 
     result = await store.list_history("owner-1", "workspace-a", page_size=2)
 
-    queries = store._list.await_args.args[1]
-    assert 'equal("workspace_id",["workspace-a"])' in queries
-    assert not any('equal("user_id"' in query for query in queries)
-    assert 'orderDesc("$sequence")' in queries
+    queries = _query_objects(store._list.await_args.args[1])
+    assert {"method": "equal", "attribute": "workspace_id", "values": ["workspace-a"]} in queries
+    assert not any(query.get("attribute") == "user_id" for query in queries)
+    assert {"method": "orderDesc", "attribute": "$sequence"} in queries
     assert result["checks"][0]["user_id"] == "member-a"
     assert result["checks"][1]["user_id"] == "member-b"
     assert "$permissions" not in result["checks"][0]
@@ -503,10 +644,10 @@ async def test_member_history_queries_only_actor_rows_in_requested_workspace(mon
         "member-a", "workspace-a", page_size=1, cursor_after="check-before"
     )
 
-    queries = store._list.await_args.args[1]
-    assert 'equal("workspace_id",["workspace-a"])' in queries
-    assert 'equal("user_id",["member-a"])' in queries
-    assert 'cursorAfter("check-before")' in queries
+    queries = _query_objects(store._list.await_args.args[1])
+    assert {"method": "equal", "attribute": "workspace_id", "values": ["workspace-a"]} in queries
+    assert {"method": "equal", "attribute": "user_id", "values": ["member-a"]} in queries
+    assert {"method": "cursorAfter", "values": ["check-before"]} in queries
     assert result["checks"] == [
         {
             "check_id": "check-1",
@@ -875,9 +1016,12 @@ async def test_invitation_list_uses_cursor_pagination(monkeypatch):
     )
 
     assert result["next_cursor"] == "invite-1"
-    queries = store._list.await_args.args[1]
-    assert 'orderDesc("$sequence")' in queries
-    assert 'cursorAfter("cursor-1")' in queries
+    assert _query_objects(store._list.await_args.args[1]) == [
+        {"method": "equal", "attribute": "workspace_id", "values": ["workspace-1"]},
+        {"method": "limit", "values": [1]},
+        {"method": "orderDesc", "attribute": "$sequence"},
+        {"method": "cursorAfter", "values": ["cursor-1"]},
+    ]
 
 
 @pytest.mark.asyncio
@@ -896,11 +1040,21 @@ async def test_workspace_history_sequence_query_keeps_role_scope_and_cursor(monk
 
     await store.list_history("member-a", "workspace-a", page_size=1, cursor_after="check-1")
 
-    queries = store._list.await_args.args[1]
-    assert 'equal("workspace_id",["workspace-a"])' in queries
-    assert ('equal("user_id",["member-a"])' in queries) is (role == "member")
-    assert 'orderDesc("$sequence")' in queries
-    assert 'cursorAfter("check-1")' in queries
+    expected = [
+        {"method": "equal", "attribute": "workspace_id", "values": ["workspace-a"]},
+    ]
+    if role == "member":
+        expected.append(
+            {"method": "equal", "attribute": "user_id", "values": ["member-a"]}
+        )
+    expected.extend(
+        [
+            {"method": "limit", "values": [1]},
+            {"method": "orderDesc", "attribute": "$sequence"},
+            {"method": "cursorAfter", "values": ["check-1"]},
+        ]
+    )
+    assert _query_objects(store._list.await_args.args[1]) == expected
 
 
 @pytest.mark.asyncio
@@ -916,13 +1070,42 @@ async def test_workspace_and_invitation_lists_use_sequence_cursor_queries(monkey
     await store.list_invitations("owner-1", "workspace-1", page_size=1, cursor="invite-2")
     owner_invitation_queries = store._list.await_args.args[1]
 
-    for queries, cursor in (
-        (membership_queries, "membership-1"),
-        (my_invitation_queries, "invite-1"),
-        (owner_invitation_queries, "invite-2"),
-    ):
-        assert 'orderDesc("$sequence")' in queries
-        assert f'cursorAfter("{cursor}")' in queries
+    assert _query_objects(membership_queries) == [
+        {"method": "equal", "attribute": "user_id", "values": ["member-1"]},
+        {"method": "equal", "attribute": "status", "values": ["active"]},
+        {"method": "limit", "values": [1]},
+        {"method": "orderDesc", "attribute": "$sequence"},
+        {"method": "cursorAfter", "values": ["membership-1"]},
+    ]
+    assert _query_objects(my_invitation_queries) == [
+        {"method": "equal", "attribute": "email", "values": ["member@example.test"]},
+        {"method": "equal", "attribute": "status", "values": ["pending"]},
+        {"method": "limit", "values": [1]},
+        {"method": "orderDesc", "attribute": "$sequence"},
+        {"method": "cursorAfter", "values": ["invite-1"]},
+    ]
+    assert _query_objects(owner_invitation_queries) == [
+        {"method": "equal", "attribute": "workspace_id", "values": ["workspace-1"]},
+        {"method": "limit", "values": [1]},
+        {"method": "orderDesc", "attribute": "$sequence"},
+        {"method": "cursorAfter", "values": ["invite-2"]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workspace_member_list_uses_multiple_indexed_json_queries(monkeypatch):
+    store = _store(monkeypatch)
+    store._require_owner = AsyncMock()
+    store._list = AsyncMock(return_value={"rows": []})
+
+    await store.list_members("owner-1", "workspace-1")
+
+    assert _query_objects(store._list.await_args.args[1]) == [
+        {"method": "equal", "attribute": "workspace_id", "values": ["workspace-1"]},
+        {"method": "equal", "attribute": "status", "values": ["active"]},
+        {"method": "limit", "values": [11]},
+        {"method": "orderAsc", "attribute": "$createdAt"},
+    ]
 
 
 @pytest.mark.asyncio

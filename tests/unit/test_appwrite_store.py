@@ -793,11 +793,16 @@ async def test_personal_history_uses_server_side_actor_and_null_workspace_filter
         "next_cursor": "personal-1",
         "page_size": 1,
     }
-    queries = [value for name, value in client.get.await_args.kwargs["params"] if name == "queries[]"]
-    assert 'equal("user_id",["user-a"])' in queries
-    assert 'isNull("workspace_id")' in queries
-    assert 'orderDesc("$sequence")' in queries
-    assert 'cursorAfter("before-1")' in queries
+    assert client.get.await_args.kwargs["params"] == [
+        (
+            "queries[0]",
+            '{"method":"equal","attribute":"user_id","values":["user-a"]}',
+        ),
+        ("queries[1]", '{"method":"isNull","attribute":"workspace_id"}'),
+        ("queries[2]", '{"method":"limit","values":[1]}'),
+        ("queries[3]", '{"method":"orderDesc","attribute":"$sequence"}'),
+        ("queries[4]", '{"method":"cursorAfter","values":["before-1"]}'),
+    ]
     assert "$permissions" not in result["checks"][0]
     assert "workspace_id" not in result["checks"][0]
 
@@ -849,13 +854,16 @@ async def test_personal_history_sequence_pagination_handles_equal_timestamps_wit
     assert (first["next_cursor"], second["next_cursor"], third["next_cursor"]) == (
         "check-4", "check-2", None
     )
-    all_queries = [
-        value
+    query_pages = [
+        [json.loads(value) for _name, value in call.kwargs["params"]]
         for call in client.get.await_args_list
-        for name, value in call.kwargs["params"]
-        if name == "queries[]"
     ]
-    assert all('orderDesc("$sequence")' in all_queries[index : index + 4] for index in (0, 4, 9))
+    assert all(
+        {"method": "orderDesc", "attribute": "$sequence"} in queries
+        for queries in query_pages
+    )
+    assert query_pages[1][-1] == {"method": "cursorAfter", "values": ["check-4"]}
+    assert query_pages[2][-1] == {"method": "cursorAfter", "values": ["check-2"]}
 
 
 @pytest.mark.asyncio

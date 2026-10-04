@@ -65,6 +65,21 @@ def _query(function: str, *arguments: Any) -> str:
     return f"{function}({','.join(json.dumps(argument, ensure_ascii=False, separators=(',', ':')) for argument in arguments)})"
 
 
+def _tablesdb_query(
+    method: str,
+    *,
+    attribute: str | None = None,
+    values: list[Any] | None = None,
+) -> str:
+    """Serialize a TablesDB query exactly as the current Appwrite SDK does."""
+    query: dict[str, Any] = {"method": method}
+    if attribute is not None:
+        query["attribute"] = attribute
+    if values is not None:
+        query["values"] = values
+    return json.dumps(query, ensure_ascii=False, separators=(",", ":"))
+
+
 def _bounded_json(value: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
@@ -176,19 +191,34 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             raise SubscriptionValidationError("invalid page size")
         if cursor is not None:
             cursor = validate_user_id(cursor)
-        queries = [_query("limit", page_size), _query("orderDesc", "$sequence")]
+        queries = [
+            _tablesdb_query("limit", values=[page_size]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
+        ]
         query_types = ["limit", "orderDesc"]
         if cursor:
-            queries.append(_query("cursorAfter", cursor))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor]))
             query_types.append("cursorAfter")
         if search:
             if not isinstance(search, str) or len(search) > 320:
                 raise SubscriptionValidationError("invalid user search")
             if "@" in search:
-                queries.append(_query("equal", "email", [search.strip().lower()]))
+                queries.append(
+                    _tablesdb_query(
+                        "equal",
+                        attribute="email",
+                        values=[search.strip().lower()],
+                    )
+                )
                 query_types.append("equal:email")
             else:
-                queries.append(_query("equal", "$id", [validate_user_id(search)]))
+                queries.append(
+                    _tablesdb_query(
+                        "equal",
+                        attribute="$id",
+                        values=[validate_user_id(search)],
+                    )
+                )
                 query_types.append("equal:$id")
         response = await self._list_rows(
             self._rows_url,
@@ -196,6 +226,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             operation="admin_list_users.rows_list",
             resource="users.rows",
             query_types=tuple(query_types),
+            tablesdb_query_objects=True,
         )
         rows = response.get("rows")
         if not isinstance(rows, list):
@@ -1249,6 +1280,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         operation: str = "admin.rows_list",
         resource: str = "table.rows",
         query_types: tuple[str, ...] = (),
+        tablesdb_query_objects: bool = False,
     ) -> dict[str, Any]:
         if operation == "admin_list_users.rows_list":
             self._observe(
@@ -1261,7 +1293,11 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                 response = await client.get(
                     url,
                     headers=self._headers,
-                    params=[("queries[]", query) for query in queries],
+                    params=(
+                        [(f"queries[{index}]", query) for index, query in enumerate(queries)]
+                        if tablesdb_query_objects
+                        else [("queries[]", query) for query in queries]
+                    ),
                 )
         except httpx.TimeoutException as exc:
             self._observe_error(

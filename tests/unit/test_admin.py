@@ -83,14 +83,60 @@ async def test_admin_list_is_paginated_and_returns_lightweight_summaries(monkeyp
         "updated_at": "2026-01-03T00:00:00+00:00",
     }
     assert "secret" not in result["users"][0]
-    queries = [
-        value
-        for key, value in client.get.await_args.kwargs["params"]
-        if key == "queries[]"
+    assert client.get.await_args.kwargs["params"] == [
+        ("queries[0]", '{"method":"limit","values":[2]}'),
+        ("queries[1]", '{"method":"orderDesc","attribute":"$sequence"}'),
+        ("queries[2]", '{"method":"cursorAfter","values":["cursor-1"]}'),
     ]
-    assert "limit(2)" in queries
-    assert 'orderDesc("$sequence")' in queries
-    assert 'cursorAfter("cursor-1")' in queries
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected_params"),
+    [
+        (
+            {"page_size": 25},
+            [
+                ("queries[0]", '{"method":"limit","values":[25]}'),
+                ("queries[1]", '{"method":"orderDesc","attribute":"$sequence"}'),
+            ],
+        ),
+        (
+            {"page_size": 25, "cursor": "cursor-1"},
+            [
+                ("queries[0]", '{"method":"limit","values":[25]}'),
+                ("queries[1]", '{"method":"orderDesc","attribute":"$sequence"}'),
+                ("queries[2]", '{"method":"cursorAfter","values":["cursor-1"]}'),
+            ],
+        ),
+        (
+            {"page_size": 25, "search": "admin@example.test"},
+            [
+                ("queries[0]", '{"method":"limit","values":[25]}'),
+                ("queries[1]", '{"method":"orderDesc","attribute":"$sequence"}'),
+                ("queries[2]", '{"method":"equal","attribute":"email","values":["admin@example.test"]}'),
+            ],
+        ),
+        (
+            {"page_size": 25, "search": "user-1"},
+            [
+                ("queries[0]", '{"method":"limit","values":[25]}'),
+                ("queries[1]", '{"method":"orderDesc","attribute":"$sequence"}'),
+                ("queries[2]", '{"method":"equal","attribute":"$id","values":["user-1"]}'),
+            ],
+        ),
+    ],
+)
+async def test_admin_list_uses_current_tablesdb_query_wire_format(
+    monkeypatch, kwargs, expected_params
+):
+    store = _store(monkeypatch)
+    client = _client(get=[_response(200, {"rows": []})])
+
+    with patch("src.admin.httpx.AsyncClient", return_value=client):
+        await store.list_users(**kwargs)
+
+    assert client.get.await_args.kwargs["params"] == expected_params
 
 
 @pytest.mark.asyncio

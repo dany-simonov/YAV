@@ -61,10 +61,6 @@ class AdminOperationPendingError(AdminPersistenceError):
     """A retry found an unresolved idempotent administrative operation."""
 
 
-def _query(function: str, *arguments: Any) -> str:
-    return f"{function}({','.join(json.dumps(argument, ensure_ascii=False, separators=(',', ':')) for argument in arguments)})"
-
-
 def _tablesdb_query(
     method: str,
     *,
@@ -226,7 +222,6 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             operation="admin_list_users.rows_list",
             resource="users.rows",
             query_types=tuple(query_types),
-            tablesdb_query_objects=True,
         )
         rows = response.get("rows")
         if not isinstance(rows, list):
@@ -535,11 +530,18 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             cursor = validate_user_id(cursor)
         if target_user_id is not None:
             target_user_id = validate_user_id(target_user_id)
-        queries = [_query("limit", page_size), _query("orderDesc", "$sequence")]
+        queries = [
+            _tablesdb_query("limit", values=[page_size]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
+        ]
         if cursor:
-            queries.append(_query("cursorAfter", cursor))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor]))
         if target_user_id:
-            queries.append(_query("equal", "target_user_id", [target_user_id]))
+            queries.append(
+                _tablesdb_query(
+                    "equal", attribute="target_user_id", values=[target_user_id]
+                )
+            )
         response = await self._list_rows(self._audit_url, queries)
         rows = response.get("rows")
         if not isinstance(rows, list):
@@ -646,11 +648,15 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             else month_start.replace(month=month_start.month + 1)
         )
         queries = [
-            _query("equal", "user_id", [user_id]),
-            _query("equal", "status", ["completed"]),
-            _query("greaterThanEqual", "$createdAt", month_start.isoformat()),
-            _query("limit", 100),
-            _query("orderDesc", "$sequence"),
+            _tablesdb_query("equal", attribute="user_id", values=[user_id]),
+            _tablesdb_query("equal", attribute="status", values=["completed"]),
+            _tablesdb_query(
+                "greaterThanEqual",
+                attribute="$createdAt",
+                values=[month_start.isoformat()],
+            ),
+            _tablesdb_query("limit", values=[100]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
         ]
         counts: dict[tuple[str, str], int] = {}
         cursor: str | None = None
@@ -661,7 +667,7 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         for _ in range(10):
             page_queries = [*queries]
             if cursor:
-                page_queries.append(_query("cursorAfter", cursor))
+                page_queries.append(_tablesdb_query("cursorAfter", values=[cursor]))
             response = await self._list_rows(self._checks_url, page_queries)
             rows = response.get("rows")
             if not isinstance(rows, list):
@@ -701,10 +707,10 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         response = await self._list_rows(
             self._reservations_url,
             [
-                _query("equal", "user_id", [user_id]),
-                _query("equal", "state", ["reserved"]),
-                _query("limit", 50),
-                _query("orderDesc", "$createdAt"),
+                _tablesdb_query("equal", attribute="user_id", values=[user_id]),
+                _tablesdb_query("equal", attribute="state", values=["reserved"]),
+                _tablesdb_query("limit", values=[50]),
+                _tablesdb_query("orderDesc", attribute="$createdAt"),
             ],
         )
         rows = response.get("rows")
@@ -904,10 +910,14 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         response = await self._list_rows(
             self._rate_limits_url,
             [
-                _query("equal", "dimension", [dimension]),
-                _query("greaterThanEqual", "window_start", start.strftime("%Y-%m-%d")),
-                _query("limit", 100),
-                _query("orderAsc", "window_start"),
+                _tablesdb_query("equal", attribute="dimension", values=[dimension]),
+                _tablesdb_query(
+                    "greaterThanEqual",
+                    attribute="window_start",
+                    values=[start.strftime("%Y-%m-%d")],
+                ),
+                _tablesdb_query("limit", values=[100]),
+                _tablesdb_query("orderAsc", attribute="window_start"),
             ],
         )
         rows = response.get("rows")
@@ -1280,7 +1290,6 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         operation: str = "admin.rows_list",
         resource: str = "table.rows",
         query_types: tuple[str, ...] = (),
-        tablesdb_query_objects: bool = False,
     ) -> dict[str, Any]:
         if operation == "admin_list_users.rows_list":
             self._observe(
@@ -1293,11 +1302,10 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                 response = await client.get(
                     url,
                     headers=self._headers,
-                    params=(
-                        [(f"queries[{index}]", query) for index, query in enumerate(queries)]
-                        if tablesdb_query_objects
-                        else [("queries[]", query) for query in queries]
-                    ),
+                    params=[
+                        (f"queries[{index}]", query)
+                        for index, query in enumerate(queries)
+                    ],
                 )
         except httpx.TimeoutException as exc:
             self._observe_error(

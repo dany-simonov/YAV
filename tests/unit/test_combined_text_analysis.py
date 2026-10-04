@@ -7,7 +7,7 @@ import pytest
 
 from api.schemas import AIOriginDetails, AnalysisResult, CredibilityAssessment
 from core.enums import MediaType, ModelUsed, Verdict
-from core.exceptions import ProviderInfrastructureError
+from core.exceptions import ExternalAPIError, ProviderInfrastructureError
 from src.main import _analyze, _analyze_combined_normal_text, _analyze_complex_text, _execute_request
 from src.validation import SecurityValidationError, validate_request_payload
 
@@ -178,7 +178,92 @@ async def test_partial_ai_failure_preserves_credibility_result():
     with patch("src.main.GeminiCredibilityAdapter.analyze", new=AsyncMock(return_value=_credibility_result())):
         result = await _analyze_combined_normal_text(router, "текст", None)
     assert result.ai_status == "unavailable"
+    assert result.confidence is None
+    assert result.ai_probability is None
+    assert result.decision_confidence is None
+    assert result.authenticity_index is None
+    assert result.provider_evidence is None
     assert result.credibility is not None and result.credibility.status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        pytest.param(
+            ProviderInfrastructureError("gemini", "unavailable", stage="request"),
+            id="unavailable",
+        ),
+        pytest.param(
+            ProviderInfrastructureError("gemini", "timeout", stage="request"),
+            id="timeout",
+        ),
+        pytest.param(
+            ExternalAPIError("gemini", "auth_error", status_code=401),
+            id="auth-401",
+        ),
+        pytest.param(
+            ExternalAPIError("gemini", "auth_error", status_code=403),
+            id="auth-403",
+        ),
+        pytest.param(
+            ExternalAPIError("gemini", "rate_limit", status_code=429),
+            id="rate-limit-429",
+        ),
+        pytest.param(
+            ProviderInfrastructureError(
+                "gemini", "unavailable", stage="request", status_code=503
+            ),
+            id="unavailable-5xx",
+        ),
+        pytest.param(
+            ProviderInfrastructureError("gemini", "invalid_response", stage="response"),
+            id="malformed-response",
+        ),
+    ],
+)
+async def test_combined_text_provider_failures_omit_all_ai_scores(provider_error):
+    """A surviving credibility branch must not turn provider failure into score 0.5."""
+    router = MagicMock()
+    router.route = AsyncMock(side_effect=provider_error)
+    with patch(
+        "src.main.GeminiCredibilityAdapter.analyze",
+        new=AsyncMock(return_value=_credibility_result()),
+    ):
+        result = await _analyze_combined_normal_text(router, "текст", None)
+
+    assert result.ai_status == "unavailable"
+    assert result.confidence is None
+    assert result.ai_probability is None
+    assert result.decision_confidence is None
+    assert result.authenticity_index is None
+    assert result.provider_evidence is None
+    assert result.credibility is not None and result.credibility.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_combined_text_function_response_omits_unavailable_ai_scores():
+    router = MagicMock()
+    router.route = AsyncMock(
+        side_effect=ProviderInfrastructureError("gemini", "timeout", stage="request")
+    )
+    request = validate_request_payload({"text": "текст"})
+    with patch("src.main.MediaRouter", return_value=router), patch(
+        "src.main.GeminiCredibilityAdapter.analyze",
+        new=AsyncMock(return_value=_credibility_result()),
+    ):
+        response = await _analyze(request, "", None)
+
+    assert response["ai_status"] == "unavailable"
+    assert response["credibility"]["status"] == "completed"
+    for field in (
+        "confidence",
+        "ai_probability",
+        "decision_confidence",
+        "authenticity_index",
+        "provider_evidence",
+    ):
+        assert field not in response
 
 
 @pytest.mark.asyncio

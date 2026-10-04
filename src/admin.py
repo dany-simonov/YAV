@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -15,6 +16,7 @@ import httpx
 
 from core.config import settings
 from src.rate_limit import _window
+from src.provider_external_usage import ProviderExternalUsageService
 from src.subscriptions import (
     QUOTA_KEYS,
     AppwriteSubscriptionStore,
@@ -32,6 +34,11 @@ logger = logging.getLogger(__name__)
 _MAX_PAGE_SIZE = 100
 _MAX_AUDIT_VALUE_BYTES = 1024
 _MAX_IDEMPOTENCY_KEY_LENGTH = 64
+_SAFE_APPWRITE_TOKEN = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+_SAFE_APPWRITE_MESSAGE = re.compile(
+    r"(?i)(?:authorization|x-appwrite-key|cookie|token|jwt|password|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?\S+"
+)
+_EMAIL_IN_MESSAGE = re.compile(r"(?i)\b[^\s@]+@[^\s@]+\b")
 
 
 class AdminPersistenceError(RuntimeError):
@@ -56,6 +63,21 @@ class AdminOperationPendingError(AdminPersistenceError):
 
 def _query(function: str, *arguments: Any) -> str:
     return f"{function}({','.join(json.dumps(argument, ensure_ascii=False, separators=(',', ':')) for argument in arguments)})"
+
+
+def _tablesdb_query(
+    method: str,
+    *,
+    attribute: str | None = None,
+    values: list[Any] | None = None,
+) -> str:
+    """Serialize a TablesDB query exactly as the current Appwrite SDK does."""
+    query: dict[str, Any] = {"method": method}
+    if attribute is not None:
+        query["attribute"] = attribute
+    if values is not None:
+        query["values"] = values
+    return json.dumps(query, ensure_ascii=False, separators=(",", ":"))
 
 
 def _bounded_json(value: Mapping[str, Any]) -> str:
@@ -88,8 +110,23 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
     it does not create a parallel quota implementation.
     """
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        diagnostic_log: Any = None,
+        diagnostic_error_log: Any = None,
+        correlation_id: str = "",
+    ) -> None:
         super().__init__(api_key)
+        self._diagnostic_log = diagnostic_log
+        self._diagnostic_error_log = diagnostic_error_log
+        self._correlation_id = (
+            correlation_id
+            if isinstance(correlation_id, str)
+            and re.fullmatch(r"[a-f0-9]{32}", correlation_id)
+            else uuid.uuid4().hex
+        )
         self.checks_table = os.getenv("APPWRITE_CHECKS_TABLE_ID", "checks")
         self.rate_limits_table = os.getenv(
             "APPWRITE_RATE_LIMITS_TABLE_ID", "rate_limits"
@@ -154,21 +191,62 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             raise SubscriptionValidationError("invalid page size")
         if cursor is not None:
             cursor = validate_user_id(cursor)
-        queries = [_query("limit", page_size), _query("orderDesc", "$sequence")]
+        queries = [
+            _tablesdb_query("limit", values=[page_size]),
+            _tablesdb_query("orderDesc", attribute="$sequence"),
+        ]
+        query_types = ["limit", "orderDesc"]
         if cursor:
-            queries.append(_query("cursorAfter", cursor))
+            queries.append(_tablesdb_query("cursorAfter", values=[cursor]))
+            query_types.append("cursorAfter")
         if search:
             if not isinstance(search, str) or len(search) > 320:
                 raise SubscriptionValidationError("invalid user search")
             if "@" in search:
-                queries.append(_query("equal", "email", [search.strip().lower()]))
+                queries.append(
+                    _tablesdb_query(
+                        "equal",
+                        attribute="email",
+                        values=[search.strip().lower()],
+                    )
+                )
+                query_types.append("equal:email")
             else:
-                queries.append(_query("equal", "$id", [validate_user_id(search)]))
-        response = await self._list_rows(self._rows_url, queries)
+                queries.append(
+                    _tablesdb_query(
+                        "equal",
+                        attribute="$id",
+                        values=[validate_user_id(search)],
+                    )
+                )
+                query_types.append("equal:$id")
+        response = await self._list_rows(
+            self._rows_url,
+            queries,
+            operation="admin_list_users.rows_list",
+            resource="users.rows",
+            query_types=tuple(query_types),
+            tablesdb_query_objects=True,
+        )
         rows = response.get("rows")
         if not isinstance(rows, list):
+            self._observe_error(
+                operation="admin_list_users.decode",
+                category="malformed_response",
+                exception_class="AdminPersistenceError",
+            )
             raise AdminPersistenceError("user list decode failed")
-        summaries = [self._user_summary(row) for row in rows if isinstance(row, dict)]
+        try:
+            summaries = [self._user_summary(row) for row in rows if isinstance(row, dict)]
+        except (SubscriptionPersistenceError, SubscriptionValidationError, ValueError) as exc:
+            self._observe_error(
+                operation="admin_list_users.row_decode",
+                category="malformed_response",
+                exception_class=type(exc).__name__,
+            )
+            # Preserve the pre-existing client error mapping; this branch adds
+            # observability only and must not alter the action contract.
+            raise
         next_cursor = summaries[-1]["user_id"] if len(summaries) == page_size else None
         return {"users": summaries, "next_cursor": next_cursor, "page_size": page_size}
 
@@ -669,13 +747,13 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                 settings.global_sightengine_monthly,
             ),
             (
-                "aiornot_words_daily",
+                "aiornot_words_legacy_daily",
                 "global_aiornot_words_daily",
                 "day",
                 settings.global_aiornot_words_daily,
             ),
             (
-                "aiornot_words_monthly",
+                "aiornot_words_legacy_monthly",
                 "global_aiornot_words_monthly",
                 "month",
                 settings.global_aiornot_words_monthly,
@@ -741,6 +819,66 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             }
         return quotas
 
+    async def provider_budget_overview(self) -> dict[str, Any]:
+        """Return project-wide provider counters without loading any profile.
+
+        ``rate_limits`` is the sole source here.  In particular this avoids
+        tying global telemetry to the presence or ordering of user rows.
+        """
+        now = datetime.now(timezone.utc)
+        definitions: tuple[tuple[str, str, str, str, int], ...] = (
+            ("gemini", "operations", "day", "global_gemini_daily", settings.global_gemini_operations_daily),
+            ("sightengine", "operations", "day", "global_sightengine_daily", settings.global_sightengine_daily),
+            ("sightengine", "operations", "month", "global_sightengine_monthly", settings.global_sightengine_monthly),
+            ("aiornot", "words", "day", "global_aiornot_text_words_daily", settings.global_aiornot_text_words_daily),
+            ("aiornot", "words", "month", "global_aiornot_text_words_monthly", settings.global_aiornot_text_words_monthly),
+            ("aiornot", "image_checks", "day", "global_aiornot_image_daily", settings.global_aiornot_image_daily),
+            ("aiornot", "image_checks", "month", "global_aiornot_image_monthly", settings.global_aiornot_image_monthly),
+            ("sapling", "characters", "day", "global_sapling_chars_daily", settings.global_sapling_chars_daily),
+            ("sapling", "characters", "month", "global_sapling_chars_monthly", settings.global_sapling_chars_monthly),
+            ("resemble", "operations", "day", "global_resemble_daily", settings.global_resemble_daily),
+            ("resemble", "operations", "month", "global_resemble_monthly", settings.global_resemble_monthly),
+            ("huggingface", "operations", "day", "global_huggingface_daily", settings.global_huggingface_daily),
+            ("huggingface", "operations", "month", "global_huggingface_monthly", settings.global_huggingface_monthly),
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for provider, unit, period, dimension, limit in definitions:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise AdminPersistenceError("provider budget configuration is invalid")
+            window = _window(now, period)
+            counter = await self._get_optional_row(
+                self._rate_limits_url,
+                self._counter_row_id(dimension, "global", window.key),
+            )
+            entry = grouped.setdefault(
+                provider,
+                {
+                    "provider": provider,
+                    "source": "yav_internal",
+                    "unit": "multiple" if provider == "aiornot" else unit,
+                    "daily": None,
+                    "monthly": None,
+                    # AI or Not has two real units.  The legacy word rows are
+                    # text-only; no historical row is interpreted as image use.
+                    "metrics": [],
+                    "legacy_dimensions": ["global_aiornot_words_daily", "global_aiornot_words_monthly"] if provider == "aiornot" else [],
+                },
+            )
+            used = self._counter_used(counter)
+            value = {"used": used, "limit": limit, "remaining": max(0, limit - used)}
+            metric = next((item for item in entry["metrics"] if item["unit"] == unit), None)
+            if metric is None:
+                metric = {"unit": unit, "daily": None, "monthly": None}
+                entry["metrics"].append(metric)
+            metric["daily" if period == "day" else "monthly"] = value
+            if provider != "aiornot":
+                entry["daily" if period == "day" else "monthly"] = value
+        return {"providers": [grouped[key] for key in ("gemini", "sightengine", "aiornot", "sapling", "resemble", "huggingface")]}
+
+    async def provider_external_usage(self) -> dict[str, Any]:
+        """Read explicitly supported provider-side telemetry as an admin."""
+        return await ProviderExternalUsageService(self.api_key).get_usage()
+
     async def provider_usage_history(self, provider: str, days: int) -> dict[str, Any]:
         """Return persisted global daily counters for one provider.
 
@@ -750,9 +888,11 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         definitions: Mapping[str, tuple[str, int, str]] = {
             "gemini": ("global_gemini_daily", settings.global_gemini_operations_daily, "операции"),
             "sightengine": ("global_sightengine_daily", settings.global_sightengine_daily, "операции"),
-            "aiornot": ("global_aiornot_words_daily", settings.global_aiornot_words_daily, "слова"),
+            "aiornot": ("global_aiornot_text_words_daily", settings.global_aiornot_text_words_daily, "слова"),
+            "aiornot_image": ("global_aiornot_image_daily", settings.global_aiornot_image_daily, "проверки изображений"),
             "sapling": ("global_sapling_chars_daily", settings.global_sapling_chars_daily, "символы"),
             "resemble": ("global_resemble_daily", settings.global_resemble_daily, "операции"),
+            "huggingface": ("global_huggingface_daily", settings.global_huggingface_daily, "операции"),
         }
         if provider not in definitions or isinstance(days, bool) or not 7 <= days <= 90:
             raise SubscriptionValidationError("invalid provider history request")
@@ -1060,23 +1200,148 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         if response.status_code not in (200, 201):
             raise AdminPersistenceError("admin audit create failed")
 
-    async def _list_rows(self, url: str, queries: list[str]) -> dict[str, Any]:
+    def _observe(self, message: str, *, error: bool = False) -> None:
+        callback = self._diagnostic_error_log if error else self._diagnostic_log
+        if not callable(callback):
+            return
+        try:
+            callback(message)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _safe_appwrite_value(value: Any) -> str:
+        if not isinstance(value, str) or not _SAFE_APPWRITE_TOKEN.fullmatch(value):
+            return "unknown"
+        return value
+
+    @staticmethod
+    def _safe_appwrite_message(value: Any) -> str:
+        if not isinstance(value, str):
+            return "omitted"
+        message = value.replace("\r", " ").replace("\n", " ")
+        message = _SAFE_APPWRITE_MESSAGE.sub("<redacted>", message)
+        message = _EMAIL_IN_MESSAGE.sub("<redacted-email>", message)
+        return message[:160] if message else "omitted"
+
+    @staticmethod
+    def _appwrite_error_metadata(response: Any) -> tuple[str, str, str]:
+        try:
+            body = response.json()
+        except (TypeError, ValueError, AttributeError):
+            body = None
+        if not isinstance(body, Mapping):
+            return "unknown", "unknown", "omitted"
+        error_type = AppwriteAdminStore._safe_appwrite_value(body.get("type"))
+        code = body.get("code")
+        error_code = str(code) if isinstance(code, int) and not isinstance(code, bool) else "unknown"
+        return error_type, error_code, AppwriteAdminStore._safe_appwrite_message(body.get("message"))
+
+    @staticmethod
+    def _appwrite_category(status_code: int | None, error_type: str) -> str:
+        if status_code in (401, 403):
+            return "permission_or_scope_denied"
+        categories = {
+            "database_not_found": "database_not_found",
+            "table_not_found": "table_not_found",
+            "attribute_not_found": "missing_column",
+            "column_not_found": "missing_column",
+            "index_not_found": "missing_index",
+            "general_query_invalid": "invalid_query",
+            "query_invalid": "invalid_query",
+        }
+        return categories.get(error_type, "unknown")
+
+    def _observe_error(
+        self,
+        *,
+        operation: str,
+        category: str,
+        exception_class: str,
+        status_code: int | None = None,
+        appwrite_type: str = "unknown",
+        appwrite_code: str = "unknown",
+        appwrite_message: str = "omitted",
+    ) -> None:
+        self._observe(
+            "admin_appwrite_error "
+            f"correlation_id={self._correlation_id} operation={operation} "
+            f"category={category} status_code={status_code if status_code is not None else 'none'} "
+            f"appwrite_type={appwrite_type} appwrite_code={appwrite_code} "
+            f"appwrite_message={appwrite_message} exception_class={exception_class}",
+            error=True,
+        )
+
+    async def _list_rows(
+        self,
+        url: str,
+        queries: list[str],
+        *,
+        operation: str = "admin.rows_list",
+        resource: str = "table.rows",
+        query_types: tuple[str, ...] = (),
+        tablesdb_query_objects: bool = False,
+    ) -> dict[str, Any]:
+        if operation == "admin_list_users.rows_list":
+            self._observe(
+                "admin_appwrite_request "
+                f"correlation_id={self._correlation_id} operation={operation} "
+                f"method=GET resource={resource} query_types={','.join(query_types) or 'none'}"
+            )
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
                     url,
                     headers=self._headers,
-                    params=[("queries[]", query) for query in queries],
+                    params=(
+                        [(f"queries[{index}]", query) for index, query in enumerate(queries)]
+                        if tablesdb_query_objects
+                        else [("queries[]", query) for query in queries]
+                    ),
                 )
-        except httpx.HTTPError as exc:
+        except httpx.TimeoutException as exc:
+            self._observe_error(
+                operation=operation,
+                category="timeout",
+                exception_class=type(exc).__name__,
+            )
+            raise AdminPersistenceError("Appwrite list failed") from exc
+        except httpx.TransportError as exc:
+            self._observe_error(
+                operation=operation,
+                category="transport_error",
+                exception_class=type(exc).__name__,
+            )
             raise AdminPersistenceError("Appwrite list failed") from exc
         if response.status_code != 200:
+            error_type, error_code, error_message = self._appwrite_error_metadata(response)
+            self._observe_error(
+                operation=operation,
+                category=self._appwrite_category(response.status_code, error_type),
+                exception_class="AdminPersistenceError",
+                status_code=response.status_code,
+                appwrite_type=error_type,
+                appwrite_code=error_code,
+                appwrite_message=error_message,
+            )
             raise AdminPersistenceError("Appwrite list failed")
         try:
             body = response.json()
         except (TypeError, ValueError) as exc:
+            self._observe_error(
+                operation=operation,
+                category="malformed_response",
+                exception_class=type(exc).__name__,
+                status_code=response.status_code,
+            )
             raise AdminPersistenceError("Appwrite list decode failed") from exc
         if not isinstance(body, dict):
+            self._observe_error(
+                operation=operation,
+                category="malformed_response",
+                exception_class="AdminPersistenceError",
+                status_code=response.status_code,
+            )
             raise AdminPersistenceError("Appwrite list decode failed")
         return body
 

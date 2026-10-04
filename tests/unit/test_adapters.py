@@ -27,6 +27,18 @@ def _mock_client(response_body: object, status_code: int = 200) -> AsyncMock:
     return mock_instance
 
 
+def _resemble_completed(score: float, label: str) -> dict[str, object]:
+    return {
+        "success": True,
+        "item": {
+            "uuid": "detect-unit-test",
+            "status": "completed",
+            "media_type": "audio",
+            "metrics": {"aggregated_score": score, "label": label},
+        },
+    }
+
+
 # ===========================================================================
 # SightengineAdapter
 # ===========================================================================
@@ -44,7 +56,7 @@ class TestSightengineAdapter:
         assert client.post.await_args.kwargs["data"] == {
             "api_user": "test_se_user",
             "api_secret": "test_se_secret",
-            "models": "genai",
+            "models": "genai,deepfake",
         }
         assert client.post.await_args.kwargs["files"] == {"media": ("image.jpg", b"image_bytes", "image/jpeg")}
         assert "test_se_secret" not in result.explanation
@@ -156,7 +168,7 @@ class TestResembleAdapter:
         from adapters.resemble import ResembleAdapter
 
         with patch("httpx.AsyncClient", return_value=_mock_client(
-            {"success": True, "score": 0.89, "tampered": True}
+            _resemble_completed(0.89, "fake")
         )):
             result = await ResembleAdapter().analyze(b"WAV_audio_bytes")
         assert result.verdict == Verdict.FAKE
@@ -168,7 +180,7 @@ class TestResembleAdapter:
         from adapters.resemble import ResembleAdapter
 
         with patch("httpx.AsyncClient", return_value=_mock_client(
-            {"success": True, "score": 0.12, "tampered": False}
+            _resemble_completed(0.12, "real")
         )):
             result = await ResembleAdapter().analyze(b"WAV_real_audio")
         assert result.verdict == Verdict.REAL
@@ -179,7 +191,7 @@ class TestResembleAdapter:
         from adapters.resemble import ResembleAdapter
 
         with patch("httpx.AsyncClient", return_value=_mock_client(
-            {"success": True, "score": 0.50}
+            _resemble_completed(0.50, "uncertain")
         )):
             result = await ResembleAdapter().analyze(b"WAV_ambiguous_audio")
         assert result.verdict == Verdict.UNCERTAIN
@@ -211,7 +223,7 @@ class TestResembleAdapter:
 
         with patch("subprocess.run", return_value=mock_proc) as mock_run, \
              patch("httpx.AsyncClient", return_value=_mock_client(
-                 {"success": True, "score": 0.80, "tampered": True}
+                _resemble_completed(0.80, "fake")
              )):
             result = await ResembleAdapter().analyze(ogg_data)
 
@@ -225,7 +237,7 @@ class TestResembleAdapter:
         from adapters.resemble import ResembleAdapter
 
         with patch("httpx.AsyncClient", return_value=_mock_client({}, status_code=500)):
-            with pytest.raises(ExternalAPIError) as exc_info:
+            with pytest.raises(ProviderInfrastructureError) as exc_info:
                 await ResembleAdapter().analyze(b"WAV_bytes")
         assert exc_info.value.service == "resemble"
 
@@ -302,24 +314,27 @@ class TestSaplingAdapter:
         assert result.authenticity_index == 90
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status_code", [400, 401, 403])
-    async def test_auth_4xx_preserves_status_code(self, status_code):
+    @pytest.mark.parametrize(
+        ("status_code", "detail"),
+        [(400, "request_error"), (401, "auth_error"), (403, "auth_error")],
+    )
+    async def test_auth_4xx_preserves_status_code(self, status_code, detail):
         from adapters.sapling import SaplingAdapter
 
         with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=status_code)):
             with pytest.raises(ExternalAPIError) as raised:
                 await SaplingAdapter().analyze(b"x")
-        assert (raised.value.detail, raised.value.status_code) == ("request_error", status_code)
+        assert (raised.value.detail, raised.value.status_code) == (detail, status_code)
 
     @pytest.mark.asyncio
-    async def test_429_is_a_typed_technical_failure(self):
+    async def test_429_is_a_typed_rate_limit_failure(self):
         from adapters.sapling import SaplingAdapter
 
         with patch("adapters.sapling.httpx.AsyncClient", return_value=_mock_client({}, status_code=429)):
-            with pytest.raises(ProviderInfrastructureError) as raised:
+            with pytest.raises(ExternalAPIError) as raised:
                 await SaplingAdapter().analyze(b"x" * 60)
-        assert (raised.value.service, raised.value.kind, raised.value.stage, raised.value.status_code) == (
-            "sapling", "unavailable", "request", 429
+        assert (raised.value.service, raised.value.detail, raised.value.status_code) == (
+            "sapling", "rate_limit", 429
         )
 
     @pytest.mark.asyncio
@@ -397,15 +412,15 @@ class TestSaplingAdapter:
         client.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_empty_text_returns_uncertain_without_api_call(self):
-        """The adapter's defensive empty-input path must not call the provider."""
+    async def test_empty_text_is_rejected_without_api_call(self):
+        """Invalid input must not acquire a fabricated detector score."""
         from adapters.sapling import SaplingAdapter
 
         with patch("httpx.AsyncClient") as mock_cls:
-            result = await SaplingAdapter().analyze(b"   ")
+            with pytest.raises(ExternalAPIError) as raised:
+                await SaplingAdapter().analyze(b"   ")
         mock_cls.assert_not_called()
-        assert result.verdict == Verdict.UNCERTAIN
-        assert "короткий" in result.explanation
+        assert raised.value.detail == "input_invalid"
 
     @pytest.mark.asyncio
     async def test_timeout_raises_typed_infrastructure_error(self):
@@ -427,9 +442,9 @@ class TestSaplingAdapter:
         from adapters.sapling import SaplingAdapter
 
         with patch("httpx.AsyncClient") as client:
-            result = await SaplingAdapter().analyze(b"A" * 11_000)
-        assert result.verdict == Verdict.UNCERTAIN
-        assert "превышает" in result.explanation
+            with pytest.raises(ExternalAPIError) as raised:
+                await SaplingAdapter().analyze(b"A" * 11_000)
+        assert raised.value.detail == "input_invalid"
         client.assert_not_called()
 
     @pytest.mark.asyncio
@@ -471,13 +486,14 @@ class TestHFImageAdapter:
         assert result.verdict == Verdict.REAL
 
     @pytest.mark.asyncio
-    async def test_low_confidence_returns_uncertain(self):
+    async def test_selected_label_is_preserved_at_low_confidence(self):
         from adapters.hf_image import HFImageAdapter
 
         body = [{"label": "FAKE", "score": 0.55}, {"label": "REAL", "score": 0.45}]
         with patch("httpx.AsyncClient", return_value=_mock_client(body)):
             result = await HFImageAdapter().analyze(b"ambiguous_image")
-        assert result.verdict == Verdict.UNCERTAIN
+        assert result.verdict == Verdict.FAKE
+        assert result.confidence == 0.55
 
     @pytest.mark.asyncio
     async def test_cold_start_retries_then_typed_infrastructure_error(self):
@@ -533,13 +549,14 @@ class TestHFAudioAdapter:
         assert result.verdict == Verdict.REAL
 
     @pytest.mark.asyncio
-    async def test_low_confidence_returns_uncertain(self):
+    async def test_selected_label_is_preserved_at_low_confidence(self):
         from adapters.hf_audio import HFAudioAdapter
 
         body = [{"label": "spoof", "score": 0.60}, {"label": "bonafide", "score": 0.40}]
         with patch("httpx.AsyncClient", return_value=_mock_client(body)):
             result = await HFAudioAdapter().analyze(b"WAV_ambiguous")
-        assert result.verdict == Verdict.UNCERTAIN
+        assert result.verdict == Verdict.FAKE
+        assert result.confidence == 0.60
 
     @pytest.mark.asyncio
     async def test_cold_start_retries_then_uncertain(self):

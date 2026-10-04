@@ -106,7 +106,7 @@ class TestRoute:
         assert result.verdict == Verdict.FAKE
 
     @pytest.mark.asyncio
-    async def test_image_falls_back_to_hf_image_on_api_error(self):
+    async def test_image_falls_back_to_hf_image_after_both_primary_detectors_fail(self):
         se_analyze = AsyncMock(side_effect=ExternalAPIError("sightengine", "rate_limit"))
         hf_result = AnalysisResult(
             verdict=Verdict.REAL,
@@ -119,6 +119,9 @@ class TestRoute:
         hf_analyze = AsyncMock(return_value=hf_result)
 
         with patch("router.media_router.SightengineAdapter.analyze", se_analyze), \
+             patch("router.media_router.AIOrNotImageAdapter.analyze", new=AsyncMock(
+                 side_effect=ExternalAPIError("aiornot", "rate_limit")
+             )), \
              patch("router.media_router.HFImageAdapter.analyze", hf_analyze):
             result = await MediaRouter().route(MediaType.IMAGE, b"img_bytes")
 
@@ -140,6 +143,9 @@ class TestRoute:
             media_type=MediaType.IMAGE,
         )
         with patch("adapters.sightengine.httpx.AsyncClient", return_value=client), patch(
+            "router.media_router.AIOrNotImageAdapter.analyze",
+            new=AsyncMock(side_effect=ExternalAPIError("aiornot", "rate_limit")),
+        ), patch(
             "router.media_router.HFImageAdapter.analyze", new=AsyncMock(return_value=hf_result)
         ) as hf:
             result = await MediaRouter().route(MediaType.IMAGE, b"img_bytes")
@@ -152,7 +158,7 @@ class TestRoute:
         primary = AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout"))
         fallback = AsyncMock(return_value=REAL_RESULT)
         with patch("router.media_router.SightengineAdapter.analyze", primary), patch(
-            "router.media_router.HFImageAdapter.analyze", fallback
+            "router.media_router.AIOrNotImageAdapter.analyze", fallback
         ):
             result = await MediaRouter().route(MediaType.IMAGE, b"img_bytes")
         assert result.verdict == Verdict.REAL

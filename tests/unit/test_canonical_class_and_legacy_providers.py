@@ -27,6 +27,18 @@ def _client(body: object) -> AsyncMock:
     return client
 
 
+def _resemble_completed(score: float, label: str) -> dict[str, object]:
+    return {
+        "success": True,
+        "item": {
+            "uuid": "detect-unit-test",
+            "status": "completed",
+            "media_type": "audio",
+            "metrics": {"aggregated_score": score, "label": label},
+        },
+    }
+
+
 def _assert_class_confidence(result, score, verdict, label, index):
     assert result.verdict == verdict
     assert result.confidence == score  # legacy provider output remains available
@@ -41,7 +53,7 @@ def _assert_class_confidence(result, score, verdict, label, index):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("label", "score", "verdict", "index"),
-    [("FAKE", 0.9, Verdict.FAKE, 10), ("REAL", 0.9, Verdict.REAL, 90), ("FAKE", 0.5, Verdict.UNCERTAIN, None)],
+    [("FAKE", 0.9, Verdict.FAKE, 10), ("REAL", 0.9, Verdict.REAL, 90), ("FAKE", 0.5, Verdict.FAKE, 50)],
 )
 async def test_hf_image_uses_top_class_confidence_without_ai_probability(label, score, verdict, index):
     raw_marker = "hf-image-raw-payload"
@@ -49,14 +61,18 @@ async def test_hf_image_uses_top_class_confidence_without_ai_probability(label, 
     with patch("adapters.hf_image.httpx.AsyncClient", return_value=_client(body)):
         result = await HFImageAdapter().analyze(b"image")
     _assert_class_confidence(result, score, verdict, label, index)
-    assert result.provider_evidence.safe_details == {"score_field": "top_label_score"}
+    assert result.provider_evidence.safe_details == {
+        "score_field": "top_label_score",
+        "raw_label": label,
+        "raw_label_score": score,
+    }
     assert raw_marker not in result.model_dump_json()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("label", "score", "verdict", "index"),
-    [("spoof", 0.9, Verdict.FAKE, 10), ("bonafide", 0.9, Verdict.REAL, 90), ("spoof", 0.6, Verdict.UNCERTAIN, None)],
+    [("spoof", 0.9, Verdict.FAKE, 10), ("bonafide", 0.9, Verdict.REAL, 90), ("spoof", 0.6, Verdict.FAKE, 40)],
 )
 async def test_hf_audio_uses_top_class_confidence_without_ai_probability(label, score, verdict, index):
     raw_marker = "hf-audio-raw-payload"
@@ -69,14 +85,14 @@ async def test_hf_audio_uses_top_class_confidence_without_ai_probability(label, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("score", "verdict"),
-    [(0.9, Verdict.FAKE), (0.1, Verdict.REAL), (0.5, Verdict.UNCERTAIN)],
+    ("score", "label", "verdict"),
+    [(0.9, "fake", Verdict.FAKE), (0.1, "real", Verdict.REAL), (0.5, "uncertain", Verdict.UNCERTAIN)],
 )
-async def test_resemble_legacy_score_is_an_aggregated_signal_not_ai_probability(score, verdict):
+async def test_resemble_v2_score_is_an_aggregated_signal_not_ai_probability(score, label, verdict):
     raw_marker = "resemble-raw-payload"
     with patch(
         "adapters.resemble.httpx.AsyncClient",
-        return_value=_client({"success": True, "score": score, "raw": raw_marker}),
+        return_value=_client(_resemble_completed(score, label)),
     ):
         result = await ResembleAdapter().analyze(b"WAV")
     assert result.verdict == verdict
@@ -177,12 +193,12 @@ async def test_audio_uncertain_merge_is_canonical_without_blending_incompatible_
         "router.media_router.HFAudioAdapter.analyze", new=AsyncMock(return_value=fallback)
     ):
         result = await MediaRouter().route(MediaType.AUDIO, b"audio")
-    assert result.confidence == 0.5  # established UNCERTAIN sentinel, not (0.1 + 0.6) / 2
+    assert result.confidence == 0.1  # preserve the actual primary score; never fabricate 0.5
     assert result.semantics_version == 2
     assert result.ai_probability is None
     assert result.decision_confidence is None
     assert result.authenticity_index is None
-    assert result.provider_evidence is None
+    assert result.provider_evidence is primary.provider_evidence
     assert [(component.evidence.provider, component.verdict) for component in result.component_evidence] == [
         ("resemble", Verdict.UNCERTAIN),
         ("huggingface", Verdict.UNCERTAIN),

@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BarChart3 } from 'lucide-react';
-import { adminApi, type ProviderKey, type ProviderUsageHistory } from '../../lib/admin';
+import { adminApi, type UsageProviderKey, type ProviderUsageHistory } from '../../lib/admin';
 
-const providers: Array<{ value: ProviderKey; label: string }> = [
-  { value: 'gemini', label: 'Gemini' }, { value: 'sightengine', label: 'Sightengine' }, { value: 'aiornot', label: 'AI or Not' }, { value: 'sapling', label: 'Sapling' }, { value: 'resemble', label: 'Resemble' },
+const providers: Array<{ value: UsageProviderKey; label: string }> = [
+  { value: 'gemini', label: 'Gemini' }, { value: 'sightengine', label: 'Sightengine' }, { value: 'aiornot', label: 'AI or Not · text' }, { value: 'aiornot_image', label: 'AI or Not · images' }, { value: 'sapling', label: 'Sapling' }, { value: 'resemble', label: 'Resemble' }, { value: 'huggingface', label: 'Hugging Face' },
 ];
 const periods: Array<7 | 30 | 90> = [7, 30, 90];
 const number = new Intl.NumberFormat('ru-RU');
 
 export function ProviderUsageChart() {
-  const [provider, setProvider] = useState<ProviderKey>('gemini');
+  const [provider, setProvider] = useState<UsageProviderKey>('gemini');
   const [days, setDays] = useState<7 | 30 | 90>(30);
   const [history, setHistory] = useState<ProviderUsageHistory | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { let active = true; setHistory(null); setError(null); void adminApi.getProviderUsageHistory(provider, days).then((result) => { if (active) setHistory(result); }).catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : 'Не удалось загрузить статистику'); }); return () => { active = false; }; }, [provider, days]);
-  return <section className="mt-6 rounded-2xl border border-black/10 bg-white p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><div className="flex items-center gap-2"><BarChart3 className="h-4 w-4" /><h2 className="font-semibold">Расход API по времени</h2></div><p className="mt-1 text-sm text-mv-text-secondary">Один столбик — один день. Данные берутся только из серверных счётчиков Appwrite.</p></div><div className="flex flex-wrap gap-2"><label className="sr-only" htmlFor="provider-history">Нейросеть</label><select id="provider-history" value={provider} onChange={(event) => setProvider(event.target.value as ProviderKey)} className="h-10 rounded-[10px] border border-black/[.09] bg-white px-3 text-sm">{providers.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>{periods.map((item) => <button key={item} type="button" aria-pressed={days === item} onClick={() => setDays(item)} className={`h-10 rounded-[10px] px-3 text-sm font-medium ${days === item ? 'bg-black text-white' : 'border border-black/[.09] bg-white'}`}>{item} дн.</button>)}</div></div>{error ? <p role="alert" className="mt-5 rounded-xl border border-black/[.09] bg-[#f7f7f6] p-4 text-sm text-mv-text-secondary">{error}</p> : history ? <UsageGraph history={history} /> : <div className="mt-5 h-64 animate-pulse rounded-xl bg-black/[.05]" />}</section>;
+  return <section className="mt-6 rounded-2xl border border-black/10 bg-white p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><div className="flex items-center gap-2"><BarChart3 className="h-4 w-4" /><h2 className="font-semibold">YAV internal usage по времени</h2></div><p className="mt-1 text-sm text-mv-text-secondary">Один столбик — один день. Это серверные счётчики ЯВЬ, не billing провайдера.</p></div><div className="flex flex-wrap gap-2"><label className="sr-only" htmlFor="provider-history">Нейросеть</label><select id="provider-history" value={provider} onChange={(event) => setProvider(event.target.value as UsageProviderKey)} className="h-10 rounded-[10px] border border-black/[.09] bg-white px-3 text-sm">{providers.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>{periods.map((item) => <button key={item} type="button" aria-pressed={days === item} onClick={() => setDays(item)} className={`h-10 rounded-[10px] px-3 text-sm font-medium ${days === item ? 'bg-black text-white' : 'border border-black/[.09] bg-white'}`}>{item} дн.</button>)}</div></div>{error ? <p role="alert" className="mt-5 rounded-xl border border-black/[.09] bg-[#f7f7f6] p-4 text-sm text-mv-text-secondary">{error}</p> : history ? <UsageGraph history={history} /> : <div className="mt-5 h-64 animate-pulse rounded-xl bg-black/[.05]" />}</section>;
 }
 
 function UsageGraph({ history }: { history: ProviderUsageHistory }) {

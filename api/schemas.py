@@ -249,7 +249,7 @@ class AnalysisResult(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     
     verdict: Verdict
-    confidence: float  # 0.0 – 1.0
+    confidence: float | None = None  # 0.0 – 1.0 when an AI-origin score is available
     model_used: ModelUsed
     explanation: str
     media_type: MediaType
@@ -272,7 +272,7 @@ class AnalysisResult(BaseModel):
 
     @field_validator("confidence", mode="before")
     @classmethod
-    def validate_confidence(cls, value: float) -> float:
+    def validate_confidence(cls, value: float | None) -> float | None:
         return _finite_unit_interval(value, "confidence")  # type: ignore[return-value]
 
     @field_validator("ai_probability", "decision_confidence", mode="before")
@@ -286,6 +286,22 @@ class AnalysisResult(BaseModel):
         if value is not None and value != 2:
             raise ValueError("unsupported semantics_version")
         return value
+
+    @model_validator(mode="after")
+    def validate_unavailable_ai_result(self) -> "AnalysisResult":
+        """An unavailable AI-origin branch must never carry a fabricated score."""
+        if self.ai_status == "unavailable":
+            score_fields = (
+                self.confidence,
+                self.ai_probability,
+                self.decision_confidence,
+                self.authenticity_index,
+            )
+            if any(value is not None for value in score_fields):
+                raise ValueError("unavailable AI result must not contain score fields")
+            if self.provider_evidence is not None:
+                raise ValueError("unavailable AI result must not contain provider evidence")
+        return self
 
 
 class FactCheckItem(BaseModel):

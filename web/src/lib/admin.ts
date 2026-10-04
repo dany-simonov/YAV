@@ -46,7 +46,20 @@ export interface ProviderBudgetUsage extends Omit<QuotaUsage, 'generation'> {
 
 export type ProviderQuotaUsage = Omit<QuotaUsage, 'generation'>;
 export type ProviderKey = 'gemini' | 'sightengine' | 'aiornot' | 'sapling' | 'resemble';
-export interface ProviderUsageHistory { provider: ProviderKey; unit: string; daily_limit: number; points: Array<{ date: string; used: number }>; }
+export type UsageProviderKey = ProviderKey | 'aiornot_image' | 'huggingface';
+export interface ProviderUsageHistory { provider: UsageProviderKey; unit: string; daily_limit: number; points: Array<{ date: string; used: number }>; }
+export interface ProviderBudgetPeriod { used: number; limit: number; remaining: number; }
+export interface ProviderBudgetMetric { unit: string; daily: ProviderBudgetPeriod | null; monthly: ProviderBudgetPeriod | null; }
+export interface ProviderBudgetOverview {
+  provider: ProviderKey | 'huggingface'; source: 'yav_internal'; unit: string;
+  daily: ProviderBudgetPeriod | null; monthly: ProviderBudgetPeriod | null;
+  metrics?: ProviderBudgetMetric[];
+}
+export interface ProviderExternalUsage {
+  provider: ProviderKey | 'huggingface'; source: 'provider'; status: 'ok' | 'unavailable' | 'error' | 'timeout';
+  reason?: string; unit?: string; metric_scope?: string; usage?: unknown; quota?: unknown; remaining?: unknown;
+  reporting?: Record<string, number | null>; billing?: Record<string, string>;
+}
 
 export interface AdminUserDetails {
   user_id: string;
@@ -94,6 +107,8 @@ export const adminApi = {
   setSubscription: (targetUserId: string, subscription: Subscription) => adminCall({ action: 'admin_set_subscription', targetUserId, subscription }),
   setOverrides: (targetUserId: string, overrides: Partial<Record<QuotaKey, number>>) => adminCall({ action: 'admin_set_quota_overrides', targetUserId, overrides }),
   setProviderOverrides: (targetUserId: string, overrides: Partial<Record<ProviderKey, number>>) => adminCall({ action: 'admin_set_provider_quota_overrides', targetUserId, overrides }),
-  getProviderUsageHistory: (provider: ProviderKey, days: 7 | 30 | 90): Promise<ProviderUsageHistory> => adminCall<ProviderUsageHistory>({ action: 'admin_provider_usage_history', provider, days }),
+  getProviderUsageHistory: (provider: UsageProviderKey, days: 7 | 30 | 90): Promise<ProviderUsageHistory> => adminCall<ProviderUsageHistory>({ action: 'admin_provider_usage_history', provider, days }),
+  getProviderBudgetOverview: () => adminCall<{ providers: ProviderBudgetOverview[] }>({ action: 'admin_get_provider_budget_overview' }),
+  getProviderExternalUsage: () => adminCall<{ providers: ProviderExternalUsage[] }>({ action: 'admin_get_provider_external_usage' }),
   resetUsage: (targetUserId: string, quotaKey: QuotaKey) => adminCall({ action: 'admin_reset_user_quota_usage', targetUserId, quotaKey, idempotencyKey: crypto.randomUUID() }),
 };

@@ -840,9 +840,24 @@ def _provider_plan(
             _dimension("global_sightengine_monthly", "global", month, units, settings.global_sightengine_monthly, *unavailable),
         ]
     elif provider == "aiornot":
+        # Kept only for reading pre-migration counters.  New requests use
+        # ``aiornot_text`` or ``aiornot_image`` below.
         items = [
             _dimension("global_aiornot_words_daily", "global", day, units, settings.global_aiornot_words_daily, *unavailable),
             _dimension("global_aiornot_words_monthly", "global", month, units, settings.global_aiornot_words_monthly, *unavailable),
+        ]
+    elif provider == "aiornot_text":
+        items = [
+            _dimension("global_aiornot_text_words_daily", "global", day, units, settings.global_aiornot_text_words_daily, *unavailable),
+            _dimension("global_aiornot_text_words_monthly", "global", month, units, settings.global_aiornot_text_words_monthly, *unavailable),
+        ]
+    elif provider == "aiornot_image":
+        # Do not re-use the historical word dimensions for an image request:
+        # their values have a different unit and are not authoritative image
+        # telemetry.
+        items = [
+            _dimension("global_aiornot_image_daily", "global", day, units, settings.global_aiornot_image_daily, *unavailable),
+            _dimension("global_aiornot_image_monthly", "global", month, units, settings.global_aiornot_image_monthly, *unavailable),
         ]
     elif provider == "sapling":
         items = [
@@ -877,14 +892,17 @@ def _provider_plan(
         ]
     else:
         items = []
-    individual_limit = (provider_overrides or {}).get(provider)
+    # Existing individual AI or Not limits are word-based and can continue to
+    # govern text.  They must never be silently applied to image checks.
+    quota_provider = "aiornot" if provider == "aiornot_text" else provider
+    individual_limit = (provider_overrides or {}).get(quota_provider)
     if individual_limit is not None and (workspace_id or user_id):
         if isinstance(individual_limit, bool) or not isinstance(individual_limit, int) or individual_limit < 1:
             raise RateLimitError("rate_limit_unavailable", "Сервис временно недоступен. Попробуйте позже.", 503)
         month = _window(now, "month")
         is_workspace_limit = workspace_id is not None
         items.append(_dimension(
-            f"{'workspace' if is_workspace_limit else 'user'}_provider_{provider}_monthly",
+            f"{'workspace' if is_workspace_limit else 'user'}_provider_{quota_provider}_monthly",
             workspace_id if is_workspace_limit else user_id,
             month,
             units,
@@ -984,7 +1002,7 @@ def build_admission_plan(
             # every normal text request has exactly one Gemini credibility call.
             words = len(text.strip().split())
             if len(text.strip()) >= 250 and words >= 64:
-                provider_units.append(("aiornot", words))
+                provider_units.append(("aiornot_text", words))
             provider_units.append(("gemini", 1 if provider_units else 2))
     elif kind == MediaType.IMAGE:
         provider_units.append(("sightengine", 1))

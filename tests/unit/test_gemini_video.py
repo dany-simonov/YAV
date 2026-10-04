@@ -227,8 +227,10 @@ async def test_gemini_rejects_invalid_structured_response_and_still_cleans_up():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 500, 503])
-async def test_gemini_429_and_5xx_are_typed_as_temporary_provider_failures(status):
+@pytest.mark.parametrize(
+    ("status", "kind"), [(429, "rate_limited"), (500, "unavailable"), (503, "unavailable")]
+)
+async def test_gemini_429_and_5xx_are_typed_as_temporary_provider_failures(status, kind):
     client = _client(posts=[_response(status)])
     config = _configured_gemini()
     with config[0], config[1], config[2], patch("adapters.gemini_video.httpx.AsyncClient", return_value=client), pytest.raises(
@@ -236,7 +238,7 @@ async def test_gemini_429_and_5xx_are_typed_as_temporary_provider_failures(statu
     ) as raised:
         await GeminiVideoAdapter().analyze(VIDEO)
 
-    assert (raised.value.service, raised.value.kind) == ("gemini", "unavailable")
+    assert (raised.value.service, raised.value.kind) == ("gemini", kind)
 
 
 @pytest.mark.asyncio

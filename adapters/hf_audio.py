@@ -18,13 +18,18 @@ from src.provider_protection import admit_provider_operation
 logger = logging.getLogger(__name__)
 MAX_CONVERTED_WAV_BYTES = 120 * 1024 * 1024
 
-MODEL_URL = "https://api-inference.huggingface.co/models/mo-gg/wav2vec2-large-xlsr-deepfake-detection"
+MODEL_ID = "mo-gg/wav2vec2-large-xlsr-deepfake-detection"
+MODEL_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
 MAX_RETRIES = 2
 COLD_START_DELAY = 10
 
 
 class HFAudioAdapter(BaseAdapter):
     async def analyze(self, data: bytes) -> AnalysisResult:
+        if not settings.hf_api_token:
+            raise ProviderInfrastructureError(
+                "huggingface", "config", stage="config", reason="api_key_missing"
+            )
         # Ensure WAV format (convert OGG if needed)
         wav_data = data
         if data[:4] == b"OggS":
@@ -60,10 +65,12 @@ class HFAudioAdapter(BaseAdapter):
             except httpx.TransportError as exc:
                 raise ProviderInfrastructureError("huggingface", "transport") from exc
 
+            if response.status_code in (401, 403):
+                raise ExternalAPIError("huggingface", "auth_error", status_code=response.status_code)
+            if response.status_code == 429:
+                raise ExternalAPIError("huggingface", "rate_limit", status_code=429)
             if response.status_code >= 500:
                 raise ProviderInfrastructureError("huggingface", "unavailable")
-            if response.status_code == 429:
-                raise ExternalAPIError("huggingface", "rate_limit")
             if response.status_code >= 400:
                 raise ExternalAPIError("huggingface", "request_error")
 
@@ -83,7 +90,9 @@ class HFAudioAdapter(BaseAdapter):
         if not isinstance(body, list) or not body or len(body) > 100:
             raise ProviderInfrastructureError("huggingface", "invalid_response")
 
-        # Expected labels: "spoof" (FAKE) / "bonafide" (REAL)
+        # This selected model's documented output labels are `spoof` and
+        # `bonafide`; reject any other label rather than assigning semantics
+        # based on its spelling or score.
         candidates: list[tuple[str, float]] = []
         for item in body:
             if not isinstance(item, dict) or not isinstance(item.get("label"), str):
@@ -96,15 +105,12 @@ class HFAudioAdapter(BaseAdapter):
             raise ProviderInfrastructureError("huggingface", "invalid_response")
         label, score = max(candidates, key=lambda item: item[1])
 
-        if score > 0.7:
-            if label == "spoof":
-                verdict = Verdict.FAKE
-            elif label == "bonafide":
-                verdict = Verdict.REAL
-            else:
-                verdict = Verdict.UNCERTAIN
+        if label == "spoof":
+            verdict = Verdict.FAKE
+        elif label == "bonafide":
+            verdict = Verdict.REAL
         else:
-            verdict = Verdict.UNCERTAIN
+            raise ProviderInfrastructureError("huggingface", "invalid_response")
 
         explanation = f"HuggingFace Audio: {label} с уверенностью {round(score * 100)}%"
 
@@ -118,11 +124,15 @@ class HFAudioAdapter(BaseAdapter):
             ),
             ProviderEvidence(
                 provider="huggingface",
-                model="audio-deepfake-classifier",
+                model=MODEL_ID,
                 raw_score=score,
                 score_kind=ScoreKind.CLASS_CONFIDENCE,
                 predicted_label=label,
-                safe_details={"score_field": "top_label_score"},
+                safe_details={
+                    "score_field": "top_label_score",
+                    "raw_label": label,
+                    "raw_label_score": score,
+                },
             ),
             use_decision_based_authenticity_index=True,
         )

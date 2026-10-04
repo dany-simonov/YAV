@@ -83,7 +83,9 @@ class GeminiVideoAdapter(BaseAdapter):
     def _raise_for_status(cls, response: httpx.Response, operation: str) -> None:
         if response.status_code < 400:
             return
-        if response.status_code == 429 or response.status_code >= 500:
+        if response.status_code == 429:
+            raise ProviderInfrastructureError(cls.PROVIDER, "rate_limited", status_code=response.status_code)
+        if response.status_code >= 500:
             raise ProviderInfrastructureError(cls.PROVIDER, "unavailable")
         message, google_status, google_code = "", None, None
         try:
@@ -100,7 +102,8 @@ class GeminiVideoAdapter(BaseAdapter):
                     google_code = raw_code
         except (AttributeError, TypeError, ValueError):
             pass
-        raise ExternalAPIError(cls.PROVIDER, "request_error", status_code=response.status_code,
+        detail = "auth_error" if response.status_code in {401, 403} else "request_error"
+        raise ExternalAPIError(cls.PROVIDER, detail, status_code=response.status_code,
             provider_message=message or None, operation=operation, upstream_status=google_status, upstream_code=google_code)
 
     async def _request(self, operation: str, method: str, client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:

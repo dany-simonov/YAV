@@ -5,6 +5,7 @@ import os
 from typing import Callable
 
 from adapters.aiornot_text import AIOrNotTextAdapter
+from adapters.aiornot_image import AIOrNotImageAdapter
 from adapters.gemini_text import GeminiTextAdapter
 from adapters.hf_audio import HFAudioAdapter
 from adapters.hf_image import HFImageAdapter
@@ -52,7 +53,7 @@ EXTENSION_MAP: dict[str, MediaType] = {
 
 
 def _merge_results(primary: AnalysisResult, fallback: AnalysisResult) -> AnalysisResult:
-    """Resolve two UNCERTAIN audio results without blending incompatible scores."""
+    """Keep a real primary score; never fabricate a blended uncertain score."""
     if fallback.verdict != Verdict.UNCERTAIN:
         return fallback
 
@@ -61,16 +62,10 @@ def _merge_results(primary: AnalysisResult, fallback: AnalysisResult) -> Analysi
         for result in (primary, fallback)
         if result.provider_evidence is not None
     ]
-    return AnalysisResult(
-        verdict=Verdict.UNCERTAIN,
-        # AnalysisResult keeps the legacy float field mandatory.  0.5 is the
-        # established UNCERTAIN sentinel, not a combined provider score.
-        confidence=0.5,
-        model_used=primary.model_used,
-        explanation=f"{primary.explanation}\n---\nFallback: {fallback.explanation}",
-        media_type=primary.media_type,
-        semantics_version=2,
-        component_evidence=components or None,
+    return primary.model_copy(
+        update={
+            "component_evidence": components or None,
+        }
     )
 
 
@@ -118,7 +113,10 @@ class MediaRouter:
                 # Sightengine primary and must take the same HF fallback path
                 # as its intentional provider-level 4xx fallback semantics.
                 except (ExternalAPIError, ProviderInfrastructureError):
-                    return await HFImageAdapter().analyze(file_bytes)
+                    try:
+                        return await AIOrNotImageAdapter().analyze(file_bytes)
+                    except (ExternalAPIError, ProviderInfrastructureError):
+                        return await HFImageAdapter().analyze(file_bytes)
 
             case MediaType.AUDIO:
                 try:

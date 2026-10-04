@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     global_sightengine_monthly: int = 1500
     global_aiornot_words_daily: int = 20_000
     global_aiornot_words_monthly: int = 600_000
+    # Legacy mixed rows (pre provider-usage migration).  New text counters
+    # deliberately use the explicit ``text_words`` dimensions below.
+    global_aiornot_text_words_daily: int = 20_000
+    global_aiornot_text_words_monthly: int = 600_000
+    # Image checks are a distinct paid unit from AI or Not text words.  Keep
+    # their server-side budget separate so the admin overview never presents
+    # a mixed counter as a word count.
+    global_aiornot_image_daily: int = 50
+    global_aiornot_image_monthly: int = 1_500
     global_sapling_chars_daily: int = 20_000
     global_sapling_chars_monthly: int = 120_000
     # Resemble and HuggingFace are operation-priced external inference

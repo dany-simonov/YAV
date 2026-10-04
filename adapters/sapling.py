@@ -27,23 +27,8 @@ class SaplingAdapter(BaseAdapter):
     async def analyze(self, data: bytes) -> AnalysisResult:
         text = data.decode("utf-8", errors="replace").strip()
 
-        if len(text) < MIN_TEXT_LENGTH:
-            return AnalysisResult(
-                verdict=Verdict.UNCERTAIN,
-                confidence=0.0,
-                model_used=ModelUsed.SAPLING,
-                explanation="Текст слишком короткий для анализа.",
-                media_type=MediaType.TEXT,
-            )
-
-        if len(text) > MAX_TEXT_LENGTH:
-            return AnalysisResult(
-                verdict=Verdict.UNCERTAIN,
-                confidence=0.0,
-                model_used=ModelUsed.SAPLING,
-                explanation="Текст превышает лимит в 10 000 символов.",
-                media_type=MediaType.TEXT,
-            )
+        if len(text) < MIN_TEXT_LENGTH or len(text) > MAX_TEXT_LENGTH:
+            raise ExternalAPIError("sapling", "input_invalid")
 
         if not settings.sapling_api_key:
             raise ProviderInfrastructureError(
@@ -65,10 +50,10 @@ class SaplingAdapter(BaseAdapter):
         except httpx.TransportError as exc:
             raise ProviderInfrastructureError("sapling", "transport", stage="request") from exc
 
+        if response.status_code in (401, 403):
+            raise ExternalAPIError("sapling", "auth_error", status_code=response.status_code)
         if response.status_code == 429:
-            raise ProviderInfrastructureError(
-                "sapling", "unavailable", stage="request", status_code=429
-            )
+            raise ExternalAPIError("sapling", "rate_limit", status_code=429)
         if response.status_code >= 500:
             raise ProviderInfrastructureError(
                 "sapling", "unavailable", stage="request", status_code=response.status_code
@@ -83,6 +68,11 @@ class SaplingAdapter(BaseAdapter):
             raise ProviderInfrastructureError("sapling", "invalid_response", stage="response")
         try:
             score = normalize_confidence(body.get("score"))
+            ai_fraction = (
+                normalize_confidence(body["ai_fraction"])
+                if body.get("ai_fraction") is not None
+                else None
+            )
         except ValueError as exc:
             raise ProviderInfrastructureError("sapling", "invalid_response", stage="response") from exc
         sentence_scores = body.get("sentence_scores", [])
@@ -132,6 +122,14 @@ class SaplingAdapter(BaseAdapter):
                 raw_score=score,
                 score_kind=ScoreKind.AI_PROBABILITY,
                 predicted_label=verdict.value,
-                safe_details={"score_field": "score"},
+                safe_details={
+                    "score_field": "score",
+                    **({"ai_fraction": ai_fraction} if ai_fraction is not None else {}),
+                    **(
+                        {"sentence_scores_count": min(len(sentence_scores), 100)}
+                        if sentence_scores
+                        else {}
+                    ),
+                },
             ),
         )

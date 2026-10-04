@@ -143,13 +143,16 @@ async def test_5xx_is_typed_unavailable(status):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [400, 401, 403, 422])
-async def test_ordinary_4xx_preserves_status_without_becoming_infrastructure_failure(status):
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [(400, "request_error"), (401, "auth_error"), (403, "auth_error"), (422, "request_error")],
+)
+async def test_ordinary_4xx_preserves_status_without_becoming_infrastructure_failure(status, detail):
     with patch("adapters.aiornot_text.httpx.AsyncClient", return_value=_client(response=_response(status))):
         with pytest.raises(ExternalAPIError) as raised:
             await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
     assert not isinstance(raised.value, ProviderInfrastructureError)
-    assert raised.value.detail == "request_error"
+    assert raised.value.detail == detail
     assert raised.value.status_code == status
 
 
@@ -169,14 +172,11 @@ async def test_4xx_provider_message_is_bounded_and_redacts_sensitive_values():
     ):
         with pytest.raises(ExternalAPIError) as raised:
             await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
-    message = raised.value.provider_message
-    assert message is not None
-    assert len(message) <= 300
-    assert "\r" not in message and "\n" not in message
-    assert raw_token not in message
-    assert raw_key not in message
-    assert "Authorization=[REDACTED]" in message
-    assert "AIORNOT_API_KEY=[REDACTED]" in message
+    # Authentication responses are not rendered at all: a provider must not
+    # be able to echo a token into application diagnostics.
+    assert raised.value.provider_message is None
+    assert raw_token not in str(raised.value)
+    assert raw_key not in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -323,7 +323,7 @@ async def test_boundary_failure_does_not_admit_gemini_provider_operation():
                 await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
     finally:
         end_provider_budget(tokens)
-    assert admitted == ["aiornot"]
+    assert admitted == ["aiornot_text"]
 
 
 @pytest.mark.asyncio
@@ -333,9 +333,11 @@ async def test_429_is_typed_temporary_unavailability_without_raw_error_leak():
         "adapters.aiornot_text.httpx.AsyncClient",
         return_value=_client(response=_response(429, {"detail": raw_error})),
     ):
-        with pytest.raises(ProviderInfrastructureError) as raised:
+        with pytest.raises(ExternalAPIError) as raised:
             await AIOrNotTextAdapter().analyze(ELIGIBLE_TEXT.encode())
-    assert str(raised.value) == "aiornot: unavailable"
+    assert (raised.value.service, raised.value.detail, raised.value.status_code) == (
+        "aiornot", "rate_limit", 429
+    )
     assert raw_error not in str(raised.value)
 
 
@@ -347,10 +349,12 @@ async def test_429_propagates_without_gemini_fallback():
     ), patch(
         "router.media_router.GeminiTextAdapter.analyze", new=AsyncMock()
     ) as gemini:
-        with pytest.raises(ProviderInfrastructureError) as raised:
+        with pytest.raises(ExternalAPIError) as raised:
             await MediaRouter().route(MediaType.TEXT, b"", ELIGIBLE_TEXT)
     gemini.assert_not_awaited()
-    assert (raised.value.service, raised.value.kind) == ("aiornot", "unavailable")
+    assert (raised.value.service, raised.value.detail, raised.value.status_code) == (
+        "aiornot", "rate_limit", 429
+    )
 
 
 @pytest.mark.asyncio
@@ -414,7 +418,7 @@ async def test_guard_denial_prevents_outbound_http():
 @pytest.mark.asyncio
 async def test_guard_denial_propagates_without_gemini_fallback():
     async def guard(provider):
-        if provider == "aiornot":
+        if provider == "aiornot_text":
             raise RateLimitError("provider_temporarily_unavailable", "safe", 503)
 
     tokens = begin_provider_budget(guard)

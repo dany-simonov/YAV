@@ -210,15 +210,17 @@ async def test_invalid_provider_response_is_typed_and_does_not_leak_input(body):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 500, 503])
-async def test_429_and_5xx_are_typed_as_temporary_provider_failures(status):
+@pytest.mark.parametrize(
+    ("status", "kind"), [(429, "rate_limited"), (500, "unavailable"), (503, "unavailable")]
+)
+async def test_429_and_5xx_are_typed_as_temporary_provider_failures(status, kind):
     client = _client(response=_response(status))
     config = _configured_gemini()
     with config[0], config[1], config[2], patch("adapters.gemini_text.httpx.AsyncClient", return_value=client):
         with pytest.raises(ProviderInfrastructureError) as raised:
             await GeminiTextAdapter().analyze(b"test")
     assert (raised.value.service, raised.value.kind, raised.value.status_code) == (
-        "gemini", "unavailable", status
+        "gemini", kind, status
     )
 
 

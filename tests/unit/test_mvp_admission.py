@@ -50,10 +50,10 @@ def test_long_text_uses_actual_aiornot_words_and_one_gemini_operation(monkeypatc
     text = "word " * 64
     plan = _plan(monkeypatch, text=text)
     dimensions = {item.dimension: item for item in plan.dimensions}
-    assert dimensions["global_aiornot_words_daily"].units == 64
-    assert dimensions["global_aiornot_words_monthly"].units == 64
+    assert dimensions["global_aiornot_text_words_daily"].units == 64
+    assert dimensions["global_aiornot_text_words_monthly"].units == 64
     assert dimensions["global_gemini_daily"].units == 1
-    assert plan.units_for("aiornot") == 64
+    assert plan.units_for("aiornot_text") == 64
     assert plan.units_for("gemini") == 1
 
 

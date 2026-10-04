@@ -198,6 +198,9 @@ async def test_provider_guard_denial_with_successful_fallback_finalizes_once():
 
     with patch("src.main.MediaRouter.route", new=image_route), patch(
         "router.media_router.SightengineAdapter.analyze", new=primary
+    ), patch(
+        "router.media_router.AIOrNotImageAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "unavailable")),
     ), patch("router.media_router.HFImageAdapter.analyze", new=fallback):
         await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
 
@@ -324,6 +327,9 @@ async def test_sightengine_technical_failure_then_hf_success_consumes_quota_once
     with patch("src.main.MediaRouter.route", new=image_route), patch(
         "router.media_router.SightengineAdapter.analyze",
         new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "unavailable")),
+    ), patch(
+        "router.media_router.AIOrNotImageAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "unavailable")),
     ), patch("router.media_router.HFImageAdapter.analyze", new=AsyncMock(return_value=image_result)) as hf:
         await _analyze(TextAnalyzeRequest(text="x" * 50), "jwt", quota_store=store, user_id="user")
     assert store.transitions == ["consumed"]
@@ -341,6 +347,9 @@ async def test_sightengine_and_hf_technical_failures_refund_once():
     with patch("src.main.MediaRouter.route", new=image_route), patch(
         "router.media_router.SightengineAdapter.analyze",
         new=AsyncMock(side_effect=ProviderInfrastructureError("sightengine", "timeout")),
+    ), patch(
+        "router.media_router.AIOrNotImageAdapter.analyze",
+        new=AsyncMock(side_effect=ProviderInfrastructureError("aiornot", "unavailable")),
     ), patch(
         "router.media_router.HFImageAdapter.analyze",
         new=AsyncMock(side_effect=ProviderInfrastructureError("huggingface", "unavailable")),

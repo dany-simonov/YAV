@@ -93,6 +93,10 @@ def _row_id(namespace: str, *parts: str) -> str:
 class AppwriteWorkspaceStore:
     """Function-key-only workspace operations with transaction-based acceptance."""
 
+    TRANSACTION_TTL_SECONDS = 60
+    _MIN_TRANSACTION_TTL_SECONDS = 60
+    _MAX_TRANSACTION_TTL_SECONDS = 3600
+
     def __init__(
         self,
         api_key: str,
@@ -132,6 +136,7 @@ class AppwriteWorkspaceStore:
             and re.fullmatch(r"[a-f0-9]{32}", correlation_id)
             else uuid.uuid4().hex
         )
+        self.transaction_ttl_seconds = self._validated_transaction_ttl()
         if not all(
             (
                 self.endpoint,
@@ -158,6 +163,21 @@ class AppwriteWorkspaceStore:
         return WorkspaceError(
             "workspace_unavailable", "Workspace временно недоступен.", 503
         )
+
+    @classmethod
+    def _validated_transaction_ttl(cls) -> int:
+        ttl = cls.TRANSACTION_TTL_SECONDS
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or not (
+                cls._MIN_TRANSACTION_TTL_SECONDS
+                <= ttl
+                <= cls._MAX_TRANSACTION_TTL_SECONDS
+            )
+        ):
+            raise cls._unavailable()
+        return ttl
 
     def _observe(self, message: str, *, error: bool = False) -> None:
         sink = self._diagnostic_error_log if error else self._diagnostic_log
@@ -946,7 +966,7 @@ class AppwriteWorkspaceStore:
             f"{self.endpoint}/tablesdb/transactions",
             operation="workspace.transaction.create",
             headers=self._headers,
-            json={"ttl": 30},
+            json={"ttl": self.transaction_ttl_seconds},
         )
         if response.status_code not in (200, 201):
             raise self._unavailable()

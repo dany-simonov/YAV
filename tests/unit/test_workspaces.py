@@ -72,6 +72,55 @@ async def test_workspace_http_timeouts_use_one_unavailable_contract(monkeypatch,
     )
 
 
+@pytest.mark.parametrize("ttl", [59, 3601])
+def test_workspace_rejects_out_of_range_transaction_ttl_before_http(monkeypatch, ttl):
+    monkeypatch.setattr(AppwriteWorkspaceStore, "TRANSACTION_TTL_SECONDS", ttl)
+    client = _http_client()
+
+    with patch("src.workspaces.httpx.AsyncClient", return_value=client), pytest.raises(
+        WorkspaceError
+    ) as raised:
+        _store(monkeypatch)
+
+    assert (raised.value.code, raised.value.status_code) == (
+        "workspace_unavailable",
+        503,
+    )
+    client.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ttl", [60, 3600])
+async def test_workspace_transaction_ttl_uses_valid_appwrite_value(monkeypatch, ttl):
+    monkeypatch.setattr(AppwriteWorkspaceStore, "TRANSACTION_TTL_SECONDS", ttl)
+    created = MagicMock(status_code=201)
+    created.json.return_value = {"$id": "transaction-1"}
+    client = _http_client(post=created)
+    store = _store(monkeypatch)
+
+    with patch("src.workspaces.httpx.AsyncClient", return_value=client):
+        assert await store._create_transaction() == "transaction-1"
+
+    assert client.post.await_args.kwargs["json"] == {"ttl": ttl}
+
+
+@pytest.mark.asyncio
+async def test_workspace_create_uses_valid_transaction_ttl(monkeypatch):
+    created = MagicMock(status_code=201)
+    created.json.return_value = {"$id": "transaction-1"}
+    staged = MagicMock(status_code=201)
+    committed = MagicMock(status_code=200)
+    client = _http_client(patch=committed)
+    client.post = AsyncMock(side_effect=[created, staged, staged])
+    store = _store(monkeypatch)
+
+    with patch("src.workspaces.httpx.AsyncClient", return_value=client):
+        result = await store.create_workspace("owner-1", "Команда")
+
+    assert result["role"] == "owner"
+    assert client.post.await_args_list[0].kwargs["json"] == {"ttl": 60}
+
+
 @pytest.mark.asyncio
 async def test_workspace_5xx_and_non_json_error_response_are_controlled(monkeypatch):
     response = MagicMock(status_code=500)

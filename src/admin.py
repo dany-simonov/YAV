@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _MAX_PAGE_SIZE = 100
 _MAX_AUDIT_VALUE_BYTES = 1024
 _MAX_IDEMPOTENCY_KEY_LENGTH = 64
+_APPWRITE_TRANSACTION_TTL_SECONDS = 60
 _SAFE_APPWRITE_TOKEN = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 _SAFE_APPWRITE_MESSAGE = re.compile(
     r"(?i)(?:authorization|x-appwrite-key|cookie|token|jwt|password|api[_-]?key)\s*[:=]\s*(?:bearer\s+)?\S+"
@@ -1004,7 +1005,9 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             async with httpx.AsyncClient(timeout=10.0) as client:
                 for _attempt in range(3):
                     created = await client.post(
-                        transactions_url, headers=self._headers, json={"ttl": 30}
+                        transactions_url,
+                        headers=self._headers,
+                        json={"ttl": _APPWRITE_TRANSACTION_TTL_SECONDS},
                     )
                     if created.status_code not in (200, 201):
                         raise QuotaResetConflictError(

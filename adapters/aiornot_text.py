@@ -132,10 +132,12 @@ class AIOrNotTextAdapter(BaseAdapter):
         if not self.is_eligible(text):
             raise ValueError("AI or Not text input is not eligible")
         if not settings.aiornot_api_key:
-            raise ProviderInfrastructureError("aiornot", "unavailable")
+            raise ProviderInfrastructureError(
+                "aiornot", "config", stage="config", reason="api_key_missing"
+            )
 
         try:
-            await admit_provider_operation("aiornot", len(text.split()))
+            await admit_provider_operation("aiornot_text", len(text.split()))
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
                 response = await client.post(
                     self.URL,
@@ -147,10 +149,12 @@ class AIOrNotTextAdapter(BaseAdapter):
         except httpx.TransportError as exc:
             raise ProviderInfrastructureError("aiornot", "transport") from exc
 
+        if response.status_code in (401, 403):
+            raise ExternalAPIError("aiornot", "auth_error", status_code=response.status_code)
         if response.status_code >= 500:
             raise ProviderInfrastructureError("aiornot", "unavailable")
         if response.status_code == 429:
-            raise ProviderInfrastructureError("aiornot", "unavailable")
+            raise ExternalAPIError("aiornot", "rate_limit", status_code=429)
         if response.status_code >= 400:
             content_type, response_length, response_keys, response_paths, provider_message = (
                 self._safe_error_diagnostics(response, text)

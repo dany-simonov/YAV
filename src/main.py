@@ -86,6 +86,7 @@ from src.workspaces import (  # noqa: E402
     WorkspaceError,
 )
 from src.provider_protection import begin_provider_budget, end_provider_budget  # noqa: E402
+from src.provider_telemetry import begin_provider_telemetry, end_provider_telemetry  # noqa: E402
 from src.execution_deadline import (  # noqa: E402
     ExecutionDeadline,
     ExecutionDeadlineExceeded,
@@ -107,6 +108,8 @@ from src.validation import (  # noqa: E402
     AdminListUsersRequest,
     AdminListAuditEventsRequest,
     AdminProviderUsageHistoryRequest,
+    AdminGetProviderBudgetOverviewRequest,
+    AdminGetProviderExternalUsageRequest,
     AdminResetUserQuotaUsageRequest,
     AdminResetAllUserUsageRequest,
     GetMySubscriptionRequest,
@@ -638,7 +641,7 @@ def _unavailable_ai_result(*, complex_mode: bool = False) -> AnalysisResult:
     """Represent an independently unavailable AI-origin branch without inventing a score."""
     return AnalysisResult(
         verdict=Verdict.UNCERTAIN,
-        confidence=0.5,
+        confidence=None,
         model_used=ModelUsed.FALLBACK_UNCERTAIN,
         explanation="Проверка признаков AI-генерации временно недоступна.",
         media_type=MediaType.TEXT,
@@ -1055,7 +1058,7 @@ async def _analyze_complex_source(
     )
     return AnalysisResult(
         verdict=primary.verdict,
-        confidence=primary.confidence or 0.5,
+        confidence=primary.confidence,
         model_used=next(
             (model for model in ModelUsed if model.value == primary.model),
             ModelUsed.SIGHTENGINE,
@@ -1558,6 +1561,7 @@ async def _execute_request(
         if execution_deadline is not None
         else None
     )
+    telemetry_token = begin_provider_telemetry(api_key) if is_analyze else None
     try:
         try:
             account = await _within_deadline(
@@ -1741,6 +1745,8 @@ async def _execute_request(
                 AdminResetAllUserUsageRequest,
                 AdminListAuditEventsRequest,
                 AdminProviderUsageHistoryRequest,
+                AdminGetProviderBudgetOverviewRequest,
+                AdminGetProviderExternalUsageRequest,
             ),
         ):
             # The target is client input, but authority comes exclusively from
@@ -1768,6 +1774,10 @@ async def _execute_request(
                     return await _within_deadline(
                         admin_store.provider_usage_history(request.provider, request.days)
                     )
+                if isinstance(request, AdminGetProviderBudgetOverviewRequest):
+                    return await _within_deadline(admin_store.provider_budget_overview())
+                if isinstance(request, AdminGetProviderExternalUsageRequest):
+                    return await _within_deadline(admin_store.provider_external_usage())
                 if isinstance(request, AdminGetUserPolicyRequest):
                     return await _within_deadline(
                         admin_store.get_user_details(request.target_user_id)
@@ -1974,6 +1984,8 @@ async def _execute_request(
             execution_deadline.remaining_root_time()
         return result
     finally:
+        if telemetry_token is not None:
+            end_provider_telemetry(telemetry_token)
         if deadline_token is not None:
             reset_execution_deadline(deadline_token)
 

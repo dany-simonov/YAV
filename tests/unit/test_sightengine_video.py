@@ -85,12 +85,17 @@ async def test_timeout_and_transport_are_typed(error, kind):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 500, 502, 503])
-async def test_temporary_capacity_and_5xx_are_typed_unavailable(status):
+@pytest.mark.parametrize(("status", "error_type", "kind"), [
+    (429, ExternalAPIError, "rate_limit"),
+    (500, ProviderInfrastructureError, "unavailable"),
+    (502, ProviderInfrastructureError, "unavailable"),
+    (503, ProviderInfrastructureError, "unavailable"),
+])
+async def test_temporary_capacity_and_5xx_are_typed(status, error_type, kind):
     with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=_client(response=_response(status))):
-        with pytest.raises(ProviderInfrastructureError) as raised:
+        with pytest.raises(error_type) as raised:
             await SightengineVideoAdapter().analyze(VIDEO)
-    assert raised.value.kind == "unavailable"
+    assert raised.value.detail == kind
 
 
 @pytest.mark.asyncio
@@ -116,7 +121,8 @@ async def test_4xx_diagnostic_omits_secret_shaped_provider_message():
     with patch("adapters.sightengine_video.httpx.AsyncClient", return_value=_client(response=_response(401, body))):
         with pytest.raises(ExternalAPIError) as raised:
             await SightengineVideoAdapter().analyze(VIDEO)
-    assert raised.value.provider_message == "code=invalid_credentials"
+    assert raised.value.detail == "auth_error"
+    assert raised.value.provider_message is None
 
 
 @pytest.mark.asyncio

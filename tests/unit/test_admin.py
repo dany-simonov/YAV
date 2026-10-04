@@ -78,6 +78,7 @@ async def test_admin_list_is_paginated_and_returns_lightweight_summaries(monkeyp
         "email_verified": True,
         "subscription": "pro",
         "has_quota_overrides": True,
+        "has_provider_quota_overrides": False,
         "created_at": "2026-01-02T00:00:00+00:00",
         "updated_at": "2026-01-03T00:00:00+00:00",
     }
@@ -114,6 +115,8 @@ async def test_admin_detail_separates_user_usage_from_ip_and_provider_scopes(
             return _response(404)
         if "/rate_limits/" in url:
             return _response(404)
+        if url.endswith("/checks/rows"):
+            return _response(200, {"rows": []})
         if url.endswith("/quota_reservations/rows"):
             return _response(
                 200,

@@ -15,6 +15,7 @@ import httpx
 
 from core.config import settings
 from src.rate_limit import _window
+from src.provider_external_usage import ProviderExternalUsageService
 from src.subscriptions import (
     QUOTA_KEYS,
     AppwriteSubscriptionStore,
@@ -669,13 +670,13 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
                 settings.global_sightengine_monthly,
             ),
             (
-                "aiornot_words_daily",
+                "aiornot_words_legacy_daily",
                 "global_aiornot_words_daily",
                 "day",
                 settings.global_aiornot_words_daily,
             ),
             (
-                "aiornot_words_monthly",
+                "aiornot_words_legacy_monthly",
                 "global_aiornot_words_monthly",
                 "month",
                 settings.global_aiornot_words_monthly,
@@ -741,6 +742,66 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
             }
         return quotas
 
+    async def provider_budget_overview(self) -> dict[str, Any]:
+        """Return project-wide provider counters without loading any profile.
+
+        ``rate_limits`` is the sole source here.  In particular this avoids
+        tying global telemetry to the presence or ordering of user rows.
+        """
+        now = datetime.now(timezone.utc)
+        definitions: tuple[tuple[str, str, str, str, int], ...] = (
+            ("gemini", "operations", "day", "global_gemini_daily", settings.global_gemini_operations_daily),
+            ("sightengine", "operations", "day", "global_sightengine_daily", settings.global_sightengine_daily),
+            ("sightengine", "operations", "month", "global_sightengine_monthly", settings.global_sightengine_monthly),
+            ("aiornot", "words", "day", "global_aiornot_text_words_daily", settings.global_aiornot_text_words_daily),
+            ("aiornot", "words", "month", "global_aiornot_text_words_monthly", settings.global_aiornot_text_words_monthly),
+            ("aiornot", "image_checks", "day", "global_aiornot_image_daily", settings.global_aiornot_image_daily),
+            ("aiornot", "image_checks", "month", "global_aiornot_image_monthly", settings.global_aiornot_image_monthly),
+            ("sapling", "characters", "day", "global_sapling_chars_daily", settings.global_sapling_chars_daily),
+            ("sapling", "characters", "month", "global_sapling_chars_monthly", settings.global_sapling_chars_monthly),
+            ("resemble", "operations", "day", "global_resemble_daily", settings.global_resemble_daily),
+            ("resemble", "operations", "month", "global_resemble_monthly", settings.global_resemble_monthly),
+            ("huggingface", "operations", "day", "global_huggingface_daily", settings.global_huggingface_daily),
+            ("huggingface", "operations", "month", "global_huggingface_monthly", settings.global_huggingface_monthly),
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for provider, unit, period, dimension, limit in definitions:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise AdminPersistenceError("provider budget configuration is invalid")
+            window = _window(now, period)
+            counter = await self._get_optional_row(
+                self._rate_limits_url,
+                self._counter_row_id(dimension, "global", window.key),
+            )
+            entry = grouped.setdefault(
+                provider,
+                {
+                    "provider": provider,
+                    "source": "yav_internal",
+                    "unit": "multiple" if provider == "aiornot" else unit,
+                    "daily": None,
+                    "monthly": None,
+                    # AI or Not has two real units.  The legacy word rows are
+                    # text-only; no historical row is interpreted as image use.
+                    "metrics": [],
+                    "legacy_dimensions": ["global_aiornot_words_daily", "global_aiornot_words_monthly"] if provider == "aiornot" else [],
+                },
+            )
+            used = self._counter_used(counter)
+            value = {"used": used, "limit": limit, "remaining": max(0, limit - used)}
+            metric = next((item for item in entry["metrics"] if item["unit"] == unit), None)
+            if metric is None:
+                metric = {"unit": unit, "daily": None, "monthly": None}
+                entry["metrics"].append(metric)
+            metric["daily" if period == "day" else "monthly"] = value
+            if provider != "aiornot":
+                entry["daily" if period == "day" else "monthly"] = value
+        return {"providers": [grouped[key] for key in ("gemini", "sightengine", "aiornot", "sapling", "resemble", "huggingface")]}
+
+    async def provider_external_usage(self) -> dict[str, Any]:
+        """Read explicitly supported provider-side telemetry as an admin."""
+        return await ProviderExternalUsageService(self.api_key).get_usage()
+
     async def provider_usage_history(self, provider: str, days: int) -> dict[str, Any]:
         """Return persisted global daily counters for one provider.
 
@@ -750,9 +811,11 @@ class AppwriteAdminStore(AppwriteSubscriptionStore):
         definitions: Mapping[str, tuple[str, int, str]] = {
             "gemini": ("global_gemini_daily", settings.global_gemini_operations_daily, "операции"),
             "sightengine": ("global_sightengine_daily", settings.global_sightengine_daily, "операции"),
-            "aiornot": ("global_aiornot_words_daily", settings.global_aiornot_words_daily, "слова"),
+            "aiornot": ("global_aiornot_text_words_daily", settings.global_aiornot_text_words_daily, "слова"),
+            "aiornot_image": ("global_aiornot_image_daily", settings.global_aiornot_image_daily, "проверки изображений"),
             "sapling": ("global_sapling_chars_daily", settings.global_sapling_chars_daily, "символы"),
             "resemble": ("global_resemble_daily", settings.global_resemble_daily, "операции"),
+            "huggingface": ("global_huggingface_daily", settings.global_huggingface_daily, "операции"),
         }
         if provider not in definitions or isinstance(days, bool) or not 7 <= days <= 90:
             raise SubscriptionValidationError("invalid provider history request")

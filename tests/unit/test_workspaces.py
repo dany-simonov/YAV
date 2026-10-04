@@ -339,6 +339,7 @@ async def test_owner_can_read_only_own_workspace(monkeypatch):
                 "owner_user_id": "owner-1",
                 "member_count": 0,
                 "role": "owner",
+                "provider_quota_overrides": {},
             }
         ],
         "next_cursor": None,

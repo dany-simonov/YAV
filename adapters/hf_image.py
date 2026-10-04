@@ -19,13 +19,18 @@ from src.provider_protection import admit_provider_operation
 # Better exception handling
 logger = logging.getLogger(__name__)
 
-MODEL_URL = "https://api-inference.huggingface.co/models/dima806/deepfake-vs-real-image-detection"
+MODEL_ID = "dima806/deepfake_vs_real_image_detection"
+MODEL_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
 MAX_RETRIES = 2
 COLD_START_DELAY = 10
 
 
 class HFImageAdapter(BaseAdapter):
     async def analyze(self, data: bytes) -> AnalysisResult:
+        if not settings.hf_api_token:
+            raise ProviderInfrastructureError(
+                "huggingface", "config", stage="config", reason="api_key_missing"
+            )
         headers = {"Authorization": f"Bearer {settings.hf_api_token}"}
 
         for attempt in range(MAX_RETRIES + 1):
@@ -38,10 +43,12 @@ class HFImageAdapter(BaseAdapter):
             except httpx.TransportError as exc:
                 raise ProviderInfrastructureError("huggingface", "transport") from exc
 
+            if response.status_code in (401, 403):
+                raise ExternalAPIError("huggingface", "auth_error", status_code=response.status_code)
             if response.status_code >= 500:
                 raise ProviderInfrastructureError("huggingface", "unavailable")
             if response.status_code == 429:
-                raise ExternalAPIError("huggingface", "rate_limit")
+                raise ExternalAPIError("huggingface", "rate_limit", status_code=429)
             if response.status_code >= 400:
                 raise ExternalAPIError("huggingface", "request_error")
 
@@ -75,10 +82,11 @@ class HFImageAdapter(BaseAdapter):
             raise ProviderInfrastructureError("huggingface", "invalid_response")
         label, score = max(candidates, key=lambda item: item[1])
 
-        if score > 0.7:
-            verdict = Verdict.FAKE if label == "FAKE" else Verdict.REAL if label == "REAL" else Verdict.UNCERTAIN
-        else:
-            verdict = Verdict.UNCERTAIN
+        # This exact model declares only REAL (id 0) and FAKE (id 1).  Do not
+        # infer semantics for an arbitrary label returned by another model.
+        if label not in {"FAKE", "REAL"}:
+            raise ProviderInfrastructureError("huggingface", "invalid_response")
+        verdict = Verdict.FAKE if label == "FAKE" else Verdict.REAL
 
         explanation = f"HuggingFace Image: {label} с уверенностью {round(score * 100)}%"
 
@@ -92,11 +100,15 @@ class HFImageAdapter(BaseAdapter):
             ),
             ProviderEvidence(
                 provider="huggingface",
-                model="dima806/deepfake-vs-real-image-detection",
+                model=MODEL_ID,
                 raw_score=score,
                 score_kind=ScoreKind.CLASS_CONFIDENCE,
                 predicted_label=label,
-                safe_details={"score_field": "top_label_score"},
+                safe_details={
+                    "score_field": "top_label_score",
+                    "raw_label": label,
+                    "raw_label_score": score,
+                },
             ),
             use_decision_based_authenticity_index=True,
         )

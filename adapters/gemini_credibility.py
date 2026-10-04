@@ -127,7 +127,7 @@ issues — максимум 8; credible_points — максимум 4. Если 
             raise ProviderInfrastructureError(
                 cls.PROVIDER, "unavailable", stage="request", status_code=response.status_code
             )
-        category = "auth_configuration" if response.status_code in {401, 403} else "request_rejected"
+        category = "auth_error" if response.status_code in {401, 403} else "request_rejected"
         message, google_status, google_code = safe_gemini_error_details(response, analyzed_text=analyzed_text)
         raise ExternalAPIError(
             cls.PROVIDER,

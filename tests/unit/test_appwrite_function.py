@@ -379,7 +379,13 @@ async def test_complex_provider_limit_is_typed_and_context_is_cleaned_after_exce
         )
 
     assert (raised.value.service, raised.value.kind) == ("gemini", "capacity")
-    quota_store.admit_provider_units.assert_awaited_once_with("gemini", 1)
+    quota_store.admit_provider_units.assert_awaited_once_with(
+        "gemini",
+        1,
+        user_id="runtime-user",
+        provider_overrides={},
+        workspace_id=None,
+    )
     await admit_provider_operation("gemini")
     quota_store.admit_provider_units.assert_awaited_once()
 

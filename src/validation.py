@@ -248,8 +248,18 @@ class AdminListAuditEventsRequest(_AdminActionRequest):
 
 class AdminProviderUsageHistoryRequest(_AdminActionRequest):
     action: Literal["admin_provider_usage_history"]
-    provider: Literal["gemini", "sightengine", "aiornot", "sapling", "resemble"]
+    provider: Literal[
+        "gemini", "sightengine", "aiornot", "aiornot_image", "sapling", "resemble", "huggingface"
+    ]
     days: int = Field(default=30, ge=7, le=90)
+
+
+class AdminGetProviderBudgetOverviewRequest(_AdminActionRequest):
+    action: Literal["admin_get_provider_budget_overview"]
+
+
+class AdminGetProviderExternalUsageRequest(_AdminActionRequest):
+    action: Literal["admin_get_provider_external_usage"]
 
 
 class _WorkspaceActionRequest(_RequestModel):
@@ -478,6 +488,8 @@ ValidatedRequest = (
     | AdminResetAllUserUsageRequest
     | AdminListAuditEventsRequest
     | AdminProviderUsageHistoryRequest
+    | AdminGetProviderBudgetOverviewRequest
+    | AdminGetProviderExternalUsageRequest
     | WorkspaceCreateRequest
     | WorkspaceGetRequest
     | WorkspaceListMembersRequest
@@ -588,6 +600,10 @@ def validate_request_payload(payload: Any) -> ValidatedRequest:
         model = AdminListAuditEventsRequest
     elif action == "admin_provider_usage_history":
         model = AdminProviderUsageHistoryRequest
+    elif action == "admin_get_provider_budget_overview":
+        model = AdminGetProviderBudgetOverviewRequest
+    elif action == "admin_get_provider_external_usage":
+        model = AdminGetProviderExternalUsageRequest
     elif action == "workspace_create":
         model = WorkspaceCreateRequest
     elif action == "workspace_get":

@@ -28,6 +28,7 @@ class ModelUsed(str, Enum):
     HF_IMAGE = "hf_image_inference"
     HF_AUDIO = "hf_audio_inference"
     AIORNOT_TEXT = "aiornot_text"
+    AIORNOT_IMAGE = "aiornot_image"
     FALLBACK_UNCERTAIN = "fallback_uncertain"
     HYBRID_G4F = "g4f_hybrid"
 

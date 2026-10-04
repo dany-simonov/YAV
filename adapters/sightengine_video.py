@@ -57,6 +57,10 @@ class SightengineVideoAdapter(BaseAdapter):
         return " ".join(parts) or None
 
     async def analyze(self, data: bytes) -> AnalysisResult:
+        if not settings.sightengine_api_user or not settings.sightengine_api_secret:
+            raise ProviderInfrastructureError(
+                "sightengine", "config", stage="config", reason="api_key_missing"
+            )
         try:
             await admit_provider_operation("sightengine")
             async with httpx.AsyncClient(timeout=self.TIMEOUT) as client:
@@ -74,7 +78,11 @@ class SightengineVideoAdapter(BaseAdapter):
         except httpx.TransportError as exc:
             raise ProviderInfrastructureError("sightengine", "transport") from exc
 
-        if response.status_code >= 500 or response.status_code == 429:
+        if response.status_code in (401, 403):
+            raise ExternalAPIError("sightengine", "auth_error", status_code=response.status_code)
+        if response.status_code == 429:
+            raise ExternalAPIError("sightengine", "rate_limit", status_code=429)
+        if response.status_code >= 500:
             raise ProviderInfrastructureError("sightengine", "unavailable")
         if response.status_code >= 400:
             raise ExternalAPIError(

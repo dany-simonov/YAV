@@ -173,12 +173,15 @@ def test_unavailable_complex_ai_does_not_persist_a_sentinel_confidence():
     row = map_analysis_to_check_row(
         _canonical_result(
             verdict="UNCERTAIN",
-            confidence=0.5,
+            confidence=None,
             model_used="gemini_text_verification",
             media_type="text",
+            ai_probability=None,
+            decision_confidence=None,
             authenticity_index=None,
             analysis_mode="complex",
             ai_status="unavailable",
+            provider_evidence=None,
         ),
         "authenticated-user",
     )
